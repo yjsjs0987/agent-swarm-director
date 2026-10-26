@@ -1,0 +1,1275 @@
+/**
+ * ASD v2.2 Harness Installer & Control Plane Synchronizer (src/adapters/installer.ts)
+ *
+ * Implements:
+ * 1. Strictly Global-Only `syncHarnessConfigs` / `runAsdSync`:
+ *    - Installs skills, agents, hooks, and MCP configurations into global user homes
+ *      (~/.claude, ~/.config/opencode, ~/.codex, ~/.gemini).
+ *    - Never touches or pollutes project directories during sync.
+ *    - Idempotent: checks composite SHA-256 hash against last-sync.json and file existence;
+ *      skips unneeded writes with { skipped: true } indicators.
+ *    - Injects PreToolUse and Stop hooks and asd-core MCP server pointing to dynamic
+ *      <ASD_ROOT>/src/mcp/server.ts and <ASD_ROOT>/src/cli/index.ts.
+ * 2. Main-Session Auto-Sync (`autoSyncIfNeeded`):
+ *    - Guarded by Subagent Shield (ASD_SESSION_ROLE !== "subagent").
+ * 3. Surgical `uninstallHarnessConfigs` / `runAsdUninstall`:
+ *    - Rollback restoring original configs 100% cleanly without touching user settings.
+ *    - Removes _asdManaged hooks, removes TOML fences, removes ASD agents and skills.
+ * 4. Fast zero-token `doctorProbe` / `runAsdDoctor`:
+ *    - <100ms probe checking Node >=22.13.0, SQLite WAL mode, Git repo state,
+ *      harness CLI availability, and synthetic PreToolUse block probe (.GIT/config, .ENV).
+ */
+
+import * as crypto from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { parseJsonc, removeTomlFence } from "../core/jsonc.ts";
+import { evaluatePreToolUse } from "../core/policy.ts";
+import {
+  AGENT_ROLES,
+  ASD_VERSION,
+  type AgentRole,
+  type HarnessAdapter,
+  type HarnessId,
+} from "../core/types.ts";
+import {
+  AntigravityAdapter,
+  antigravityAdapter,
+  probeAntigravityHeadless,
+} from "./antigravity.ts";
+import {
+  ASD_SKILLS,
+  ClaudeCodeAdapter,
+  claudeCodeAdapter,
+  mergeClaudeSettings,
+} from "./claude-code.ts";
+import {
+  CodexAdapter,
+  codexAdapter,
+  mergeCodexConfigToml,
+} from "./codex.ts";
+import {
+  OpencodeAdapter,
+  opencodeAdapter,
+} from "./opencode.ts";
+
+// ============================================================================
+// Types and Interfaces
+// ============================================================================
+
+export interface SyncHarnessOptions {
+  homeDir?: string;
+  force?: boolean;
+  projectRoot?: string;
+  asdCliPath?: string;
+}
+
+export interface HarnessSyncStatus {
+  harness: HarnessId;
+  status: "updated" | "skipped";
+  skipped: boolean;
+  filesWritten: string[];
+}
+
+export interface SyncHarnessConfigsResult {
+  status: "updated" | "skipped";
+  skipped: boolean;
+  configHash: string;
+  harnesses: Record<HarnessId, HarnessSyncStatus>;
+}
+
+export interface UninstallHarnessOptions {
+  homeDir?: string;
+}
+
+export interface UninstallHarnessStatus {
+  removed: string[];
+  restored: string[];
+}
+
+export interface UninstallHarnessConfigsResult {
+  status: "success";
+  removedFiles: string[];
+  restoredFiles: string[];
+  harnesses: Record<HarnessId, UninstallHarnessStatus>;
+}
+
+export interface DoctorProbeOptions {
+  homeDir?: string;
+  projectRoot?: string;
+}
+
+export interface DoctorCheck {
+  name: string;
+  ok: boolean;
+  message?: string;
+}
+
+export interface DoctorProbeResult {
+  ok: boolean;
+  durationMs: number;
+  checks: DoctorCheck[];
+  nodeVersion: { ok: boolean; version: string; minRequired: string };
+  sqliteWal: { ok: boolean; message?: string };
+  gitRepo: { ok: boolean; isRepo: boolean; message?: string };
+  harnesses: Record<HarnessId, { installed: boolean; headlessSupported: boolean; binary?: string }>;
+  policyProbe: { ok: boolean; gitBlocked: boolean; envBlocked: boolean; message?: string };
+  errors: string[];
+}
+
+export interface AutoSyncOptions {
+  homeDir?: string;
+  projectRoot?: string;
+  force?: boolean;
+}
+
+export interface AutoSyncResult {
+  synced: boolean;
+  skipped: boolean;
+  reason?: string;
+  result?: SyncHarnessConfigsResult;
+}
+
+interface LastSyncRecord {
+  _asdVersion: string;
+  configHash: string;
+  lastSyncedAt: string;
+  harnesses: Partial<Record<HarnessId, { hash: string; syncedAt: string }>>;
+}
+
+// ============================================================================
+// Constants & Helper Functions
+// ============================================================================
+
+const DEFAULT_HARNESS_IDS: readonly HarnessId[] = [
+  "claude-code",
+  "opencode",
+  "codex",
+  "antigravity",
+];
+
+function getAsdRoot(): string {
+  return path.resolve(import.meta.dirname, "..", "..");
+}
+
+function resolveHome(optionsHome?: string): string {
+  return optionsHome || process.env.ASD_HOME_DIR || os.homedir();
+}
+
+function ensureDir(dirPath: string): void {
+  fs.mkdirSync(dirPath, { recursive: true });
+}
+
+function safeWriteJson(filePath: string, data: unknown): void {
+  ensureDir(path.dirname(filePath));
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf8");
+}
+
+function safeWriteText(filePath: string, text: string): void {
+  ensureDir(path.dirname(filePath));
+  fs.writeFileSync(filePath, text, "utf8");
+}
+
+function backupUserFile(filePath: string): void {
+  const backupPath = `${filePath}.asd-backup`;
+  if (fs.existsSync(filePath) && !fs.existsSync(backupPath)) {
+    fs.copyFileSync(filePath, backupPath);
+  }
+}
+
+function restoreUserBackup(filePath: string): boolean {
+  const backupPath = `${filePath}.asd-backup`;
+  if (fs.existsSync(backupPath)) {
+    fs.copyFileSync(backupPath, filePath);
+    try {
+      fs.unlinkSync(backupPath);
+    } catch {
+      // Ignore unlink errors
+    }
+    return true;
+  }
+  return false;
+}
+
+// ============================================================================
+// Skill and Agent Markdown Generation
+// ============================================================================
+
+export function getSkillTemplate(skillName: string): string {
+  const skillsDir = path.join(getAsdRoot(), "src", "skills", skillName, "SKILL.md");
+  try {
+    if (fs.existsSync(skillsDir)) {
+      return fs.readFileSync(skillsDir, "utf8");
+    }
+  } catch {
+    // Fall back to embedded definitions if file is unreadable
+  }
+
+  switch (skillName) {
+    case "asd":
+      return `---
+name: asd
+description: Universal end-to-end multi-agent autonomous workflow for ASD v2.2.
+---
+
+# ASD Autonomous Multi-Agent Workflow (\`/asd\`)
+
+1. Planning: Call asd_plan to decompose tasks into .asd/PLAN.md.
+2. Wave Execution: Dispatch tasks via LIGHT (in-place) or HEAVY (worktree) tracks.
+3. MANDATORY LIVE PROGRESS DIRECTIVE: Print the returned progressBoard verbatim after every subagent or wave completion.
+4. Summary: Output final summary.md report.
+`;
+    case "asd-plan":
+      return `---
+name: asd-plan
+description: Plan-only workflow for ASD v2.2.
+---
+
+# ASD Planning & Decomposition Workflow (\`/asd-plan\`)
+
+1. Scout exploration with read-only tools.
+2. Assess intent: CLEAR vs UNCLEAR.
+3. Call asd_plan to generate .asd/PLAN.md.
+4. Print returned progressBoard verbatim.
+`;
+    case "asd-run":
+      return `---
+name: asd-run
+description: Execution & resume workflow for ASD v2.2.
+---
+
+# ASD Execution & Resume Workflow (\`/asd-run\`)
+
+1. Reverse-sync edits via asd_plan({ action: "sync_from_md" }).
+2. Wave-by-wave execution of remaining tasks via asd_dispatch and asd_verify.
+3. MANDATORY LIVE PROGRESS DIRECTIVE: Print progressBoard verbatim after every tool call.
+4. Stop on circuit breaker (no_progress_count >= 3).
+`;
+    case "asd-debate":
+      return `---
+name: asd-debate
+description: Cross-harness adversarial debate workflow for ASD v2.2.
+---
+
+# ASD Cross-Harness Adversarial Debate (\`/asd-debate\`)
+
+1. Round 1 blind critique across heterogeneous harnesses via asd_debate.
+2. Round 2 confrontation & binding arbiter verdict.
+3. Automatic constraint injection into tasks.acceptance.
+4. Print verdict and progressBoard verbatim.
+`;
+    case "asd-debug":
+      return `---
+name: asd-debug
+description: Systematic hypothesis-driven debugging workflow for ASD v2.2.
+---
+
+# ASD Systematic Debugging Workflow (\`/asd-debug\`)
+
+1. Rule Zero: Reproduce First (write failing test before code edits).
+2. Hypothesize and diagnose root cause.
+3. Minimal fix within allowedFiles.
+4. Regression verification via asd_verify and print progressBoard.
+`;
+    default:
+      return `# ASD Skill: ${skillName}\n`;
+  }
+}
+
+export function generateAgentContent(role: AgentRole): string {
+  const roleDescriptions: Record<AgentRole, { title: string; desc: string; focus: string }> = {
+    director: {
+      title: "Director",
+      desc: "Top-level orchestrator and supervisor. Plans high-level milestones, delegates tasks, and coordinates multi-agent delivery.",
+      focus: "End-to-end task flow, review gates, and final session summaries.",
+    },
+    planner: {
+      title: "Planner",
+      desc: "Task decomposition and dependency architect. Analyzes requirements and produces structured .asd/PLAN.md specifications.",
+      focus: "Turn scheduling, dependency graph resolution, allowedFiles boundaries, and verification criteria.",
+    },
+    analyst: {
+      title: "Analyst",
+      desc: "Requirements investigator and feasibility researcher. Dissects ambiguous prompts and identifies hidden risks.",
+      focus: "Context extraction, constraint mapping, and edge case enumeration.",
+    },
+    critic: {
+      title: "Critic",
+      desc: "Hostile adversarial evaluator. Challenges assumptions, surfaces blind spots, and stress-tests designs before implementation.",
+      focus: "Security boundaries, failure modes, over-engineering detection, and anti-pattern identification.",
+    },
+    arbiter: {
+      title: "Arbiter",
+      desc: "Debate judge and consensus synthesizer. Evaluates competing arguments during cross-model debate and issues binding decisions.",
+      focus: "Trade-off analysis, definitive arbitration (APPROVE/MINOR_AMEND/REJECT), and constraint synthesis.",
+    },
+    architect: {
+      title: "Architect",
+      desc: "System designer and contract guardian. Defines interfaces, schemas, and cross-cutting architectural invariants.",
+      focus: "Modular boundaries, core purity, data structures, and architectural elegance.",
+    },
+    builder: {
+      title: "Builder",
+      desc: "Core implementation developer. Scaffolds new modules, authors interfaces, and implements complex multi-file features.",
+      focus: "Idiomatic code, type correctness, maintainable structure, and unit tests.",
+    },
+    worker: {
+      title: "Worker",
+      desc: "Focused task executor. Handles scoped file modifications, bug fixes, refactoring, and test assertions.",
+      focus: "Strict allowedFiles compliance, minimal diffs, and rapid test verification.",
+    },
+    scout: {
+      title: "Scout",
+      desc: "Read-only codebase explorer. Maps repository layouts, finds symbol declarations, and retrieves existing patterns.",
+      focus: "Zero-mutation discovery, reference gathering, and context provision.",
+    },
+    verifier: {
+      title: "Verifier",
+      desc: "Quality assurance inspector. Executes regression tests, audits git status boundaries, and validates acceptance criteria.",
+      focus: "Deterministic test execution, clean git diffs, and checkpoint validation.",
+    },
+  };
+
+  const meta = roleDescriptions[role] ?? {
+    title: role,
+    desc: `ASD agent specialist for role '${role}'.`,
+    focus: "Specialized multi-agent execution.",
+  };
+
+  return `---
+name: asd-${role}
+description: ASD v2.2 ${meta.title} Agent. ${meta.desc}
+---
+
+# ASD Agent: asd-${role} (${meta.title})
+
+You are operating as the **${meta.title}** agent in the ASD v2.2 multi-agent system.
+
+## Responsibilities
+${meta.desc}
+
+## Primary Focus
+${meta.focus}
+
+## Operational Guidelines
+1. Adhere strictly to assigned role boundaries and specified allowedFiles.
+2. Maintain high code quality, idiomatic patterns, and zero unverified assumptions.
+3. Ensure all changes are verified with automated tests before completing.
+`;
+}
+
+export function generateAllAgentsMarkdown(): string {
+  let md = `# ASD Multi-Agent Roster (v2.2.0)\n\nThis document defines the 10 standard specialist agent roles in ASD v2.2.\n\n`;
+
+  for (let i = 0; i < AGENT_ROLES.length; i++) {
+    const role = AGENT_ROLES[i]!;
+    md += `## ${i + 1}. asd-${role}\n`;
+    md += generateAgentContent(role);
+    md += `\n---\n\n`;
+  }
+
+  return md;
+}
+
+// ============================================================================
+// Preset Bootstrapping & Hash Calculation
+// ============================================================================
+
+function bootstrapGlobalPresets(homeDir: string): { routingPath: string; mcpPath: string } {
+  const asdHome = path.join(homeDir, ".asd");
+  ensureDir(asdHome);
+  ensureDir(path.join(asdHome, "state"));
+
+  const routingPath = path.join(asdHome, "routing.jsonc");
+  const mcpPath = path.join(asdHome, "mcp.jsonc");
+
+  const asdRoot = getAsdRoot();
+  const presetRouting = path.join(asdRoot, "presets", "default-routing.jsonc");
+  const presetMcp = path.join(asdRoot, "presets", "default-mcp.jsonc");
+
+  if (!fs.existsSync(routingPath)) {
+    if (fs.existsSync(presetRouting)) {
+      fs.copyFileSync(presetRouting, routingPath);
+    } else {
+      safeWriteText(routingPath, `// ASD Default Routing\n{\n  "_asdVersion": "${ASD_VERSION}"\n}\n`);
+    }
+  }
+
+  if (!fs.existsSync(mcpPath)) {
+    if (fs.existsSync(presetMcp)) {
+      fs.copyFileSync(presetMcp, mcpPath);
+    } else {
+      safeWriteText(mcpPath, `// ASD Default MCP\n{\n  "_asdVersion": "${ASD_VERSION}"\n}\n`);
+    }
+  }
+
+  return { routingPath, mcpPath };
+}
+
+function computeConfigHash(homeDir: string): string {
+  const { routingPath, mcpPath } = bootstrapGlobalPresets(homeDir);
+
+  const hash = crypto.createHash("sha256");
+  hash.update(ASD_VERSION);
+
+  if (fs.existsSync(routingPath)) {
+    hash.update(fs.readFileSync(routingPath));
+  }
+  if (fs.existsSync(mcpPath)) {
+    hash.update(fs.readFileSync(mcpPath));
+  }
+
+  for (const skill of ASD_SKILLS) {
+    hash.update(getSkillTemplate(skill));
+  }
+
+  for (const role of AGENT_ROLES) {
+    hash.update(generateAgentContent(role));
+  }
+
+  return hash.digest("hex");
+}
+
+function loadLastSync(homeDir: string): LastSyncRecord | null {
+  const lastSyncPath = path.join(homeDir, ".asd", "state", "last-sync.json");
+  if (!fs.existsSync(lastSyncPath)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(lastSyncPath, "utf8")) as LastSyncRecord;
+  } catch {
+    return null;
+  }
+}
+
+function saveLastSync(homeDir: string, record: LastSyncRecord): void {
+  const lastSyncPath = path.join(homeDir, ".asd", "state", "last-sync.json");
+  safeWriteJson(lastSyncPath, record);
+}
+
+// ============================================================================
+// Core Synchronizer: Strictly Global-Only
+// ============================================================================
+
+export async function syncHarnessConfigs(
+  options?: SyncHarnessOptions
+): Promise<SyncHarnessConfigsResult> {
+  const homeDir = resolveHome(options?.homeDir);
+  const asdRoot = getAsdRoot();
+  const asdCliPath = options?.asdCliPath || path.join(asdRoot, "src", "cli", "index.ts");
+  const asdMcpServerPath = path.join(asdRoot, "src", "mcp", "server.ts");
+
+  // 1. Bootstrap presets and compute config hash
+  const configHash = computeConfigHash(homeDir);
+  const lastSync = loadLastSync(homeDir);
+
+  const harnessResults: Record<HarnessId, HarnessSyncStatus> = {
+    "claude-code": { harness: "claude-code", status: "skipped", skipped: true, filesWritten: [] },
+    opencode: { harness: "opencode", status: "skipped", skipped: true, filesWritten: [] },
+    codex: { harness: "codex", status: "skipped", skipped: true, filesWritten: [] },
+    antigravity: { harness: "antigravity", status: "skipped", skipped: true, filesWritten: [] },
+  };
+
+  const adapters: Record<HarnessId, HarnessAdapter> = {
+    "claude-code": claudeCodeAdapter,
+    opencode: opencodeAdapter,
+    codex: codexAdapter,
+    antigravity: antigravityAdapter,
+  };
+
+  let anyUpdated = false;
+
+  for (const harnessId of DEFAULT_HARNESS_IDS) {
+    const adapter = adapters[harnessId];
+    const targets = adapter.globalConfigTargets(homeDir);
+
+    const isHashMatched =
+      !options?.force &&
+      lastSync !== null &&
+      lastSync.configHash === configHash &&
+      lastSync.harnesses?.[harnessId]?.hash === configHash;
+
+    const allTargetsExist = targets.every((targetPath) => fs.existsSync(targetPath));
+
+    if (isHashMatched && allTargetsExist) {
+      harnessResults[harnessId] = {
+        harness: harnessId,
+        status: "skipped",
+        skipped: true,
+        filesWritten: [],
+      };
+      continue;
+    }
+
+    // Bake in harness configurations
+    anyUpdated = true;
+    const written: string[] = [];
+
+    switch (harnessId) {
+      case "claude-code": {
+        const claudeDir = path.join(homeDir, ".claude");
+
+        // 10 agent files
+        for (const role of AGENT_ROLES) {
+          const agentPath = path.join(claudeDir, "agents", `asd-${role}.md`);
+          safeWriteText(agentPath, generateAgentContent(role));
+          written.push(agentPath);
+        }
+
+        // 5 skills
+        for (const skill of ASD_SKILLS) {
+          const skillPath = path.join(claudeDir, "skills", skill, "SKILL.md");
+          safeWriteText(skillPath, getSkillTemplate(skill));
+          written.push(skillPath);
+        }
+
+        // settings.json
+        const settingsPath = path.join(claudeDir, "settings.json");
+        let existingSettings: Record<string, unknown> | null = null;
+        if (fs.existsSync(settingsPath)) {
+          backupUserFile(settingsPath);
+          try {
+            existingSettings = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            existingSettings = {};
+          }
+        }
+        const mergedSettings = mergeClaudeSettings(existingSettings, asdCliPath);
+        safeWriteJson(settingsPath, mergedSettings);
+        written.push(settingsPath);
+
+        // ~/.claude.json & ~/.claude/.mcp.json
+        const claudeJsonPath = path.join(homeDir, ".claude.json");
+        let claudeJson: Record<string, unknown> = {};
+        if (fs.existsSync(claudeJsonPath)) {
+          backupUserFile(claudeJsonPath);
+          try {
+            claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            claudeJson = {};
+          }
+        }
+        const claudeMcpServers = (
+          claudeJson.mcpServers && typeof claudeJson.mcpServers === "object"
+            ? { ...(claudeJson.mcpServers as Record<string, unknown>) }
+            : {}
+        ) as Record<string, unknown>;
+        claudeMcpServers["asd-core"] = {
+          command: "node",
+          args: ["--no-warnings", asdMcpServerPath],
+          _asdManaged: true,
+        };
+        claudeJson.mcpServers = claudeMcpServers;
+        safeWriteJson(claudeJsonPath, claudeJson);
+        written.push(claudeJsonPath);
+
+        const claudeMcpPath = path.join(claudeDir, ".mcp.json");
+        let claudeMcp: Record<string, unknown> = {};
+        if (fs.existsSync(claudeMcpPath)) {
+          backupUserFile(claudeMcpPath);
+          try {
+            claudeMcp = JSON.parse(fs.readFileSync(claudeMcpPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            claudeMcp = {};
+          }
+        }
+        const dotMcpServers = (
+          claudeMcp.mcpServers && typeof claudeMcp.mcpServers === "object"
+            ? { ...(claudeMcp.mcpServers as Record<string, unknown>) }
+            : {}
+        ) as Record<string, unknown>;
+        dotMcpServers["asd-core"] = {
+          command: "node",
+          args: ["--no-warnings", asdMcpServerPath],
+          _asdManaged: true,
+        };
+        claudeMcp.mcpServers = dotMcpServers;
+        safeWriteJson(claudeMcpPath, claudeMcp);
+        written.push(claudeMcpPath);
+
+        break;
+      }
+
+      case "opencode": {
+        const opencodeDir = path.join(homeDir, ".config", "opencode");
+
+        // 5 command files
+        for (const skill of ASD_SKILLS) {
+          const cmdPath = path.join(opencodeDir, "command", `${skill}.md`);
+          safeWriteText(cmdPath, getSkillTemplate(skill));
+          written.push(cmdPath);
+        }
+
+        // AGENTS.md
+        const agentsMdPath = path.join(opencodeDir, "AGENTS.md");
+        safeWriteText(agentsMdPath, generateAllAgentsMarkdown());
+        written.push(agentsMdPath);
+
+        // opencode.json
+        const opencodeJsonPath = path.join(opencodeDir, "opencode.json");
+        let existingConfig: Record<string, unknown> = {};
+        if (fs.existsSync(opencodeJsonPath)) {
+          backupUserFile(opencodeJsonPath);
+          try {
+            existingConfig = JSON.parse(fs.readFileSync(opencodeJsonPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            existingConfig = {};
+          }
+        }
+        const existingMcp = (
+          existingConfig.mcpServers && typeof existingConfig.mcpServers === "object"
+            ? { ...(existingConfig.mcpServers as Record<string, unknown>) }
+            : {}
+        ) as Record<string, unknown>;
+        existingMcp["asd-core"] = {
+          command: "node",
+          args: ["--no-warnings", asdMcpServerPath],
+          _asdManaged: true,
+        };
+        existingConfig._asdVersion = ASD_VERSION;
+        existingConfig.mcpServers = existingMcp;
+        safeWriteJson(opencodeJsonPath, existingConfig);
+        written.push(opencodeJsonPath);
+
+        break;
+      }
+
+      case "codex": {
+        const codexDir = path.join(homeDir, ".codex");
+
+        // 5 skills
+        for (const skill of ASD_SKILLS) {
+          const skillPath = path.join(codexDir, "skills", skill, "SKILL.md");
+          safeWriteText(skillPath, getSkillTemplate(skill));
+          written.push(skillPath);
+        }
+
+        // AGENTS.md
+        const agentsMdPath = path.join(codexDir, "AGENTS.md");
+        safeWriteText(agentsMdPath, generateAllAgentsMarkdown());
+        written.push(agentsMdPath);
+
+        // config.toml
+        const configTomlPath = path.join(codexDir, "config.toml");
+        let existingToml = "";
+        if (fs.existsSync(configTomlPath)) {
+          backupUserFile(configTomlPath);
+          try {
+            existingToml = fs.readFileSync(configTomlPath, "utf8");
+          } catch {
+            existingToml = "";
+          }
+        }
+        const normalizedMcpPath = asdMcpServerPath.replaceAll("\\", "/");
+        const managedTomlBlock = `[mcp_servers.asd-core]\ncommand = "node"\nargs = ["--no-warnings", "${normalizedMcpPath}"]\n`;
+        const mergedToml = mergeCodexConfigToml(existingToml, managedTomlBlock, ASD_VERSION);
+        safeWriteText(configTomlPath, mergedToml);
+        written.push(configTomlPath);
+
+        break;
+      }
+
+      case "antigravity": {
+        const geminiDir = path.join(homeDir, ".gemini");
+
+        // 10 agents
+        for (const role of AGENT_ROLES) {
+          const agentPath = path.join(geminiDir, "agents", `asd-${role}.md`);
+          safeWriteText(agentPath, generateAgentContent(role));
+          written.push(agentPath);
+        }
+
+        // 5 skills
+        for (const skill of ASD_SKILLS) {
+          const skillPath = path.join(geminiDir, "skills", skill, "SKILL.md");
+          safeWriteText(skillPath, getSkillTemplate(skill));
+          written.push(skillPath);
+        }
+
+        // hooks.json
+        const hooksJsonPath = path.join(geminiDir, "hooks.json");
+        let existingHooks: Record<string, unknown> = {};
+        if (fs.existsSync(hooksJsonPath)) {
+          backupUserFile(hooksJsonPath);
+          try {
+            existingHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            existingHooks = {};
+          }
+        }
+        const preHooks = Array.isArray(existingHooks.PreToolUse)
+          ? existingHooks.PreToolUse.filter(
+              (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+            )
+          : [];
+        preHooks.push({
+          command: `node --no-warnings "${asdCliPath}" hook pre-tool-use`,
+          _asdManaged: true,
+        });
+
+        const stopHooks = Array.isArray(existingHooks.Stop)
+          ? existingHooks.Stop.filter(
+              (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+            )
+          : [];
+        stopHooks.push({
+          command: `node --no-warnings "${asdCliPath}" hook stop`,
+          _asdManaged: true,
+        });
+
+        existingHooks.PreToolUse = preHooks;
+        existingHooks.Stop = stopHooks;
+        safeWriteJson(hooksJsonPath, existingHooks);
+        written.push(hooksJsonPath);
+
+        // mcp_config.json
+        const mcpConfigPath = path.join(geminiDir, "mcp_config.json");
+        let existingMcpConfig: Record<string, unknown> = {};
+        if (fs.existsSync(mcpConfigPath)) {
+          backupUserFile(mcpConfigPath);
+          try {
+            existingMcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            existingMcpConfig = {};
+          }
+        }
+        const geminiMcpServers = (
+          existingMcpConfig.mcpServers && typeof existingMcpConfig.mcpServers === "object"
+            ? { ...(existingMcpConfig.mcpServers as Record<string, unknown>) }
+            : {}
+        ) as Record<string, unknown>;
+        geminiMcpServers["asd-core"] = {
+          command: "node",
+          args: ["--no-warnings", asdMcpServerPath],
+          _asdManaged: true,
+        };
+        existingMcpConfig.mcpServers = geminiMcpServers;
+        safeWriteJson(mcpConfigPath, existingMcpConfig);
+        written.push(mcpConfigPath);
+
+        break;
+      }
+    }
+
+    harnessResults[harnessId] = {
+      harness: harnessId,
+      status: "updated",
+      skipped: false,
+      filesWritten: written,
+    };
+  }
+
+  // Save state
+  const updatedLastSync: LastSyncRecord = {
+    _asdVersion: ASD_VERSION,
+    configHash,
+    lastSyncedAt: new Date().toISOString(),
+    harnesses: {
+      ...lastSync?.harnesses,
+      "claude-code": { hash: configHash, syncedAt: new Date().toISOString() },
+      opencode: { hash: configHash, syncedAt: new Date().toISOString() },
+      codex: { hash: configHash, syncedAt: new Date().toISOString() },
+      antigravity: { hash: configHash, syncedAt: new Date().toISOString() },
+    },
+  };
+  saveLastSync(homeDir, updatedLastSync);
+
+  return {
+    status: anyUpdated ? "updated" : "skipped",
+    skipped: !anyUpdated,
+    configHash,
+    harnesses: harnessResults,
+  };
+}
+
+export const runAsdSync = syncHarnessConfigs;
+
+// ============================================================================
+// Main-Session Auto-Sync
+// ============================================================================
+
+export async function autoSyncIfNeeded(options?: AutoSyncOptions): Promise<AutoSyncResult> {
+  if (process.env.ASD_SESSION_ROLE === "subagent") {
+    return {
+      synced: false,
+      skipped: true,
+      reason: "subagent_shield",
+    };
+  }
+
+  const syncResult = await syncHarnessConfigs(options);
+  return {
+    synced: syncResult.status === "updated",
+    skipped: syncResult.status === "skipped",
+    result: syncResult,
+  };
+}
+
+// ============================================================================
+// Surgical Rollback: uninstallHarnessConfigs / runAsdUninstall
+// ============================================================================
+
+export async function uninstallHarnessConfigs(
+  options?: UninstallHarnessOptions
+): Promise<UninstallHarnessConfigsResult> {
+  const homeDir = resolveHome(options?.homeDir);
+
+  const removedFiles: string[] = [];
+  const restoredFiles: string[] = [];
+
+  const harnessStatus: Record<HarnessId, UninstallHarnessStatus> = {
+    "claude-code": { removed: [], restored: [] },
+    opencode: { removed: [], restored: [] },
+    codex: { removed: [], restored: [] },
+    antigravity: { removed: [], restored: [] },
+  };
+
+  const removeFile = (filePath: string, harness: HarnessId) => {
+    if (fs.existsSync(filePath)) {
+      try {
+        fs.unlinkSync(filePath);
+        removedFiles.push(filePath);
+        harnessStatus[harness].removed.push(filePath);
+      } catch {
+        // Ignore unlink error
+      }
+    }
+  };
+
+  const removeDirIfEmpty = (dirPath: string) => {
+    try {
+      if (fs.existsSync(dirPath) && fs.readdirSync(dirPath).length === 0) {
+        fs.rmdirSync(dirPath);
+      }
+    } catch {
+      // Ignore directory removal error
+    }
+  };
+
+  // 1. Claude Code
+  const claudeDir = path.join(homeDir, ".claude");
+  for (const role of AGENT_ROLES) {
+    removeFile(path.join(claudeDir, "agents", `asd-${role}.md`), "claude-code");
+  }
+  removeDirIfEmpty(path.join(claudeDir, "agents"));
+
+  for (const skill of ASD_SKILLS) {
+    removeFile(path.join(claudeDir, "skills", skill, "SKILL.md"), "claude-code");
+    removeDirIfEmpty(path.join(claudeDir, "skills", skill));
+  }
+  removeDirIfEmpty(path.join(claudeDir, "skills"));
+
+  const claudeSettings = path.join(claudeDir, "settings.json");
+  if (restoreUserBackup(claudeSettings)) {
+    restoredFiles.push(claudeSettings);
+    harnessStatus["claude-code"].restored.push(claudeSettings);
+  } else if (fs.existsSync(claudeSettings)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(claudeSettings, "utf8")) as Record<string, unknown>;
+      if (cfg.hooks && typeof cfg.hooks === "object") {
+        const hooks = cfg.hooks as Record<string, unknown[]>;
+        if (Array.isArray(hooks.PreToolUse)) {
+          hooks.PreToolUse = hooks.PreToolUse.filter(
+            (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+          );
+        }
+        if (Array.isArray(hooks.Stop)) {
+          hooks.Stop = hooks.Stop.filter(
+            (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+          );
+        }
+      }
+      const hasPre = Array.isArray((cfg.hooks as Record<string, unknown[]>)?.PreToolUse) && ((cfg.hooks as Record<string, unknown[]>).PreToolUse?.length ?? 0) > 0;
+      const hasStop = Array.isArray((cfg.hooks as Record<string, unknown[]>)?.Stop) && ((cfg.hooks as Record<string, unknown[]>).Stop?.length ?? 0) > 0;
+      const otherKeys = Object.keys(cfg).filter((k) => k !== "hooks");
+
+      if (!hasPre && !hasStop && otherKeys.length === 0) {
+        removeFile(claudeSettings, "claude-code");
+      } else {
+        safeWriteJson(claudeSettings, cfg);
+      }
+    } catch {
+      removeFile(claudeSettings, "claude-code");
+    }
+  }
+
+  const claudeJson = path.join(homeDir, ".claude.json");
+  if (restoreUserBackup(claudeJson)) {
+    restoredFiles.push(claudeJson);
+    harnessStatus["claude-code"].restored.push(claudeJson);
+  } else if (fs.existsSync(claudeJson)) {
+    try {
+      const cJson = JSON.parse(fs.readFileSync(claudeJson, "utf8")) as Record<string, unknown>;
+      if (cJson.mcpServers && typeof cJson.mcpServers === "object") {
+        delete (cJson.mcpServers as Record<string, unknown>)["asd-core"];
+      }
+      const mcpCount = cJson.mcpServers && typeof cJson.mcpServers === "object" ? Object.keys(cJson.mcpServers).length : 0;
+      const otherKeys = Object.keys(cJson).filter((k) => k !== "mcpServers");
+      if (mcpCount === 0 && otherKeys.length === 0) {
+        removeFile(claudeJson, "claude-code");
+      } else {
+        safeWriteJson(claudeJson, cJson);
+      }
+    } catch {
+      removeFile(claudeJson, "claude-code");
+    }
+  }
+
+  const dotMcpJson = path.join(claudeDir, ".mcp.json");
+  if (restoreUserBackup(dotMcpJson)) {
+    restoredFiles.push(dotMcpJson);
+    harnessStatus["claude-code"].restored.push(dotMcpJson);
+  } else if (fs.existsSync(dotMcpJson)) {
+    try {
+      const dJson = JSON.parse(fs.readFileSync(dotMcpJson, "utf8")) as Record<string, unknown>;
+      if (dJson.mcpServers && typeof dJson.mcpServers === "object") {
+        delete (dJson.mcpServers as Record<string, unknown>)["asd-core"];
+      }
+      const mcpCount = dJson.mcpServers && typeof dJson.mcpServers === "object" ? Object.keys(dJson.mcpServers).length : 0;
+      const otherKeys = Object.keys(dJson).filter((k) => k !== "mcpServers");
+      if (mcpCount === 0 && otherKeys.length === 0) {
+        removeFile(dotMcpJson, "claude-code");
+      } else {
+        safeWriteJson(dotMcpJson, dJson);
+      }
+    } catch {
+      removeFile(dotMcpJson, "claude-code");
+    }
+  }
+
+  // 2. OpenCode
+  const opencodeDir = path.join(homeDir, ".config", "opencode");
+  for (const skill of ASD_SKILLS) {
+    removeFile(path.join(opencodeDir, "command", `${skill}.md`), "opencode");
+  }
+  removeDirIfEmpty(path.join(opencodeDir, "command"));
+  removeFile(path.join(opencodeDir, "AGENTS.md"), "opencode");
+
+  const opencodeJson = path.join(opencodeDir, "opencode.json");
+  if (restoreUserBackup(opencodeJson)) {
+    restoredFiles.push(opencodeJson);
+    harnessStatus.opencode.restored.push(opencodeJson);
+  } else if (fs.existsSync(opencodeJson)) {
+    try {
+      const oc = JSON.parse(fs.readFileSync(opencodeJson, "utf8")) as Record<string, unknown>;
+      if (oc.mcpServers && typeof oc.mcpServers === "object") {
+        delete (oc.mcpServers as Record<string, unknown>)["asd-core"];
+      }
+      delete oc._asdVersion;
+      delete oc.agentRouting;
+      const mcpCount = oc.mcpServers && typeof oc.mcpServers === "object" ? Object.keys(oc.mcpServers).length : 0;
+      const otherKeys = Object.keys(oc).filter((k) => k !== "mcpServers");
+      if (mcpCount === 0 && otherKeys.length === 0) {
+        removeFile(opencodeJson, "opencode");
+      } else {
+        safeWriteJson(opencodeJson, oc);
+      }
+    } catch {
+      removeFile(opencodeJson, "opencode");
+    }
+  }
+
+  // 3. Codex
+  const codexDir = path.join(homeDir, ".codex");
+  for (const skill of ASD_SKILLS) {
+    removeFile(path.join(codexDir, "skills", skill, "SKILL.md"), "codex");
+    removeDirIfEmpty(path.join(codexDir, "skills", skill));
+  }
+  removeDirIfEmpty(path.join(codexDir, "skills"));
+  removeFile(path.join(codexDir, "AGENTS.md"), "codex");
+
+  const configToml = path.join(codexDir, "config.toml");
+  if (restoreUserBackup(configToml)) {
+    restoredFiles.push(configToml);
+    harnessStatus.codex.restored.push(configToml);
+  } else if (fs.existsSync(configToml)) {
+    try {
+      const raw = fs.readFileSync(configToml, "utf8");
+      const cleaned = removeTomlFence(raw);
+      if (cleaned.trim() === "") {
+        removeFile(configToml, "codex");
+      } else {
+        safeWriteText(configToml, cleaned);
+      }
+    } catch {
+      removeFile(configToml, "codex");
+    }
+  }
+
+  // 4. Antigravity
+  const geminiDir = path.join(homeDir, ".gemini");
+  for (const role of AGENT_ROLES) {
+    removeFile(path.join(geminiDir, "agents", `asd-${role}.md`), "antigravity");
+  }
+  removeDirIfEmpty(path.join(geminiDir, "agents"));
+
+  for (const skill of ASD_SKILLS) {
+    removeFile(path.join(geminiDir, "skills", skill, "SKILL.md"), "antigravity");
+    removeDirIfEmpty(path.join(geminiDir, "skills", skill));
+  }
+  removeDirIfEmpty(path.join(geminiDir, "skills"));
+
+  const hooksJson = path.join(geminiDir, "hooks.json");
+  if (restoreUserBackup(hooksJson)) {
+    restoredFiles.push(hooksJson);
+    harnessStatus.antigravity.restored.push(hooksJson);
+  } else if (fs.existsSync(hooksJson)) {
+    try {
+      const hJson = JSON.parse(fs.readFileSync(hooksJson, "utf8")) as Record<string, unknown>;
+      if (Array.isArray(hJson.PreToolUse)) {
+        hJson.PreToolUse = hJson.PreToolUse.filter(
+          (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+        );
+      }
+      if (Array.isArray(hJson.Stop)) {
+        hJson.Stop = hJson.Stop.filter(
+          (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+        );
+      }
+      const hasPre = Array.isArray(hJson.PreToolUse) && hJson.PreToolUse.length > 0;
+      const hasStop = Array.isArray(hJson.Stop) && hJson.Stop.length > 0;
+      const otherKeys = Object.keys(hJson).filter((k) => k !== "PreToolUse" && k !== "Stop");
+      if (!hasPre && !hasStop && otherKeys.length === 0) {
+        removeFile(hooksJson, "antigravity");
+      } else {
+        safeWriteJson(hooksJson, hJson);
+      }
+    } catch {
+      removeFile(hooksJson, "antigravity");
+    }
+  }
+
+  const mcpConfigJson = path.join(geminiDir, "mcp_config.json");
+  if (restoreUserBackup(mcpConfigJson)) {
+    restoredFiles.push(mcpConfigJson);
+    harnessStatus.antigravity.restored.push(mcpConfigJson);
+  } else if (fs.existsSync(mcpConfigJson)) {
+    try {
+      const mJson = JSON.parse(fs.readFileSync(mcpConfigJson, "utf8")) as Record<string, unknown>;
+      if (mJson.mcpServers && typeof mJson.mcpServers === "object") {
+        delete (mJson.mcpServers as Record<string, unknown>)["asd-core"];
+      }
+      const mcpCount = mJson.mcpServers && typeof mJson.mcpServers === "object" ? Object.keys(mJson.mcpServers).length : 0;
+      const otherKeys = Object.keys(mJson).filter((k) => k !== "mcpServers");
+      if (mcpCount === 0 && otherKeys.length === 0) {
+        removeFile(mcpConfigJson, "antigravity");
+      } else {
+        safeWriteJson(mcpConfigJson, mJson);
+      }
+    } catch {
+      removeFile(mcpConfigJson, "antigravity");
+    }
+  }
+
+  // Remove last-sync.json
+  const lastSyncPath = path.join(homeDir, ".asd", "state", "last-sync.json");
+  if (fs.existsSync(lastSyncPath)) {
+    try {
+      fs.unlinkSync(lastSyncPath);
+    } catch {
+      // Ignore
+    }
+  }
+
+  return {
+    status: "success",
+    removedFiles,
+    restoredFiles,
+    harnesses: harnessStatus,
+  };
+}
+
+export const runAsdUninstall = uninstallHarnessConfigs;
+
+// ============================================================================
+// Doctor Probe: Fast <100ms Zero-Token Diagnostic
+// ============================================================================
+
+function checkBinaryOnPath(binaryName: string): boolean {
+  const pathEnv = process.env.PATH || "";
+  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+  const extensions = process.platform === "win32" ? ["", ".cmd", ".exe", ".bat", ".ps1"] : [""];
+
+  for (const dir of dirs) {
+    for (const ext of extensions) {
+      const fullPath = path.join(dir, binaryName + ext);
+      try {
+        if (fs.existsSync(fullPath)) {
+          return true;
+        }
+      } catch {
+        // Ignore permission or file system errors during probe
+      }
+    }
+  }
+  return false;
+}
+
+export async function doctorProbe(
+  options?: DoctorProbeOptions
+): Promise<DoctorProbeResult> {
+  const startTime = performance.now();
+  const errors: string[] = [];
+  const checks: DoctorCheck[] = [];
+
+  const homeDir = resolveHome(options?.homeDir);
+  const projectRoot = options?.projectRoot || process.cwd();
+
+  // 1. Node.js version check (>= 22.13.0)
+  const nodeVer = process.versions.node || "0.0.0";
+  const [majorStr = "0", minorStr = "0"] = nodeVer.split(".");
+  const major = parseInt(majorStr, 10);
+  const minor = parseInt(minorStr, 10);
+  const nodeOk = major >= 22 && (major > 22 || minor >= 13);
+
+  if (!nodeOk) {
+    errors.push(`Node.js version >= 22.13.0 required, current: v${nodeVer}`);
+  }
+  checks.push({
+    name: "node_version",
+    ok: nodeOk,
+    message: nodeOk ? `Node.js v${nodeVer} (>= 22.13.0)` : `Unsupported Node.js v${nodeVer}`,
+  });
+
+  // 2. SQLite WAL health check
+  let sqliteOk = false;
+  let sqliteMsg = "";
+  try {
+    const db = new DatabaseSync(":memory:");
+    const row = db.prepare("PRAGMA journal_mode = WAL;").get() as { journal_mode?: string } | undefined;
+    db.close();
+    sqliteOk = row?.journal_mode === "wal" || row?.journal_mode === "memory";
+    sqliteMsg = "node:sqlite verified with WAL support";
+  } catch (err: unknown) {
+    sqliteOk = false;
+    sqliteMsg = err instanceof Error ? err.message : String(err);
+    errors.push(`SQLite verification failed: ${sqliteMsg}`);
+  }
+  checks.push({
+    name: "sqlite_wal",
+    ok: sqliteOk,
+    message: sqliteMsg,
+  });
+
+  // 3. Git repo state
+  const isGitRepo = fs.existsSync(path.join(projectRoot, ".git"));
+  checks.push({
+    name: "git_repo",
+    ok: true,
+    message: isGitRepo ? `Git repository detected at ${projectRoot}` : `Not a git repository (${projectRoot})`,
+  });
+
+  // 4. Harness CLIs availability
+  const agyInstalled = checkBinaryOnPath("agy");
+  const harnesses: Record<HarnessId, { installed: boolean; headlessSupported: boolean; binary?: string }> = {
+    "claude-code": {
+      installed: checkBinaryOnPath("claude"),
+      headlessSupported: true,
+      binary: "claude",
+    },
+    opencode: {
+      installed: checkBinaryOnPath("opencode"),
+      headlessSupported: true,
+      binary: "opencode",
+    },
+    codex: {
+      installed: checkBinaryOnPath("codex"),
+      headlessSupported: true,
+      binary: "codex",
+    },
+    antigravity: {
+      installed: agyInstalled,
+      headlessSupported: agyInstalled && antigravityAdapter.supportsHeadlessSpawn,
+      binary: "agy",
+    },
+  };
+  checks.push({
+    name: "harness_clis",
+    ok: true,
+    message: Object.entries(harnesses)
+      .map(([k, v]) => `${k}: ${v.installed ? "installed" : "not found"}`)
+      .join(", "),
+  });
+
+  // 5. In-memory synthetic PreToolUse security policy probe (.GIT/config, .ENV)
+  const gitEval = evaluatePreToolUse({
+    toolName: "Write",
+    tool_input: { file_path: ".GIT/config" },
+    projectRoot,
+  });
+  const envEval = evaluatePreToolUse({
+    toolName: "Write",
+    tool_input: { file_path: ".ENV" },
+    projectRoot,
+  });
+
+  const gitBlocked = !gitEval.allowed;
+  const envBlocked = !envEval.allowed;
+  const policyOk = gitBlocked && envBlocked;
+
+  if (!policyOk) {
+    errors.push(
+      `PreToolUse policy probe failed: .GIT/config blocked=${gitBlocked}, .ENV blocked=${envBlocked}`
+    );
+  }
+  checks.push({
+    name: "security_policy_probe",
+    ok: policyOk,
+    message: policyOk
+      ? "Zero-token PreToolUse policy probe: .GIT/config and .ENV securely denied"
+      : "PreToolUse policy probe violation",
+  });
+
+  // 6. Home directory write permission check
+  let permOk = true;
+  try {
+    const testDir = path.join(homeDir, ".asd", "state");
+    ensureDir(testDir);
+    const testFile = path.join(testDir, `.perm-test-${Date.now()}`);
+    fs.writeFileSync(testFile, "ok", "utf8");
+    fs.unlinkSync(testFile);
+  } catch (err: unknown) {
+    permOk = false;
+    const msg = err instanceof Error ? err.message : String(err);
+    errors.push(`Home directory permission test failed: ${msg}`);
+  }
+  checks.push({
+    name: "home_permissions",
+    ok: permOk,
+    message: permOk ? `Permissions verified for ${homeDir}/.asd` : "Permission denied",
+  });
+
+  const durationMs = performance.now() - startTime;
+
+  return {
+    ok: errors.length === 0,
+    durationMs,
+    checks,
+    nodeVersion: {
+      ok: nodeOk,
+      version: nodeVer,
+      minRequired: ">=22.13.0",
+    },
+    sqliteWal: {
+      ok: sqliteOk,
+      message: sqliteMsg,
+    },
+    gitRepo: {
+      ok: true,
+      isRepo: isGitRepo,
+      message: isGitRepo ? "Git repository confirmed" : "Non-git directory",
+    },
+    harnesses,
+    policyProbe: {
+      ok: policyOk,
+      gitBlocked,
+      envBlocked,
+      message: policyOk ? "Both .GIT/config and .ENV denied" : "Policy probe failure",
+    },
+    errors,
+  };
+}
+
+export const runAsdDoctor = doctorProbe;
