@@ -1,0 +1,25 @@
+{
+  "_asdVersion": "2.2.0",
+  "harnesses": {
+    "claude-code": {
+      "WriteTools": ["Write", "Edit", "MultiEdit", "NotebookEdit"],
+      "BashTools": ["Bash"],
+      "FilePathKeys": ["tool_input.file_path", "tool_input.notebook_path", "file_path", "path"]
+    },
+    "opencode": {
+      "WriteTools": ["write", "edit", "patch", "multiedit"],
+      "BashTools": ["bash"],
+      "FilePathKeys": ["filePath", "file_path", "path", "target"]
+    },
+    "codex": {
+      "WriteTools": ["apply_patch", "write_file", "edit_file"],
+      "BashTools": ["shell", "exec_command", "bash"],
+      "FilePathKeys": ["path", "file_path", "target_file"]
+    },
+    "antigravity": {
+      "WriteTools": ["write_file", "edit_file"],
+      "BashTools": ["run_command"],
+      "FilePathKeys": ["Path", "TargetFile", "path", "file_path"]
+    }
+  }
+}
