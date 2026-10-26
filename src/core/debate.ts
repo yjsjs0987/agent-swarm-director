@@ -201,16 +201,7 @@ export function buildDefaultHarnessCommand(
 // ============================================================================
 
 export function deduplicateStrings(items: string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const item of items) {
-    const trimmed = item.trim();
-    if (trimmed && !seen.has(trimmed)) {
-      seen.add(trimmed);
-      out.push(trimmed);
-    }
-  }
-  return out;
+  return [...new Set(items.map((s) => s.trim()).filter(Boolean))];
 }
 
 export function formatDebateAcceptance(

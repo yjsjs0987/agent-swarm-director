@@ -204,78 +204,9 @@ export function getSkillTemplate(skillName: string): string {
       return fs.readFileSync(skillsDir, "utf8");
     }
   } catch {
-    // Fall back to embedded definitions if file is unreadable
+    // Ignore unreadable file
   }
-
-  switch (skillName) {
-    case "asd":
-      return `---
-name: asd
-description: Universal end-to-end multi-agent autonomous workflow for ASD v2.2.
----
-
-# ASD Autonomous Multi-Agent Workflow (\`/asd\`)
-
-1. Planning: Call asd_plan to decompose tasks into .asd/PLAN.md.
-2. Wave Execution: Dispatch tasks via LIGHT (in-place) or HEAVY (worktree) tracks.
-3. MANDATORY LIVE PROGRESS DIRECTIVE: Print the returned progressBoard verbatim after every subagent or wave completion.
-4. Summary: Output final summary.md report.
-`;
-    case "asd-plan":
-      return `---
-name: asd-plan
-description: Plan-only workflow for ASD v2.2.
----
-
-# ASD Planning & Decomposition Workflow (\`/asd-plan\`)
-
-1. Scout exploration with read-only tools.
-2. Assess intent: CLEAR vs UNCLEAR.
-3. Call asd_plan to generate .asd/PLAN.md.
-4. Print returned progressBoard verbatim.
-`;
-    case "asd-run":
-      return `---
-name: asd-run
-description: Execution & resume workflow for ASD v2.2.
----
-
-# ASD Execution & Resume Workflow (\`/asd-run\`)
-
-1. Reverse-sync edits via asd_plan({ action: "sync_from_md" }).
-2. Wave-by-wave execution of remaining tasks via asd_dispatch and asd_verify.
-3. MANDATORY LIVE PROGRESS DIRECTIVE: Print progressBoard verbatim after every tool call.
-4. Stop on circuit breaker (no_progress_count >= 3).
-`;
-    case "asd-debate":
-      return `---
-name: asd-debate
-description: Cross-harness adversarial debate workflow for ASD v2.2.
----
-
-# ASD Cross-Harness Adversarial Debate (\`/asd-debate\`)
-
-1. Round 1 blind critique across heterogeneous harnesses via asd_debate.
-2. Round 2 confrontation & binding arbiter verdict.
-3. Automatic constraint injection into tasks.acceptance.
-4. Print verdict and progressBoard verbatim.
-`;
-    case "asd-debug":
-      return `---
-name: asd-debug
-description: Systematic hypothesis-driven debugging workflow for ASD v2.2.
----
-
-# ASD Systematic Debugging Workflow (\`/asd-debug\`)
-
-1. Rule Zero: Reproduce First (write failing test before code edits).
-2. Hypothesize and diagnose root cause.
-3. Minimal fix within allowedFiles.
-4. Regression verification via asd_verify and print progressBoard.
-`;
-    default:
-      return `# ASD Skill: ${skillName}\n`;
-  }
+  return `# ASD Skill: ${skillName}\n`;
 }
 
 export function generateAgentContent(role: AgentRole): string {
@@ -632,6 +563,40 @@ function mergeJsonMcpServersForHarness(options: {
   return result;
 }
 
+function syncJsonMcpConfigFile(options: {
+  filePath: string;
+  harnessId: "claude-code" | "opencode" | "antigravity";
+  catalog: Record<string, CatalogMcpEntry>;
+  nativeCapabilities: Set<string>;
+  externalExistingKeys?: Set<string>;
+  mutateBeforeMerge?: (config: Record<string, unknown>, extKeys: Set<string>) => void;
+}): void {
+  const { filePath, harnessId, catalog, nativeCapabilities, externalExistingKeys, mutateBeforeMerge } = options;
+  let config: Record<string, unknown> = {};
+  if (fs.existsSync(filePath)) {
+    backupUserFile(filePath);
+    try {
+      config = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    } catch {
+      config = {};
+    }
+  }
+  const extKeys = new Set<string>(externalExistingKeys);
+  mutateBeforeMerge?.(config, extKeys);
+  const existingMcp =
+    config.mcpServers && typeof config.mcpServers === "object"
+      ? (config.mcpServers as Record<string, unknown>)
+      : {};
+  config.mcpServers = mergeJsonMcpServersForHarness({
+    harnessId,
+    existingMcpServers: existingMcp,
+    catalog,
+    nativeCapabilities,
+    externalExistingKeys: extKeys,
+  });
+  safeWriteJson(filePath, config);
+}
+
 function buildCodexManagedTomlBlock(options: {
   unmanagedToml: string;
   catalog: Record<string, CatalogMcpEntry>;
@@ -779,53 +744,15 @@ export async function syncHarnessConfigs(
         written.push(settingsPath);
 
         // ~/.claude.json & ~/.claude/.mcp.json
-        const claudeJsonPath = path.join(homeDir, ".claude.json");
-        let claudeJson: Record<string, unknown> = {};
-        if (fs.existsSync(claudeJsonPath)) {
-          backupUserFile(claudeJsonPath);
-          try {
-            claudeJson = JSON.parse(fs.readFileSync(claudeJsonPath, "utf8")) as Record<string, unknown>;
-          } catch {
-            claudeJson = {};
-          }
+        for (const mcpPath of [path.join(homeDir, ".claude.json"), path.join(claudeDir, ".mcp.json")]) {
+          syncJsonMcpConfigFile({
+            filePath: mcpPath,
+            harnessId: "claude-code",
+            catalog: catalogMcpServers,
+            nativeCapabilities: nativeCaps,
+          });
+          written.push(mcpPath);
         }
-        const claudeExistingMcp = (
-          claudeJson.mcpServers && typeof claudeJson.mcpServers === "object"
-            ? (claudeJson.mcpServers as Record<string, unknown>)
-            : {}
-        );
-        claudeJson.mcpServers = mergeJsonMcpServersForHarness({
-          harnessId: "claude-code",
-          existingMcpServers: claudeExistingMcp,
-          catalog: catalogMcpServers,
-          nativeCapabilities: nativeCaps,
-        });
-        safeWriteJson(claudeJsonPath, claudeJson);
-        written.push(claudeJsonPath);
-
-        const claudeMcpPath = path.join(claudeDir, ".mcp.json");
-        let claudeMcp: Record<string, unknown> = {};
-        if (fs.existsSync(claudeMcpPath)) {
-          backupUserFile(claudeMcpPath);
-          try {
-            claudeMcp = JSON.parse(fs.readFileSync(claudeMcpPath, "utf8")) as Record<string, unknown>;
-          } catch {
-            claudeMcp = {};
-          }
-        }
-        const dotExistingMcp = (
-          claudeMcp.mcpServers && typeof claudeMcp.mcpServers === "object"
-            ? (claudeMcp.mcpServers as Record<string, unknown>)
-            : {}
-        );
-        claudeMcp.mcpServers = mergeJsonMcpServersForHarness({
-          harnessId: "claude-code",
-          existingMcpServers: dotExistingMcp,
-          catalog: catalogMcpServers,
-          nativeCapabilities: nativeCaps,
-        });
-        safeWriteJson(claudeMcpPath, claudeMcp);
-        written.push(claudeMcpPath);
 
         break;
       }
@@ -847,37 +774,20 @@ export async function syncHarnessConfigs(
 
         // opencode.json
         const opencodeJsonPath = path.join(opencodeDir, "opencode.json");
-        let existingConfig: Record<string, unknown> = {};
-        if (fs.existsSync(opencodeJsonPath)) {
-          backupUserFile(opencodeJsonPath);
-          try {
-            existingConfig = JSON.parse(fs.readFileSync(opencodeJsonPath, "utf8")) as Record<string, unknown>;
-          } catch {
-            existingConfig = {};
-          }
-        }
-        const existingMcp = (
-          existingConfig.mcpServers && typeof existingConfig.mcpServers === "object"
-            ? (existingConfig.mcpServers as Record<string, unknown>)
-            : {}
-        );
-        // Also check OpenCode's alternative `mcp` object key for existing user servers
-        const externalOpencodeMcpKeys = new Set<string>();
-        if (existingConfig.mcp && typeof existingConfig.mcp === "object") {
-          for (const k of Object.keys(existingConfig.mcp as Record<string, unknown>)) {
-            externalOpencodeMcpKeys.add(k);
-          }
-        }
-
-        existingConfig._asdVersion = ASD_VERSION;
-        existingConfig.mcpServers = mergeJsonMcpServersForHarness({
+        syncJsonMcpConfigFile({
+          filePath: opencodeJsonPath,
           harnessId: "opencode",
-          existingMcpServers: existingMcp,
           catalog: catalogMcpServers,
           nativeCapabilities: nativeCaps,
-          externalExistingKeys: externalOpencodeMcpKeys,
+          mutateBeforeMerge: (cfg, extKeys) => {
+            cfg._asdVersion = ASD_VERSION;
+            if (cfg.mcp && typeof cfg.mcp === "object") {
+              for (const k of Object.keys(cfg.mcp as Record<string, unknown>)) {
+                extKeys.add(k);
+              }
+            }
+          },
         });
-        safeWriteJson(opencodeJsonPath, existingConfig);
         written.push(opencodeJsonPath);
 
         break;
@@ -978,11 +888,10 @@ export async function syncHarnessConfigs(
         // Check external Antigravity MCP config files (e.g., ~/.gemini/config/mcp_config.json or ~/.gemini/antigravity-cli/mcp_config.json)
         // so we never inject duplicates of tools already configured by the user or OMO-for-AGY.
         const externalGeminiKeys = new Set<string>();
-        const externalGeminiPaths = [
+        for (const extPath of [
           path.join(geminiDir, "config", "mcp_config.json"),
           path.join(geminiDir, "antigravity-cli", "mcp_config.json"),
-        ];
-        for (const extPath of externalGeminiPaths) {
+        ]) {
           if (fs.existsSync(extPath)) {
             try {
               const extJson = JSON.parse(fs.readFileSync(extPath, "utf8")) as Record<string, unknown>;
@@ -999,28 +908,13 @@ export async function syncHarnessConfigs(
 
         // mcp_config.json
         const mcpConfigPath = path.join(geminiDir, "mcp_config.json");
-        let existingMcpConfig: Record<string, unknown> = {};
-        if (fs.existsSync(mcpConfigPath)) {
-          backupUserFile(mcpConfigPath);
-          try {
-            existingMcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, "utf8")) as Record<string, unknown>;
-          } catch {
-            existingMcpConfig = {};
-          }
-        }
-        const geminiMcpServers = (
-          existingMcpConfig.mcpServers && typeof existingMcpConfig.mcpServers === "object"
-            ? (existingMcpConfig.mcpServers as Record<string, unknown>)
-            : {}
-        );
-        existingMcpConfig.mcpServers = mergeJsonMcpServersForHarness({
+        syncJsonMcpConfigFile({
+          filePath: mcpConfigPath,
           harnessId: "antigravity",
-          existingMcpServers: geminiMcpServers,
           catalog: catalogMcpServers,
           nativeCapabilities: nativeCaps,
           externalExistingKeys: externalGeminiKeys,
         });
-        safeWriteJson(mcpConfigPath, existingMcpConfig);
         written.push(mcpConfigPath);
 
         break;
@@ -1169,49 +1063,42 @@ export async function uninstallHarnessConfigs(
     }
   }
 
-  const claudeJson = path.join(homeDir, ".claude.json");
-  if (restoreUserBackup(claudeJson)) {
-    restoredFiles.push(claudeJson);
-    harnessStatus["claude-code"].restored.push(claudeJson);
-  } else if (fs.existsSync(claudeJson)) {
+  function cleanupJsonMcpFile(
+    filePath: string,
+    harness: HarnessId,
+    extraDeleteKeys: string[] = []
+  ): void {
+    if (restoreUserBackup(filePath)) {
+      restoredFiles.push(filePath);
+      harnessStatus[harness].restored.push(filePath);
+      return;
+    }
+    if (!fs.existsSync(filePath)) return;
     try {
-      const cJson = JSON.parse(fs.readFileSync(claudeJson, "utf8")) as Record<string, unknown>;
-      if (cJson.mcpServers && typeof cJson.mcpServers === "object") {
-        stripAsdManagedMcpEntries(cJson.mcpServers as Record<string, unknown>);
+      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+      if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
+        stripAsdManagedMcpEntries(parsed.mcpServers as Record<string, unknown>);
       }
-      const mcpCount = cJson.mcpServers && typeof cJson.mcpServers === "object" ? Object.keys(cJson.mcpServers).length : 0;
-      const otherKeys = Object.keys(cJson).filter((k) => k !== "mcpServers");
+      for (const k of extraDeleteKeys) {
+        delete parsed[k];
+      }
+      const mcpCount =
+        parsed.mcpServers && typeof parsed.mcpServers === "object"
+          ? Object.keys(parsed.mcpServers).length
+          : 0;
+      const otherKeys = Object.keys(parsed).filter((k) => k !== "mcpServers");
       if (mcpCount === 0 && otherKeys.length === 0) {
-        removeFile(claudeJson, "claude-code");
+        removeFile(filePath, harness);
       } else {
-        safeWriteJson(claudeJson, cJson);
+        safeWriteJson(filePath, parsed);
       }
     } catch {
-      removeFile(claudeJson, "claude-code");
+      removeFile(filePath, harness);
     }
   }
 
-  const dotMcpJson = path.join(claudeDir, ".mcp.json");
-  if (restoreUserBackup(dotMcpJson)) {
-    restoredFiles.push(dotMcpJson);
-    harnessStatus["claude-code"].restored.push(dotMcpJson);
-  } else if (fs.existsSync(dotMcpJson)) {
-    try {
-      const dJson = JSON.parse(fs.readFileSync(dotMcpJson, "utf8")) as Record<string, unknown>;
-      if (dJson.mcpServers && typeof dJson.mcpServers === "object") {
-        stripAsdManagedMcpEntries(dJson.mcpServers as Record<string, unknown>);
-      }
-      const mcpCount = dJson.mcpServers && typeof dJson.mcpServers === "object" ? Object.keys(dJson.mcpServers).length : 0;
-      const otherKeys = Object.keys(dJson).filter((k) => k !== "mcpServers");
-      if (mcpCount === 0 && otherKeys.length === 0) {
-        removeFile(dotMcpJson, "claude-code");
-      } else {
-        safeWriteJson(dotMcpJson, dJson);
-      }
-    } catch {
-      removeFile(dotMcpJson, "claude-code");
-    }
-  }
+  cleanupJsonMcpFile(path.join(homeDir, ".claude.json"), "claude-code");
+  cleanupJsonMcpFile(path.join(claudeDir, ".mcp.json"), "claude-code");
 
   // 2. OpenCode
   const opencodeDir = path.join(homeDir, ".config", "opencode");
@@ -1221,29 +1108,10 @@ export async function uninstallHarnessConfigs(
   removeDirIfEmpty(path.join(opencodeDir, "command"));
   removeFile(path.join(opencodeDir, "AGENTS.md"), "opencode");
 
-  const opencodeJson = path.join(opencodeDir, "opencode.json");
-  if (restoreUserBackup(opencodeJson)) {
-    restoredFiles.push(opencodeJson);
-    harnessStatus.opencode.restored.push(opencodeJson);
-  } else if (fs.existsSync(opencodeJson)) {
-    try {
-      const oc = JSON.parse(fs.readFileSync(opencodeJson, "utf8")) as Record<string, unknown>;
-      if (oc.mcpServers && typeof oc.mcpServers === "object") {
-        stripAsdManagedMcpEntries(oc.mcpServers as Record<string, unknown>);
-      }
-      delete oc._asdVersion;
-      delete oc.agentRouting;
-      const mcpCount = oc.mcpServers && typeof oc.mcpServers === "object" ? Object.keys(oc.mcpServers).length : 0;
-      const otherKeys = Object.keys(oc).filter((k) => k !== "mcpServers");
-      if (mcpCount === 0 && otherKeys.length === 0) {
-        removeFile(opencodeJson, "opencode");
-      } else {
-        safeWriteJson(opencodeJson, oc);
-      }
-    } catch {
-      removeFile(opencodeJson, "opencode");
-    }
-  }
+  cleanupJsonMcpFile(path.join(opencodeDir, "opencode.json"), "opencode", [
+    "_asdVersion",
+    "agentRouting",
+  ]);
 
   // 3. Codex
   const codexDir = path.join(homeDir, ".codex");
@@ -1315,27 +1183,7 @@ export async function uninstallHarnessConfigs(
     }
   }
 
-  const mcpConfigJson = path.join(geminiDir, "mcp_config.json");
-  if (restoreUserBackup(mcpConfigJson)) {
-    restoredFiles.push(mcpConfigJson);
-    harnessStatus.antigravity.restored.push(mcpConfigJson);
-  } else if (fs.existsSync(mcpConfigJson)) {
-    try {
-      const mJson = JSON.parse(fs.readFileSync(mcpConfigJson, "utf8")) as Record<string, unknown>;
-      if (mJson.mcpServers && typeof mJson.mcpServers === "object") {
-        stripAsdManagedMcpEntries(mJson.mcpServers as Record<string, unknown>);
-      }
-      const mcpCount = mJson.mcpServers && typeof mJson.mcpServers === "object" ? Object.keys(mJson.mcpServers).length : 0;
-      const otherKeys = Object.keys(mJson).filter((k) => k !== "mcpServers");
-      if (mcpCount === 0 && otherKeys.length === 0) {
-        removeFile(mcpConfigJson, "antigravity");
-      } else {
-        safeWriteJson(mcpConfigJson, mJson);
-      }
-    } catch {
-      removeFile(mcpConfigJson, "antigravity");
-    }
-  }
+  cleanupJsonMcpFile(path.join(geminiDir, "mcp_config.json"), "antigravity");
 
   // Remove last-sync.json
   const lastSyncPath = path.join(homeDir, ".asd", "state", "last-sync.json");

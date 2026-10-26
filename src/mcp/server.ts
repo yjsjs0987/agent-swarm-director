@@ -37,7 +37,7 @@ import { fileURLToPath } from "node:url";
 import { autoSyncIfNeeded } from "../adapters/installer.ts";
 import { resolveAsdPaths } from "../core/config.ts";
 import { openProjectDb, type SessionRow, type SqliteDriver, type TaskRow } from "../core/db.ts";
-import { runDebateBroker } from "../core/debate.ts";
+import { buildDefaultHarnessCommand, runDebateBroker } from "../core/debate.ts";
 import {
   atomicWriteFileSync,
   renderPlanMd,
@@ -223,41 +223,6 @@ export interface AsdMcpServerOptions {
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-function buildDefaultHarnessCommand(
-  harness: HarnessId,
-  prompt: string,
-  model: string
-): { command: string; args: string[] } {
-  switch (harness) {
-    case "claude-code": {
-      const args = ["-p", prompt, "--output-format", "json"];
-      if (model) args.push("--model", model);
-      return { command: "claude", args };
-    }
-    case "opencode": {
-      const args = ["run", prompt, "--format", "json"];
-      if (model) args.push("--model", model);
-      return { command: "opencode", args };
-    }
-    case "codex": {
-      const args = ["exec", prompt, "--json"];
-      if (model) args.push("-m", model);
-      return { command: "codex", args };
-    }
-    case "antigravity": {
-      const args = ["-p", prompt, "--output-format", "json"];
-      if (model) args.push("--model", model);
-      return { command: "agy", args };
-    }
-    default: {
-      return {
-        command: "node",
-        args: ["-e", 'console.log(JSON.stringify({ status: "done" }))'],
-      };
-    }
-  }
-}
 
 function buildPromptForTask(
   task: TaskRow,

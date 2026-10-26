@@ -300,52 +300,9 @@ export function matchGlobOrPrefix(
     return target.startsWith(pat + "/");
   }
 
-  // Glob matching
-  let regexStr = "";
-  let i = 0;
-  while (i < pat.length) {
-    const c = pat[i];
-    if (c === "*") {
-      if (pat[i + 1] === "*") {
-        if (pat[i + 2] === "/") {
-          regexStr += "(?:.*\\/)?";
-          i += 3;
-        } else {
-          regexStr += ".*";
-          i += 2;
-        }
-      } else {
-        regexStr += "[^/]*";
-        i++;
-      }
-    } else if (c === "?") {
-      regexStr += "[^/]";
-      i++;
-    } else if (
-      c === "." ||
-      c === "+" ||
-      c === "^" ||
-      c === "$" ||
-      c === "{" ||
-      c === "}" ||
-      c === "(" ||
-      c === ")" ||
-      c === "[" ||
-      c === "]" ||
-      c === "|" ||
-      c === "\\"
-    ) {
-      regexStr += "\\" + c;
-      i++;
-    } else {
-      regexStr += c;
-      i++;
-    }
-  }
-
+  // Glob matching via Node built-in path.posix.matchesGlob
   try {
-    const regex = new RegExp(`^${regexStr}$`);
-    return regex.test(target);
+    return path.posix.matchesGlob(target, pat);
   } catch {
     return false;
   }
