@@ -1,5 +1,7 @@
 # Agent Swarm Director (`agent-swarm-director` / ASD v2.2)
 
+**English** | [한국어](./README_ko.md)
+
 > **Zero-dependency universal multi-agent orchestration harness across Claude Code, OpenCode, Codex CLI, and Antigravity.**
 
 Agent Swarm Director (**ASD v2.2**) is the universal multi-harness successor to `agy-agent-swarm-director`. Built purely on native Node.js (`>=22.13.0`) TypeScript execution and `node:sqlite` (WAL mode) with **zero external npm runtime dependencies**, ASD coordinates heterogeneous AI coding harnesses under a single deterministic control plane.
@@ -79,13 +81,6 @@ Automatically provided to harnesses without native CLI LSP:
 - `lsp_symbols`: Symbol declaration extraction (`function`, `class`, `interface`, `type`, `variable`, `struct`).
 - `lsp_definition`: Exact symbol definition lookup (`file`, `line`, `column`).
 - `lsp_references`: Project-wide symbol reference search (`file`, `line`, `column`, `isDefinition`).
-
----
-
-## Architecture Documentation
-
-- [`ARCHITECTURE_PLAN.md`](./ARCHITECTURE_PLAN.md) — System architecture, 4-tier model routing, and dual-track workspace design.
-- [`IMPLEMENTATION_PLAN.md`](./IMPLEMENTATION_PLAN.md) — SQLite DDL, MCP schemas, and adapter manifest specifications.
 
 ---
 
