@@ -1,0 +1,15 @@
+{
+  "name": "asd-multiagent",
+  "version": "2.2.0",
+  "description": "ASD multi-agent orchestration harness",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "asd": "./src/cli/index.ts"
+  },
+  "scripts": {
+    "test": "node --no-warnings --test tests/*.test.ts"
+  }
+}
