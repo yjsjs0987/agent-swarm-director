@@ -2,6 +2,7 @@
 .omo/
 .asd/
 handoff.md
+session.txt
 
 # Environment & Secrets
 .env
