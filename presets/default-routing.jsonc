@@ -1,0 +1,26 @@
+// ASD v2.2 default model routing preset.
+// Bootstrapped to ~/.asd/routing.jsonc on first use; per-project
+// overrides live in <project>/.asd/routing.jsonc (1st priority).
+// Phase 2 refines these mappings with full 4-harness fallback chains.
+{
+  "_asdVersion": "2.2.0",
+  "agents": {
+    "director": { "harness": "opencode", "model": "glm-4.7", "modelFamily": "glm", "fallbacks": [{ "harness": "claude-code", "model": "sonnet", "modelFamily": "claude" }] },
+    "planner": { "harness": "claude-code", "model": "sonnet", "modelFamily": "claude", "fallbacks": [{ "harness": "opencode", "model": "glm-4.7", "modelFamily": "glm" }] },
+    "analyst": { "harness": "codex", "model": "gpt-5.2", "modelFamily": "gpt", "fallbacks": [{ "harness": "opencode", "model": "glm-4.7", "modelFamily": "glm" }] },
+    "critic": { "harness": "antigravity", "model": "gemini-3-pro", "modelFamily": "gemini", "fallbacks": [{ "harness": "codex", "model": "gpt-5.2", "modelFamily": "gpt" }] },
+    "arbiter": { "harness": "opencode", "model": "glm-4.7", "modelFamily": "glm", "fallbacks": [{ "harness": "claude-code", "model": "sonnet", "modelFamily": "claude" }] },
+    "architect": { "harness": "claude-code", "model": "sonnet", "modelFamily": "claude", "fallbacks": [{ "harness": "codex", "model": "gpt-5.2", "modelFamily": "gpt" }] },
+    "builder": { "harness": "opencode", "model": "glm-4.7", "modelFamily": "glm", "fallbacks": [{ "harness": "codex", "model": "gpt-5.2", "modelFamily": "gpt" }] },
+    "worker": { "harness": "opencode", "model": "glm-4.7", "modelFamily": "glm", "fallbacks": [{ "harness": "claude-code", "model": "haiku", "modelFamily": "claude" }] },
+    "scout": { "harness": "codex", "model": "gpt-5.2-mini", "modelFamily": "gpt", "fallbacks": [{ "harness": "opencode", "model": "glm-4.7-air", "modelFamily": "glm" }] },
+    "verifier": { "harness": "antigravity", "model": "gemini-3-flash", "modelFamily": "gemini", "fallbacks": [{ "harness": "codex", "model": "gpt-5.2-mini", "modelFamily": "gpt" }] }
+  },
+  "categories": {
+    "visual-ui": { "harness": "claude-code", "model": "sonnet", "modelFamily": "claude", "fallbacks": [{ "harness": "antigravity", "model": "gemini-3-pro", "modelFamily": "gemini" }] },
+    "design": { "harness": "antigravity", "model": "gemini-3-pro", "modelFamily": "gemini", "fallbacks": [{ "harness": "claude-code", "model": "sonnet", "modelFamily": "claude" }] },
+    "research": { "harness": "codex", "model": "gpt-5.2", "modelFamily": "gpt", "fallbacks": [{ "harness": "opencode", "model": "glm-4.7", "modelFamily": "glm" }] },
+    "writing": { "harness": "opencode", "model": "glm-4.7", "modelFamily": "glm", "fallbacks": [{ "harness": "claude-code", "model": "sonnet", "modelFamily": "claude" }] },
+    "general": { "harness": "opencode", "model": "glm-4.7", "modelFamily": "glm", "fallbacks": [{ "harness": "codex", "model": "gpt-5.2-mini", "modelFamily": "gpt" }] }
+  }
+}
