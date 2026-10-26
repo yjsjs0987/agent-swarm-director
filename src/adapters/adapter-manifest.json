@@ -4,22 +4,26 @@
     "claude-code": {
       "WriteTools": ["Write", "Edit", "MultiEdit", "NotebookEdit"],
       "BashTools": ["Bash"],
-      "FilePathKeys": ["tool_input.file_path", "tool_input.notebook_path", "file_path", "path"]
+      "FilePathKeys": ["tool_input.file_path", "tool_input.notebook_path", "file_path", "path"],
+      "NativeCapabilities": ["websearch"]
     },
     "opencode": {
       "WriteTools": ["write", "edit", "patch", "multiedit"],
       "BashTools": ["bash"],
-      "FilePathKeys": ["filePath", "file_path", "path", "target"]
+      "FilePathKeys": ["filePath", "file_path", "path", "target"],
+      "NativeCapabilities": ["lsp"]
     },
     "codex": {
       "WriteTools": ["apply_patch", "write_file", "edit_file"],
       "BashTools": ["shell", "exec_command", "bash"],
-      "FilePathKeys": ["path", "file_path", "target_file"]
+      "FilePathKeys": ["path", "file_path", "target_file"],
+      "NativeCapabilities": ["websearch"]
     },
     "antigravity": {
       "WriteTools": ["write_file", "edit_file"],
       "BashTools": ["run_command"],
-      "FilePathKeys": ["Path", "TargetFile", "path", "file_path"]
+      "FilePathKeys": ["Path", "TargetFile", "path", "file_path"],
+      "NativeCapabilities": ["websearch"]
     }
   }
 }

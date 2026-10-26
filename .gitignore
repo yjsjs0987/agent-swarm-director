@@ -1,0 +1,13 @@
+# Agent & Orchestration State
+.omo/
+.asd/
+handoff.md
+
+# Environment & Secrets
+.env
+.env.*
+
+# Node / OS
+node_modules/
+*.log
+.DS_Store

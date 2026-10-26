@@ -450,6 +450,242 @@ function saveLastSync(homeDir: string, record: LastSyncRecord): void {
 }
 
 // ============================================================================
+// Capability-Aware & Dedup MCP Catalog Resolution
+// ============================================================================
+
+export interface CatalogMcpEntry {
+  command?: string;
+  args?: string[];
+  url?: string;
+}
+
+export function loadHarnessNativeCapabilities(): Record<HarnessId, Set<string>> {
+  const fallback: Record<HarnessId, Set<string>> = {
+    "claude-code": new Set(["websearch"]),
+    opencode: new Set(["lsp"]),
+    codex: new Set(["websearch"]),
+    antigravity: new Set(["websearch"]),
+  };
+
+  const manifestPath = path.join(getAsdRoot(), "src", "adapters", "adapter-manifest.json");
+  try {
+    if (fs.existsSync(manifestPath)) {
+      const parsed = parseJsonc<{
+        harnesses?: Partial<Record<HarnessId, { NativeCapabilities?: string[] }>>;
+      }>(fs.readFileSync(manifestPath, "utf8"));
+      if (parsed?.harnesses) {
+        for (const h of DEFAULT_HARNESS_IDS) {
+          const caps = parsed.harnesses[h]?.NativeCapabilities;
+          if (Array.isArray(caps)) {
+            fallback[h] = new Set(caps.map((c) => c.toLowerCase()));
+          }
+        }
+      }
+    }
+  } catch {
+    // Use fallback capabilities if manifest cannot be read
+  }
+
+  return fallback;
+}
+
+export function loadCatalogMcpServers(
+  homeDir: string,
+  asdRoot: string
+): Record<string, CatalogMcpEntry> {
+  const { mcpPath } = bootstrapGlobalPresets(homeDir);
+  const presetMcpPath = path.join(asdRoot, "presets", "default-mcp.jsonc");
+
+  let presetServers: Record<string, CatalogMcpEntry> = {};
+  try {
+    if (fs.existsSync(presetMcpPath)) {
+      const parsed = parseJsonc<{ mcpServers?: Record<string, CatalogMcpEntry> }>(
+        fs.readFileSync(presetMcpPath, "utf8")
+      );
+      if (parsed?.mcpServers && typeof parsed.mcpServers === "object") {
+        presetServers = { ...parsed.mcpServers };
+      }
+    }
+  } catch {
+    presetServers = {};
+  }
+
+  let userCatalogServers: Record<string, CatalogMcpEntry> = {};
+  try {
+    if (fs.existsSync(mcpPath)) {
+      const parsed = parseJsonc<{ mcpServers?: Record<string, CatalogMcpEntry> }>(
+        fs.readFileSync(mcpPath, "utf8")
+      );
+      if (parsed?.mcpServers && typeof parsed.mcpServers === "object") {
+        userCatalogServers = { ...parsed.mcpServers };
+      }
+    }
+  } catch {
+    userCatalogServers = {};
+  }
+
+  const merged: Record<string, CatalogMcpEntry> = {
+    ...presetServers,
+    ...userCatalogServers,
+  };
+
+  // Resolve <ASD_ROOT> placeholder in args
+  const resolved: Record<string, CatalogMcpEntry> = {};
+  for (const [name, entry] of Object.entries(merged)) {
+    if (!entry || typeof entry !== "object") continue;
+    if (entry.command) {
+      const args = Array.isArray(entry.args)
+        ? entry.args.map((arg) =>
+            arg.includes("<ASD_ROOT>")
+              ? path.normalize(arg.replace("<ASD_ROOT>", asdRoot))
+              : arg
+          )
+        : [];
+      resolved[name] = { command: entry.command, args };
+    } else if (entry.url) {
+      resolved[name] = { url: entry.url };
+    }
+  }
+
+  // Always guarantee asd-core is present
+  if (!resolved["asd-core"]) {
+    resolved["asd-core"] = {
+      command: "node",
+      args: ["--no-warnings", path.join(asdRoot, "src", "mcp", "server.ts")],
+    };
+  }
+
+  return resolved;
+}
+
+function mergeJsonMcpServersForHarness(options: {
+  harnessId: "claude-code" | "opencode" | "antigravity";
+  existingMcpServers: Record<string, unknown>;
+  catalog: Record<string, CatalogMcpEntry>;
+  nativeCapabilities: Set<string>;
+  externalExistingKeys?: Set<string>;
+}): Record<string, unknown> {
+  const {
+    harnessId,
+    existingMcpServers,
+    catalog,
+    nativeCapabilities,
+    externalExistingKeys,
+  } = options;
+
+  // Keep only non-ASD-managed user entries first
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(existingMcpServers)) {
+    const isManaged =
+      v !== null &&
+      typeof v === "object" &&
+      (v as Record<string, unknown>)._asdManaged === true;
+    if (!isManaged) {
+      result[k] = v;
+    }
+  }
+
+  for (const [serverName, def] of Object.entries(catalog)) {
+    const lowerName = serverName.toLowerCase();
+
+    if (serverName !== "asd-core") {
+      // 1. Native capability filter: skip if harness already has this feature built-in
+      if (nativeCapabilities.has(lowerName)) {
+        continue;
+      }
+      // 2. Existing user/plugin config dedup filter: skip if already defined by user
+      if (Object.prototype.hasOwnProperty.call(result, serverName)) {
+        continue;
+      }
+      if (externalExistingKeys?.has(serverName) || externalExistingKeys?.has(lowerName)) {
+        continue;
+      }
+    }
+
+    if (def.command) {
+      result[serverName] = {
+        command: def.command,
+        args: def.args ?? [],
+        _asdManaged: true,
+      };
+    } else if (def.url) {
+      if (harnessId === "claude-code") {
+        result[serverName] = {
+          type: "http",
+          url: def.url,
+          _asdManaged: true,
+        };
+      } else if (harnessId === "antigravity") {
+        result[serverName] = {
+          serverUrl: def.url,
+          _asdManaged: true,
+        };
+      } else {
+        result[serverName] = {
+          url: def.url,
+          _asdManaged: true,
+        };
+      }
+    }
+  }
+
+  return result;
+}
+
+function buildCodexManagedTomlBlock(options: {
+  unmanagedToml: string;
+  catalog: Record<string, CatalogMcpEntry>;
+  nativeCapabilities: Set<string>;
+}): string {
+  const { unmanagedToml, catalog, nativeCapabilities } = options;
+
+  // Detect any [mcp_servers.<name>] already defined outside ASD fence
+  const existingKeys = new Set<string>();
+  const sectionRegex = /^\s*\[mcp_servers\.([^\].\s]+)\]/gm;
+  let match: RegExpExecArray | null;
+  while ((match = sectionRegex.exec(unmanagedToml)) !== null) {
+    if (match[1]) {
+      existingKeys.add(match[1].replace(/^["']|["']$/g, ""));
+    }
+  }
+
+  const blocks: string[] = [];
+  for (const [serverName, def] of Object.entries(catalog)) {
+    const lowerName = serverName.toLowerCase();
+    if (serverName !== "asd-core") {
+      if (nativeCapabilities.has(lowerName)) continue;
+      if (existingKeys.has(serverName) || existingKeys.has(lowerName)) continue;
+    }
+
+    if (def.command) {
+      const normalizedArgs = (def.args ?? []).map((a) =>
+        `"${a.replaceAll("\\", "/")}"`
+      );
+      blocks.push(
+        `[mcp_servers.${serverName}]\ncommand = "${def.command.replaceAll("\\", "/")}"\nargs = [${normalizedArgs.join(", ")}]`
+      );
+    } else if (def.url) {
+      blocks.push(`[mcp_servers.${serverName}]\nurl = "${def.url}"`);
+    }
+  }
+
+  return blocks.join("\n\n") + "\n";
+}
+
+function stripAsdManagedMcpEntries(mcpObj: Record<string, unknown>): void {
+  for (const [key, val] of Object.entries(mcpObj)) {
+    const isManaged =
+      key === "asd-core" ||
+      (val !== null &&
+        typeof val === "object" &&
+        (val as Record<string, unknown>)._asdManaged === true);
+    if (isManaged) {
+      delete mcpObj[key];
+    }
+  }
+}
+
+// ============================================================================
 // Core Synchronizer: Strictly Global-Only
 // ============================================================================
 
@@ -459,11 +695,12 @@ export async function syncHarnessConfigs(
   const homeDir = resolveHome(options?.homeDir);
   const asdRoot = getAsdRoot();
   const asdCliPath = options?.asdCliPath || path.join(asdRoot, "src", "cli", "index.ts");
-  const asdMcpServerPath = path.join(asdRoot, "src", "mcp", "server.ts");
 
-  // 1. Bootstrap presets and compute config hash
+  // 1. Bootstrap presets, load catalog & native capabilities, and compute config hash
   const configHash = computeConfigHash(homeDir);
   const lastSync = loadLastSync(homeDir);
+  const nativeCapabilitiesMap = loadHarnessNativeCapabilities();
+  const catalogMcpServers = loadCatalogMcpServers(homeDir, asdRoot);
 
   const harnessResults: Record<HarnessId, HarnessSyncStatus> = {
     "claude-code": { harness: "claude-code", status: "skipped", skipped: true, filesWritten: [] },
@@ -484,6 +721,7 @@ export async function syncHarnessConfigs(
   for (const harnessId of DEFAULT_HARNESS_IDS) {
     const adapter = adapters[harnessId];
     const targets = adapter.globalConfigTargets(homeDir);
+    const nativeCaps = nativeCapabilitiesMap[harnessId] ?? new Set<string>();
 
     const isHashMatched =
       !options?.force &&
@@ -551,17 +789,17 @@ export async function syncHarnessConfigs(
             claudeJson = {};
           }
         }
-        const claudeMcpServers = (
+        const claudeExistingMcp = (
           claudeJson.mcpServers && typeof claudeJson.mcpServers === "object"
-            ? { ...(claudeJson.mcpServers as Record<string, unknown>) }
+            ? (claudeJson.mcpServers as Record<string, unknown>)
             : {}
-        ) as Record<string, unknown>;
-        claudeMcpServers["asd-core"] = {
-          command: "node",
-          args: ["--no-warnings", asdMcpServerPath],
-          _asdManaged: true,
-        };
-        claudeJson.mcpServers = claudeMcpServers;
+        );
+        claudeJson.mcpServers = mergeJsonMcpServersForHarness({
+          harnessId: "claude-code",
+          existingMcpServers: claudeExistingMcp,
+          catalog: catalogMcpServers,
+          nativeCapabilities: nativeCaps,
+        });
         safeWriteJson(claudeJsonPath, claudeJson);
         written.push(claudeJsonPath);
 
@@ -575,17 +813,17 @@ export async function syncHarnessConfigs(
             claudeMcp = {};
           }
         }
-        const dotMcpServers = (
+        const dotExistingMcp = (
           claudeMcp.mcpServers && typeof claudeMcp.mcpServers === "object"
-            ? { ...(claudeMcp.mcpServers as Record<string, unknown>) }
+            ? (claudeMcp.mcpServers as Record<string, unknown>)
             : {}
-        ) as Record<string, unknown>;
-        dotMcpServers["asd-core"] = {
-          command: "node",
-          args: ["--no-warnings", asdMcpServerPath],
-          _asdManaged: true,
-        };
-        claudeMcp.mcpServers = dotMcpServers;
+        );
+        claudeMcp.mcpServers = mergeJsonMcpServersForHarness({
+          harnessId: "claude-code",
+          existingMcpServers: dotExistingMcp,
+          catalog: catalogMcpServers,
+          nativeCapabilities: nativeCaps,
+        });
         safeWriteJson(claudeMcpPath, claudeMcp);
         written.push(claudeMcpPath);
 
@@ -620,16 +858,25 @@ export async function syncHarnessConfigs(
         }
         const existingMcp = (
           existingConfig.mcpServers && typeof existingConfig.mcpServers === "object"
-            ? { ...(existingConfig.mcpServers as Record<string, unknown>) }
+            ? (existingConfig.mcpServers as Record<string, unknown>)
             : {}
-        ) as Record<string, unknown>;
-        existingMcp["asd-core"] = {
-          command: "node",
-          args: ["--no-warnings", asdMcpServerPath],
-          _asdManaged: true,
-        };
+        );
+        // Also check OpenCode's alternative `mcp` object key for existing user servers
+        const externalOpencodeMcpKeys = new Set<string>();
+        if (existingConfig.mcp && typeof existingConfig.mcp === "object") {
+          for (const k of Object.keys(existingConfig.mcp as Record<string, unknown>)) {
+            externalOpencodeMcpKeys.add(k);
+          }
+        }
+
         existingConfig._asdVersion = ASD_VERSION;
-        existingConfig.mcpServers = existingMcp;
+        existingConfig.mcpServers = mergeJsonMcpServersForHarness({
+          harnessId: "opencode",
+          existingMcpServers: existingMcp,
+          catalog: catalogMcpServers,
+          nativeCapabilities: nativeCaps,
+          externalExistingKeys: externalOpencodeMcpKeys,
+        });
         safeWriteJson(opencodeJsonPath, existingConfig);
         written.push(opencodeJsonPath);
 
@@ -662,8 +909,12 @@ export async function syncHarnessConfigs(
             existingToml = "";
           }
         }
-        const normalizedMcpPath = asdMcpServerPath.replaceAll("\\", "/");
-        const managedTomlBlock = `[mcp_servers.asd-core]\ncommand = "node"\nargs = ["--no-warnings", "${normalizedMcpPath}"]\n`;
+        const unmanagedToml = removeTomlFence(existingToml);
+        const managedTomlBlock = buildCodexManagedTomlBlock({
+          unmanagedToml,
+          catalog: catalogMcpServers,
+          nativeCapabilities: nativeCaps,
+        });
         const mergedToml = mergeCodexConfigToml(existingToml, managedTomlBlock, ASD_VERSION);
         safeWriteText(configTomlPath, mergedToml);
         written.push(configTomlPath);
@@ -724,6 +975,28 @@ export async function syncHarnessConfigs(
         safeWriteJson(hooksJsonPath, existingHooks);
         written.push(hooksJsonPath);
 
+        // Check external Antigravity MCP config files (e.g., ~/.gemini/config/mcp_config.json or ~/.gemini/antigravity-cli/mcp_config.json)
+        // so we never inject duplicates of tools already configured by the user or OMO-for-AGY.
+        const externalGeminiKeys = new Set<string>();
+        const externalGeminiPaths = [
+          path.join(geminiDir, "config", "mcp_config.json"),
+          path.join(geminiDir, "antigravity-cli", "mcp_config.json"),
+        ];
+        for (const extPath of externalGeminiPaths) {
+          if (fs.existsSync(extPath)) {
+            try {
+              const extJson = JSON.parse(fs.readFileSync(extPath, "utf8")) as Record<string, unknown>;
+              if (extJson.mcpServers && typeof extJson.mcpServers === "object") {
+                for (const k of Object.keys(extJson.mcpServers as Record<string, unknown>)) {
+                  externalGeminiKeys.add(k);
+                }
+              }
+            } catch {
+              // Ignore unreadable external file
+            }
+          }
+        }
+
         // mcp_config.json
         const mcpConfigPath = path.join(geminiDir, "mcp_config.json");
         let existingMcpConfig: Record<string, unknown> = {};
@@ -737,15 +1010,16 @@ export async function syncHarnessConfigs(
         }
         const geminiMcpServers = (
           existingMcpConfig.mcpServers && typeof existingMcpConfig.mcpServers === "object"
-            ? { ...(existingMcpConfig.mcpServers as Record<string, unknown>) }
+            ? (existingMcpConfig.mcpServers as Record<string, unknown>)
             : {}
-        ) as Record<string, unknown>;
-        geminiMcpServers["asd-core"] = {
-          command: "node",
-          args: ["--no-warnings", asdMcpServerPath],
-          _asdManaged: true,
-        };
-        existingMcpConfig.mcpServers = geminiMcpServers;
+        );
+        existingMcpConfig.mcpServers = mergeJsonMcpServersForHarness({
+          harnessId: "antigravity",
+          existingMcpServers: geminiMcpServers,
+          catalog: catalogMcpServers,
+          nativeCapabilities: nativeCaps,
+          externalExistingKeys: externalGeminiKeys,
+        });
         safeWriteJson(mcpConfigPath, existingMcpConfig);
         written.push(mcpConfigPath);
 
@@ -903,7 +1177,7 @@ export async function uninstallHarnessConfigs(
     try {
       const cJson = JSON.parse(fs.readFileSync(claudeJson, "utf8")) as Record<string, unknown>;
       if (cJson.mcpServers && typeof cJson.mcpServers === "object") {
-        delete (cJson.mcpServers as Record<string, unknown>)["asd-core"];
+        stripAsdManagedMcpEntries(cJson.mcpServers as Record<string, unknown>);
       }
       const mcpCount = cJson.mcpServers && typeof cJson.mcpServers === "object" ? Object.keys(cJson.mcpServers).length : 0;
       const otherKeys = Object.keys(cJson).filter((k) => k !== "mcpServers");
@@ -925,7 +1199,7 @@ export async function uninstallHarnessConfigs(
     try {
       const dJson = JSON.parse(fs.readFileSync(dotMcpJson, "utf8")) as Record<string, unknown>;
       if (dJson.mcpServers && typeof dJson.mcpServers === "object") {
-        delete (dJson.mcpServers as Record<string, unknown>)["asd-core"];
+        stripAsdManagedMcpEntries(dJson.mcpServers as Record<string, unknown>);
       }
       const mcpCount = dJson.mcpServers && typeof dJson.mcpServers === "object" ? Object.keys(dJson.mcpServers).length : 0;
       const otherKeys = Object.keys(dJson).filter((k) => k !== "mcpServers");
@@ -955,7 +1229,7 @@ export async function uninstallHarnessConfigs(
     try {
       const oc = JSON.parse(fs.readFileSync(opencodeJson, "utf8")) as Record<string, unknown>;
       if (oc.mcpServers && typeof oc.mcpServers === "object") {
-        delete (oc.mcpServers as Record<string, unknown>)["asd-core"];
+        stripAsdManagedMcpEntries(oc.mcpServers as Record<string, unknown>);
       }
       delete oc._asdVersion;
       delete oc.agentRouting;
@@ -1049,7 +1323,7 @@ export async function uninstallHarnessConfigs(
     try {
       const mJson = JSON.parse(fs.readFileSync(mcpConfigJson, "utf8")) as Record<string, unknown>;
       if (mJson.mcpServers && typeof mJson.mcpServers === "object") {
-        delete (mJson.mcpServers as Record<string, unknown>)["asd-core"];
+        stripAsdManagedMcpEntries(mJson.mcpServers as Record<string, unknown>);
       }
       const mcpCount = mJson.mcpServers && typeof mJson.mcpServers === "object" ? Object.keys(mJson.mcpServers).length : 0;
       const otherKeys = Object.keys(mJson).filter((k) => k !== "mcpServers");

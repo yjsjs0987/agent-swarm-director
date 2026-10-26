@@ -9,6 +9,10 @@
       "command": "node",
       "args": ["--no-warnings", "<ASD_ROOT>/src/mcp/server.ts"]
     },
+    "lsp": {
+      "command": "node",
+      "args": ["--no-warnings", "<ASD_ROOT>/src/mcp/lsp-server.ts"]
+    },
     "context7": {
       "url": "https://mcp.context7.com/mcp"
     },
