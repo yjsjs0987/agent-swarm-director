@@ -29,6 +29,7 @@ import { type SubagentLogRecord } from "./index.ts";
 export interface DashboardSnapshot {
   version: string;
   projectRoot: string;
+  systemLocale: string;
   timestamp: number;
   session: SessionRow | null;
   tasks: TaskRow[];
@@ -38,6 +39,16 @@ export interface DashboardSnapshot {
     string,
     { installed: boolean; headlessSupported: boolean; binary?: string; resolvedPath?: string | null }
   >;
+}
+
+function detectSystemLocale(): string {
+  try {
+    const resolved = Intl.DateTimeFormat().resolvedOptions().locale;
+    if (resolved) return resolved;
+  } catch {
+    // Ignore
+  }
+  return process.env.LC_ALL || process.env.LANG || "en-US";
 }
 
 function collectAllSubagentLogs(projectRoot: string): SubagentLogRecord[] {
@@ -124,6 +135,7 @@ export async function collectDashboardSnapshot(options?: {
   return {
     version: ASD_VERSION,
     projectRoot,
+    systemLocale: detectSystemLocale(),
     timestamp: Date.now(),
     session,
     tasks,
@@ -133,13 +145,14 @@ export async function collectDashboardSnapshot(options?: {
   };
 }
 
-function renderDashboardHtml(): string {
+function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
+  const defaultLang = defaultLocale.toLowerCase().startsWith("ko") ? "ko" : "en";
   return `<!DOCTYPE html>
-<html lang="ko">
+<html lang="${defaultLang}">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ASD v${ASD_VERSION} — Multi-Agent Dashboard</title>
+  <title>ASD v${ASD_VERSION} — Multi-Agent Control Plane</title>
   <style>
     :root {
       --bg: #0b0f17;
@@ -155,7 +168,7 @@ function renderDashboardHtml(): string {
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Malgun Gothic", "Segoe UI", Roboto, monospace;
       background: var(--bg);
       color: var(--text);
       line-height: 1.5;
@@ -169,6 +182,31 @@ function renderDashboardHtml(): string {
       border-bottom: 1px solid var(--border);
     }
     header h1 { margin: 0; font-size: 18px; color: var(--accent); }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .lang-toggle {
+      display: inline-flex;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      background: #0d1421;
+    }
+    .lang-btn {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      padding: 5px 11px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .lang-btn.active {
+      background: var(--accent);
+      color: #0b0f17;
+    }
     .meta-bar { font-size: 12px; color: var(--muted); }
     .container {
       display: grid;
@@ -193,7 +231,7 @@ function renderDashboardHtml(): string {
       border-radius: 8px;
       padding: 14px 16px;
     }
-    .card-title { font-size: 12px; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; }
+    .card-title { font-size: 12px; color: var(--muted); text-transform: uppercase; margin-bottom: 6px; font-weight: 600; }
     .card-value { font-size: 20px; font-weight: 700; }
     .progress-bar {
       height: 8px;
@@ -244,33 +282,134 @@ function renderDashboardHtml(): string {
 <body>
   <header>
     <div>
-      <h1>ASD Multi-Agent Control Plane (v${ASD_VERSION})</h1>
+      <h1 id="headerTitle">ASD Multi-Agent Control Plane (v${ASD_VERSION})</h1>
       <div class="meta-bar" id="projPath">Loading...</div>
     </div>
-    <div class="meta-bar" id="lastUpdated">Auto-refresh: 2s</div>
+    <div class="header-right">
+      <div class="meta-bar" id="lastUpdated">Auto-refresh: 2s</div>
+      <div class="lang-toggle" role="group" aria-label="Language toggle">
+        <button type="button" class="lang-btn" id="btnKo" onclick="setLang('ko')">한국어</button>
+        <button type="button" class="lang-btn" id="btnEn" onclick="setLang('en')">EN</button>
+      </div>
+    </div>
   </header>
   <div class="container">
     <main>
       <div class="kpis" id="kpiGrid"></div>
       <div class="card" style="margin-bottom:16px;">
-        <div class="card-title">Tasks & Wave Execution (Click any task to inspect logs)</div>
+        <div class="card-title" id="tasksSectionTitle">Tasks & Wave Execution</div>
         <div id="taskList">Loading...</div>
       </div>
       <div class="card">
-        <div class="card-title">Adversarial Debates (asd_debate)</div>
-        <div id="debateList">No debates recorded.</div>
+        <div class="card-title" id="debatesSectionTitle">Adversarial Debates (asd_debate)</div>
+        <div id="debateList">-</div>
       </div>
     </main>
     <aside>
       <div class="card" style="position:sticky; top:16px;">
-        <div class="card-title">Subagent Log & Prompt Inspector</div>
-        <div id="inspector">Click a task on the left or view the latest subagent run below.</div>
+        <div class="card-title" id="inspectorSectionTitle">Subagent Log & Prompt Inspector</div>
+        <div id="inspector">-</div>
       </div>
     </aside>
   </div>
   <script>
+    const SERVER_DEFAULT_LANG = "${defaultLang}";
+    const I18N = {
+      ko: {
+        headerTitle: "ASD 멀티 에이전트 컨트롤 플레인 (v${ASD_VERSION})",
+        updatedPrefix: "최근 갱신: ",
+        activeSession: "활성 세션",
+        noSession: "없음",
+        phasePrefix: "단계: ",
+        progress: "전체 진행률",
+        harnesses: "하네스 가용 상태",
+        installedOk: "설치됨",
+        installedNo: "미설치",
+        tasksSectionTitle: "작업(Task) 및 웨이브 실행 현황 (클릭 시 우측에 로그 표시)",
+        noTasks: "현재 세션에 등록된 작업이 없습니다.",
+        debatesSectionTitle: "교차 모델 적대적 토론 (asd_debate)",
+        noDebates: "기록된 토론 내역이 없습니다.",
+        inspectorSectionTitle: "서브에이전트 실행 로그 & 프롬프트 뷰어",
+        noLogs: "서브에이전트 실행 로그가 없습니다",
+        forTask: " — 대상 작업: ",
+        subSession: "서브세션",
+        statusLabel: "상태",
+        outputLog: "실행 출력 로그 (output.log)",
+        promptLabel: "전달된 프롬프트 (prompt.md)",
+        emptyText: "(비어 있음)",
+        statusMap: {
+          done: "완료",
+          running: "실행중",
+          failed: "실패",
+          escalated: "상위모델 승격",
+          merge_conflict: "병합 충돌",
+          pending: "대기중"
+        }
+      },
+      en: {
+        headerTitle: "ASD Multi-Agent Control Plane (v${ASD_VERSION})",
+        updatedPrefix: "Updated: ",
+        activeSession: "Active Session",
+        noSession: "None",
+        phasePrefix: "Phase: ",
+        progress: "Progress",
+        harnesses: "Harnesses",
+        installedOk: "OK",
+        installedNo: "N/A",
+        tasksSectionTitle: "Tasks & Wave Execution (Click any task to inspect logs)",
+        noTasks: "No tasks in current session.",
+        debatesSectionTitle: "Adversarial Debates (asd_debate)",
+        noDebates: "No debates recorded.",
+        inspectorSectionTitle: "Subagent Log & Prompt Inspector",
+        noLogs: "No subagent log found",
+        forTask: " for ",
+        subSession: "SubSession",
+        statusLabel: "Status",
+        outputLog: "Output Log",
+        promptLabel: "Prompt",
+        emptyText: "(empty)",
+        statusMap: {
+          done: "done",
+          running: "running",
+          failed: "failed",
+          escalated: "escalated",
+          merge_conflict: "merge_conflict",
+          pending: "pending"
+        }
+      }
+    };
+
+    function detectInitialLang() {
+      try {
+        const saved = localStorage.getItem("asd_lang");
+        if (saved === "ko" || saved === "en") return saved;
+      } catch {}
+      const navLang = (navigator.language || SERVER_DEFAULT_LANG || "en").toLowerCase();
+      return navLang.startsWith("ko") ? "ko" : "en";
+    }
+
+    let currentLang = detectInitialLang();
     let selectedTaskId = null;
     let latestState = null;
+
+    function updateLangButtons() {
+      document.documentElement.lang = currentLang;
+      document.getElementById("btnKo").classList.toggle("active", currentLang === "ko");
+      document.getElementById("btnEn").classList.toggle("active", currentLang === "en");
+      const t = I18N[currentLang];
+      document.getElementById("headerTitle").textContent = t.headerTitle;
+      document.getElementById("tasksSectionTitle").textContent = t.tasksSectionTitle;
+      document.getElementById("debatesSectionTitle").textContent = t.debatesSectionTitle;
+      document.getElementById("inspectorSectionTitle").textContent = t.inspectorSectionTitle;
+    }
+
+    function setLang(lang) {
+      if (lang !== "ko" && lang !== "en") return;
+      currentLang = lang;
+      try { localStorage.setItem("asd_lang", lang); } catch {}
+      updateLangButtons();
+      render(latestState);
+    }
 
     function esc(s) {
       return String(s ?? "")
@@ -285,57 +424,61 @@ function renderDashboardHtml(): string {
     }
 
     function render(data) {
+      updateLangButtons();
       if (!data) return;
       latestState = data;
+      const t = I18N[currentLang];
+
       document.getElementById("projPath").textContent = data.projectRoot;
       document.getElementById("lastUpdated").textContent =
-        "Updated: " + new Date(data.timestamp).toLocaleTimeString();
+        t.updatedPrefix + new Date(data.timestamp).toLocaleTimeString(currentLang === "ko" ? "ko-KR" : "en-US");
 
       const tasks = data.tasks || [];
-      const done = tasks.filter(t => t.status === "done").length;
+      const done = tasks.filter(x => x.status === "done").length;
       const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
       const sess = data.session;
 
       const harnessBadges = Object.entries(data.harnesses || {})
-        .map(([k, v]) => \`<span class="badge \${v.installed ? 'st-done' : 'st-pending'}">\${esc(k)}: \${v.installed ? 'OK' : 'N/A'}</span>\`)
+        .map(([k, v]) => \`<span class="badge \${v.installed ? 'st-done' : 'st-pending'}">\${esc(k)}: \${v.installed ? t.installedOk : t.installedNo}</span>\`)
         .join("");
 
       document.getElementById("kpiGrid").innerHTML = \`
         <div class="card">
-          <div class="card-title">Active Session</div>
-          <div class="card-value">\${sess ? esc(sess.session_id) : "None"}</div>
-          <div class="meta-bar">Phase: \${sess ? esc(sess.phase) : "-"}</div>
+          <div class="card-title">\${t.activeSession}</div>
+          <div class="card-value">\${sess ? esc(sess.session_id) : t.noSession}</div>
+          <div class="meta-bar">\${t.phasePrefix}\${sess ? esc(sess.phase) : "-"}</div>
         </div>
         <div class="card">
-          <div class="card-title">Progress</div>
+          <div class="card-title">\${t.progress}</div>
           <div class="card-value">\${done} / \${tasks.length} (\${pct}%)</div>
           <div class="progress-bar"><div class="progress-fill" style="width:\${pct}%"></div></div>
         </div>
         <div class="card">
-          <div class="card-title">Harnesses</div>
+          <div class="card-title">\${t.harnesses}</div>
           <div class="harness-list">\${harnessBadges}</div>
         </div>
       \`;
 
       if (!tasks.length) {
         document.getElementById("taskList").innerHTML =
-          '<div class="meta-bar">No tasks in current session.</div>';
+          \`<div class="meta-bar">\${t.noTasks}</div>\`;
       } else {
-        document.getElementById("taskList").innerHTML = tasks.map(t => {
-          const isSel = selectedTaskId === t.task_id;
-          const modelTag = (t.assigned_harness || "-") + "/" + (t.assigned_model || "pending");
-          const dur = t.duration_ms ? (t.duration_ms / 1000).toFixed(1) + "s" : "";
+        document.getElementById("taskList").innerHTML = tasks.map(item => {
+          const isSel = selectedTaskId === item.task_id;
+          const modelTag = (item.assigned_harness || "-") + "/" + (item.assigned_model || "pending");
+          const dur = item.duration_ms ? (item.duration_ms / 1000).toFixed(1) + "s" : "";
+          const statusText = t.statusMap[item.status] || item.status;
           return \`
-            <div class="task-row \${isSel ? 'active' : ''}" onclick="selectTask('\${esc(t.task_id)}')">
+            <div class="task-row \${isSel ? 'active' : ''}" onclick="selectTask('\${esc(item.task_id)}')">
               <div>
-                <span class="badge st-\${esc(t.status)}">\${esc(t.status)}</span>
-                <strong>\${esc(t.task_id)}</strong>
-                <span class="meta-bar">[Turn \${t.turn} | \${esc(t.track)} | \${esc(t.role)}]</span>
-                <div>\${esc(t.title)}</div>
+                <span class="badge st-\${esc(item.status)}">\${esc(statusText)}</span>
+                <strong>\${esc(item.task_id)}</strong>
+                <span class="meta-bar">[Turn \${item.turn} | \${esc(item.track)} | \${esc(item.role)}]</span>
+                <div>\${esc(item.title)}</div>
               </div>
               <div style="text-align:right" class="meta-bar">
                 <div>\${esc(modelTag)}</div>
-                <div>\${esc(dur)} \${t.commit_sha ? '(' + esc(t.commit_sha.slice(0,7)) + ')' : ''}</div>
+                <div>\${esc(dur)} \${item.commit_sha ? '(' + esc(item.commit_sha.slice(0,7)) + ')' : ''}</div>
               </div>
             </div>
           \`;
@@ -345,7 +488,7 @@ function renderDashboardHtml(): string {
       const debates = data.debates || [];
       if (!debates.length) {
         document.getElementById("debateList").innerHTML =
-          '<div class="meta-bar">No debates recorded.</div>';
+          \`<div class="meta-bar">\${t.noDebates}</div>\`;
       } else {
         document.getElementById("debateList").innerHTML = debates.map(d => \`
           <div style="border-bottom:1px solid var(--border); padding:8px 0;">
@@ -362,19 +505,21 @@ function renderDashboardHtml(): string {
 
       if (!activeLog) {
         document.getElementById("inspector").innerHTML =
-          '<div class="meta-bar">No subagent log found' + (selectedTaskId ? ' for ' + esc(selectedTaskId) : '') + '.</div>';
+          \`<div class="meta-bar">\${t.noLogs}\${selectedTaskId ? t.forTask + esc(selectedTaskId) : ''}.</div>\`;
       } else {
+        const statusText = t.statusMap[activeLog.status] || activeLog.status;
         document.getElementById("inspector").innerHTML = \`
           <div><strong>\${esc(activeLog.taskId)}</strong> — \${esc(activeLog.harness)} (\${esc(activeLog.model)})</div>
-          <div class="meta-bar">SubSession: \${esc(activeLog.subSessionId)} | Status: \${esc(activeLog.status)}</div>
-          <div class="card-title" style="margin-top:10px;">Output Log</div>
-          <pre>\${esc(activeLog.outputLog || "(empty)")}</pre>
-          <div class="card-title" style="margin-top:10px;">Prompt</div>
-          <pre>\${esc(activeLog.prompt || "(empty)")}</pre>
+          <div class="meta-bar">\${t.subSession}: \${esc(activeLog.subSessionId)} | \${t.statusLabel}: \${esc(statusText)}</div>
+          <div class="card-title" style="margin-top:10px;">\${t.outputLog}</div>
+          <pre>\${esc(activeLog.outputLog || t.emptyText)}</pre>
+          <div class="card-title" style="margin-top:10px;">\${t.promptLabel}</div>
+          <pre>\${esc(activeLog.prompt || t.emptyText)}</pre>
         \`;
       }
     }
 
+    updateLangButtons();
     async function poll() {
       try {
         const res = await fetch("/api/state");

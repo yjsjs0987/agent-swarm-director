@@ -651,6 +651,9 @@ describe("ASD CLI (src/cli/index.ts)", () => {
           assert.equal(htmlRes.status, 200);
           const htmlText = await htmlRes.text();
           assert.ok(htmlText.includes("ASD Multi-Agent Control Plane"));
+          assert.ok(htmlText.includes("ASD 멀티 에이전트 컨트롤 플레인"));
+          assert.ok(htmlText.includes("setLang('ko')"));
+          assert.ok(htmlText.includes("setLang('en')"));
 
           const stateRes = await fetch(`${handle.url}/api/state`);
           assert.equal(stateRes.status, 200);
