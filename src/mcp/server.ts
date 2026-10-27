@@ -611,7 +611,6 @@ export class AsdMcpServer {
     prepareBaseline(this.projectRoot, { sessionId, db: this.db });
 
     const allTasks = this.db.getSessionTasks(sessionId);
-    const mode = input.mode ?? "parallel_spawn";
 
     // Determine target turn
     let selectedTurn: number;
@@ -639,6 +638,15 @@ export class AsdMcpServer {
       const allowed = new Set(input.taskIds);
       turnTasks = turnTasks.filter((t) => allowed.has(t.task_id));
     }
+
+    // Default track behavior:
+    // - LIGHT tasks default to 'claim_only' (handled in current harness: main AI directly or internal subagents)
+    // - HEAVY tasks default to 'parallel_spawn' (multi-harness execution in isolated worktrees)
+    const mode =
+      input.mode ??
+      (turnTasks.length > 0 && turnTasks.every((t) => t.track === "LIGHT")
+        ? "claim_only"
+        : "parallel_spawn");
 
     const taskMap = new Map(allTasks.map((t) => [t.task_id, t]));
 
@@ -705,11 +713,16 @@ export class AsdMcpServer {
           continue;
         }
 
+        const preferredHarness =
+          input.harness ??
+          (t.assigned_harness as HarnessId | null) ??
+          (t.track === "LIGHT" ? (session.main_harness as HarnessId) : undefined);
+
         const route = resolveRoute({
           role: t.role as AgentRole,
           category: t.category,
           difficulty: t.difficulty as DifficultyTier,
-          harness: (t.assigned_harness as HarnessId) ?? undefined,
+          harness: preferredHarness,
           model: t.assigned_model ?? undefined,
           isSubagentSpawn: true,
           mainHarness: session.main_harness as HarnessId,
@@ -772,13 +785,49 @@ export class AsdMcpServer {
         };
       }
 
+      // If mode was not explicitly forced to parallel_spawn, LIGHT tasks in a mixed turn
+      // are also claimed for the current harness rather than spawning external CLIs.
+      if (!input.mode && t.track === "LIGHT") {
+        const preferredHarness =
+          input.harness ??
+          (t.assigned_harness as HarnessId | null) ??
+          (session.main_harness as HarnessId);
+        const route = resolveRoute({
+          role: t.role as AgentRole,
+          category: t.category,
+          difficulty: t.difficulty as DifficultyTier,
+          harness: preferredHarness,
+          model: t.assigned_model ?? undefined,
+          isSubagentSpawn: true,
+          mainHarness: session.main_harness as HarnessId,
+          mode: "claim_only",
+        });
+        const effectiveModel =
+          route.harness === "antigravity"
+            ? normalizeAntigravityModel(route.model)
+            : route.model;
+        this.db.updateTaskStatus(sessionId, t.task_id, "running", {
+          assignedHarness: route.harness,
+          assignedModel: effectiveModel,
+        });
+        return {
+          taskId: t.task_id,
+          status: "running" as TaskStatus,
+          harness: route.harness,
+          model: effectiveModel,
+          durationMs: 0,
+        };
+      }
+
       let currentAttempts = t.attempts;
       let finalResult: AsdDispatchOutput["results"][number] | null = null;
 
       // Up to 3 attempts with escalation
-      const runtimeCaps = !this.commandRunner
-        ? { availableHarnesses: detectAvailableCliHarnesses() }
-        : undefined;
+      const runtimeCaps = input.harness
+        ? { availableHarnesses: [input.harness] }
+        : !this.commandRunner
+          ? { availableHarnesses: detectAvailableCliHarnesses() }
+          : undefined;
       while (currentAttempts < 3) {
         const esc = escalateTaskRoute(
           {
@@ -1118,6 +1167,9 @@ export class AsdMcpServer {
       taskId: input.taskId,
       topic: input.topic,
       proposal: input.proposal,
+      ...(input.harness
+        ? { runtimeCapabilities: { availableHarnesses: [input.harness] } }
+        : {}),
       commandRunner: this.commandRunner,
       db: this.db,
       signal,

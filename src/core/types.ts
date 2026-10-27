@@ -210,6 +210,7 @@ export interface AsdDispatchInput {
   turn?: number;
   taskIds?: string[];
   mode?: "parallel_spawn" | "claim_only";
+  harness?: HarnessId;
 }
 
 export interface AsdDispatchOutput {
@@ -250,6 +251,7 @@ export interface AsdDebateInput {
   taskId?: string;
   topic: string;
   proposal: string;
+  harness?: HarnessId;
 }
 
 export interface AsdDebateOutput {

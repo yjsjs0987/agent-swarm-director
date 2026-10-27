@@ -1013,6 +1013,7 @@ export async function main(
               ...jsonPayload,
               ...(options.turn !== undefined ? { turn: options.turn } : {}),
               ...(options.mode ? { mode: options.mode } : {}),
+              ...(options.harness ? { harness: options.harness } : {}),
               ...(taskIdsFromOpt ? { taskIds: taskIdsFromOpt } : {}),
             };
             const res = (await server.handleRequest("asd_dispatch", input)) as {
@@ -1105,6 +1106,7 @@ export async function main(
                 taskId: options.task || (jsonPayload.taskId as string) || undefined,
                 topic,
                 proposal,
+                ...(options.harness ? { harness: options.harness as HarnessId } : {}),
               },
               undefined,
               (msg) => {

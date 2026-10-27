@@ -426,26 +426,33 @@ export function resolveRoute(
   }
 
   // --------------------------------------------------------------------------
-  // @ag Headless Spawn Asymmetry Fallback:
-  // When spawning a subagent (isSubagentSpawn: true) and selected harness is
-  // "antigravity", check if headless CLI spawn is available.
-  // If not supported and not (mainHarness === "antigravity" && mode === "claim_only"),
-  // automatically fall back to the first available CLI harness in fallbacks.
+  // @ag Headless Spawn Asymmetry & Uninstalled CLI Harness Fallback:
+  // 1. When spawning a subagent (isSubagentSpawn: true) and selected harness is
+  //    "antigravity", check if headless CLI spawn is available.
+  // 2. When spawning a CLI subagent (mode !== "claim_only") and
+  //    runtimeCapabilities.availableHarnesses is provided, if resolved.harness
+  //    is not installed, automatically fall back to the first available harness.
   // --------------------------------------------------------------------------
-  if (request.isSubagentSpawn && resolved.harness === "antigravity") {
+  if (request.isSubagentSpawn) {
     const headlessSupported = Boolean(
       runtimeCapabilities?.antigravityHeadlessSupported
     );
     const isClaimOnlyOnAg =
       request.mainHarness === "antigravity" && request.mode === "claim_only";
+    const needsAgFallback =
+      resolved.harness === "antigravity" && !headlessSupported && !isClaimOnlyOnAg;
 
-    if (!headlessSupported && !isClaimOnlyOnAg) {
+    const avail = runtimeCapabilities?.availableHarnesses;
+    const needsCliAvailabilityFallback =
+      request.mode !== "claim_only" &&
+      Array.isArray(avail) &&
+      avail.length > 0 &&
+      !avail.includes(resolved.harness);
+
+    if (needsAgFallback || needsCliAvailabilityFallback) {
       const fallback = resolved.fallbacks.find((fb) => {
         if (!CLI_HARNESSES.includes(fb.harness)) return false;
-        if (
-          runtimeCapabilities?.availableHarnesses &&
-          !runtimeCapabilities.availableHarnesses.includes(fb.harness)
-        ) {
+        if (avail && avail.length > 0 && !avail.includes(fb.harness)) {
           return false;
         }
         return true;
@@ -460,6 +467,21 @@ export function resolveRoute(
           model: fallback.model,
           modelFamily: fallback.modelFamily,
           fallbacks: remainingFallbacks,
+          tier: resolved.tier,
+          fallbackApplied: true,
+        };
+      } else if (avail && avail.length > 0) {
+        const targetHarness = avail[0]!;
+        const matchInConfig = [
+          ...Object.values(cfg.agents),
+          ...Object.values(cfg.categories),
+        ].find((e) => e.harness === targetHarness);
+        resolved = {
+          harness: targetHarness,
+          model: matchInConfig?.model ?? "default",
+          modelFamily:
+            matchInConfig?.modelFamily ?? inferModelFamily("default", targetHarness),
+          fallbacks: [],
           tier: resolved.tier,
           fallbackApplied: true,
         };

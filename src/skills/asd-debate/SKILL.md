@@ -5,9 +5,16 @@ description: Cross-harness adversarial debate workflow for ASD v2.2. Conducts mu
 
 # ASD Cross-Harness Adversarial Debate (`/asd-debate`)
 
-You are orchestrating a cross-harness adversarial debate using the Core Debate Broker.
+You are orchestrating an adversarial architecture/design debate using the Core Debate Broker.
 
 ## Workflow
+
+### 0. Single Pre-Debate Briefing & Multi-Harness Confirmation (MANDATORY)
+- Before launching `asd debate` or modifying any files, present **one consolidated briefing** to the user (unless autonomous execution was explicitly requested):
+  1. **Debate Topic & Proposal Summary**: Clearly state the `topic` and summarize the `proposal` or competing design options to be evaluated.
+  2. **Multi-Harness Confirmation**:
+     - Ask whether to run the debate across **Multiple Harnesses (`HEAVY` — default cross-model blind review across all installed harnesses)** or **Current Harness Only (`LIGHT` — single-harness review using `--harness <currentHarness>` or internal subagents)**.
+  3. **Clarifying Questions (if any)**: Bundle any questions about constraints or priorities into this same single message.
 
 ### 1. Proposal & Topic Definition
 - Formulate the architectural or technical decision requiring debate:
@@ -15,23 +22,23 @@ You are orchestrating a cross-harness adversarial debate using the Core Debate B
   - `proposal`: The proposed solution or conflicting options.
   - `taskId`: Associated task ID (optional).
 
-### 2. Multi-Model Blind Review (Round 1 — Execute via `asd debate` CLI)
+### 2. Blind Review Execution (Round 1 — Execute via `asd debate` CLI)
 - Run the debate directly via the terminal CLI (bypasses MCP 60s request timeouts and streams real-time progress):
-  ```bash
-  asd debate --topic "<topic>" --proposal "<proposal>" [--task <taskId>] [--session <sessionId>]
-  ```
-  *(Or write a longer proposal to `.asd/proposal.md` and run `asd debate --topic "<topic>" --proposal-file .asd/proposal.md`)*
-- Dispatches blind critique requests in parallel to diverse model families (e.g., Claude, GPT, GLM, Gemini).
-- Proposers and critics do not see each other's identities during Round 1.
-- If unanimous consensus is reached, the debate terminates early with an agreed verdict.
+  - **Multi-Harness Mode**:
+    ```bash
+    asd debate --topic "<topic>" --proposal "<proposal>" [--task <taskId>] [--session <sessionId>]
+    ```
+  - **Single-Harness Mode (when user declines multi-harness usage)**:
+    ```bash
+    asd debate --topic "<topic>" --proposal "<proposal>" --harness <currentHarness> [--task <taskId>] [--session <sessionId>]
+    ```
+  *(Or write a longer proposal to `.asd/proposal.md` and pass `--proposal-file .asd/proposal.md`)*
+- If unanimous consensus (`APPROVE` / `MINOR_AMEND`) is reached in Round 1, the debate terminates early with an agreed verdict.
 
 ### 3. Arbiter Resolution (Round 2)
-- If disagreement persists:
+- If disagreement (`REJECT`) persists:
   - Round 2 confronts divergent viewpoints.
-  - The `arbiter` role reviews arguments, evaluates trade-offs, and issues a final binding verdict:
-    - `APPROVE`: Adopt proposal with specified hard constraints.
-    - `MINOR_AMEND`: Adopt proposal subject to required modifications.
-    - `REJECT`: Proposal discarded; alternative approach required.
+  - The `arbiter` role reviews arguments, evaluates trade-offs, and issues a final binding verdict (`APPROVE`, `MINOR_AMEND`, or `REJECT`).
 
 ### 4. Injection & Live Progress
 - The resulting decisions and constraints are automatically injected into `tasks.acceptance` and recorded in SQLite.

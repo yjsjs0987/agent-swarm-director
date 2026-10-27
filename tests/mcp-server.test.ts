@@ -597,6 +597,53 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
       assert.ok(fs.existsSync(path.join(subSessionDir, subDirs[0]!, "prompt.md")));
       assert.ok(fs.existsSync(path.join(subSessionDir, subDirs[0]!, "meta.json")));
     });
+
+    test("default mode (omitted): LIGHT tasks claim_only on mainHarness without external CLI spawn", async () => {
+      const projectRoot = makeProjectRoot();
+      let spawnedCount = 0;
+      const mockRunner: CommandRunner = {
+        async run() {
+          spawnedCount++;
+          return { exitCode: 0, pid: 1111 };
+        },
+      };
+
+      const server = new AsdMcpServer({
+        projectRoot,
+        commandRunner: mockRunner,
+        autoSync: false,
+      });
+      openServers.push(server);
+
+      await server.handleRequest("asd_plan", {
+        action: "create",
+        sessionId: "dispatch-light-default",
+        mainHarness: "opencode",
+        tasks: [
+          {
+            taskId: "T1.1",
+            turn: 1,
+            title: "Architect LIGHT task in current harness",
+            track: "LIGHT",
+            role: "architect",
+            category: "general",
+            difficulty: "high",
+            targetFiles: ["light-arch.ts"],
+          },
+        ],
+      });
+
+      const dispatchResp = (await server.handleRequest("asd_dispatch", {
+        sessionId: "dispatch-light-default",
+        turn: 1,
+      })) as AsdDispatchOutput;
+
+      assert.equal(spawnedCount, 0, "LIGHT task must not spawn external CLI by default");
+      assert.equal(dispatchResp.results.length, 1);
+      assert.equal(dispatchResp.results[0]?.taskId, "T1.1");
+      assert.equal(dispatchResp.results[0]?.status, "running");
+      assert.equal(dispatchResp.results[0]?.harness, "opencode");
+    });
   });
 
   describe("5. asd_verify Tool", () => {
