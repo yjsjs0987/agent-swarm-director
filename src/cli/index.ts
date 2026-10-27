@@ -84,6 +84,7 @@ export interface CliArgs {
     harness?: string;
     payload?: string;
     projectRoot?: string;
+    port?: number;
   };
   rest: string[];
 }
@@ -127,6 +128,12 @@ export function parseCliArgs(args: string[]): CliArgs {
     ) {
       const idx = arg.indexOf("=");
       options.projectRoot = arg.substring(idx + 1);
+    } else if (arg === "--port" || arg === "-p") {
+      const p = Number.parseInt(args[++i] || "", 10);
+      if (Number.isFinite(p)) options.port = p;
+    } else if (arg.startsWith("--port=")) {
+      const p = Number.parseInt(arg.substring("--port=".length), 10);
+      if (Number.isFinite(p)) options.port = p;
     } else if (arg.startsWith("-")) {
       // unrecognized flag; ignore
     } else {
@@ -475,6 +482,7 @@ Commands:
   sync [--force] [--home <dir>]      Sync ASD harnesses, agents, and skills globally
   status [--json]                    Display current session progress board and warnings
   logs [taskId] [--json]             Inspect latest (or task-specific) subagent prompt & output log
+  ui [--port <num>] [--json]         Launch lightweight local web dashboard (default port: 3847)
   doctor [--json]                    Verify environment, tools, and policy health
   clean [--pop] [--all]              Clean temporary worktrees and restore auto-stash
   uninstall [--home <dir>]           Surgically restore user harness configurations
@@ -485,6 +493,7 @@ Options:
   -h, --help                         Show this help message
   -v, --version                      Show ASD version
       --json                         Output result in JSON format
+      --port <num>                   Port for 'asd ui' web dashboard (default: 3847)
       --force                        Force overwriting existing configurations (sync)
       --pop                          Restore stashed work (clean)
       --all                          Clean all leftover workspace state (clean)
@@ -628,6 +637,34 @@ export async function main(
         console.log(`Status     : ${r.status}`);
         console.log(`Log Path   : ${r.dirPath}`);
         console.log(`\n--- Output Log ---\n${r.outputLog.trim() || "(empty)"}`);
+        return 0;
+      }
+
+      case "ui":
+      case "dashboard": {
+        const { collectDashboardSnapshot, startDashboardServer } = await import(
+          "./dashboard.ts"
+        );
+        if (flags.json) {
+          const snap = await collectDashboardSnapshot({ projectRoot, homeDir });
+          console.log(JSON.stringify(snap, null, 2));
+          return 0;
+        }
+        const handle = await startDashboardServer({
+          port: options.port ?? 3847,
+          projectRoot,
+          homeDir,
+        });
+        console.log(`ASD Web Dashboard running at ${handle.url}`);
+        console.log(`Project Root: ${projectRoot}`);
+        console.log(`Press Ctrl+C to stop.`);
+        await new Promise<void>((resolve) => {
+          const shutdown = () => {
+            handle.close().then(resolve);
+          };
+          process.once("SIGINT", shutdown);
+          process.once("SIGTERM", shutdown);
+        });
         return 0;
       }
 

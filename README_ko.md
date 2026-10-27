@@ -54,7 +54,10 @@ node --no-warnings src/cli/index.ts status
 node --no-warnings src/cli/index.ts logs
 node --no-warnings src/cli/index.ts logs T1.1
 
-# 5. 전체 자동화 테스트 스위트 실행
+# 5. 경량 로컬 웹 대시보드 실행 (http://127.0.0.1:3847)
+node --no-warnings src/cli/index.ts ui
+
+# 6. 전체 자동화 테스트 스위트 실행
 npm test
 ```
 
@@ -67,6 +70,7 @@ npm test
 | `asd sync [--force]` | 4개 하네스의 글로벌 설정에 스킬, 10개 에이전트, 보안 훅, 부족한 MCP 도구를 멱등성(Idempotent) 있게 동기화합니다. |
 | `asd status` | 현재 프로젝트의 SQLite 세션 상태, 실시간 TODO 진행 보드, 미적용 자동 스태시(auto-stash) 경고를 출력합니다. |
 | `asd logs [taskId] [--json]` | 인자 없이 실행하면 가장 최근 서브에이전트 실행 로그를 자동 출력하며, `T1.1`(또는 `t1.1`)처럼 작업 번호를 지정하면 해당 작업의 서브에이전트 로그를 조회합니다. |
+| `asd ui [--port <num>]` | 외부 패키지 0개의 경량 로컬 웹 대시보드(`http://127.0.0.1:3847`)를 실행하여 실시간 진행률, 마우스 클릭을 통한 서브에이전트 로그/프롬프트 조회, 토론 판결문을 브라우저에서 제공합니다. |
 | `asd doctor [--json]` | Node 버전, SQLite WAL, Git 저장소, 4대 하네스 CLI 바이너리 경로 및 Headless 지원 여부, `PreToolUse` 보안 차단 여부를 100ms 이내에 점검합니다. |
 | `asd clean [--pop]` | 잔여 `.asd/wt/*` 워크트리와 `asd/*` 브랜치를 정리하고, `--pop` 옵션 사용 시 자동 스태시된 변경사항을 복원합니다. |
 | `asd uninstall` | ASD가 주입한 글로벌 훅, TOML 펜스 블록, 스킬, 에이전트, MCP 항목만 외과적으로 제거하고 사용자의 기존 설정을 100% 원복합니다. |

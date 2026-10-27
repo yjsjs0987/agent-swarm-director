@@ -492,6 +492,12 @@ export class SqliteDriver {
       .get(debateId) as unknown as DebateRow | undefined;
   }
 
+  getSessionDebates(sessionId: string): DebateRow[] {
+    return this.db
+      .prepare("SELECT * FROM debates WHERE session_id = ? ORDER BY rowid DESC")
+      .all(sessionId) as unknown as DebateRow[];
+  }
+
   createDebate(debate: DebateInput): void {
     this.withImmediateTx(() => {
       this.db

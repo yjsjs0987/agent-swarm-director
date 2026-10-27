@@ -21,6 +21,7 @@ import { after, before, describe, test } from "node:test";
 import { openProjectDb } from "../src/core/db.ts";
 import { buildDefaultHarnessCommand } from "../src/core/debate.ts";
 import { resolveSpawnCommand } from "../src/core/spawner.ts";
+import { startDashboardServer } from "../src/cli/dashboard.ts";
 import { getLatestSession, runAsdLogs } from "../src/cli/index.ts";
 import { runGit } from "../src/core/workspace.ts";
 
@@ -622,6 +623,50 @@ describe("ASD CLI (src/cli/index.ts)", () => {
         }
       } finally {
         removeTempDir(binDir);
+      }
+    });
+
+    test("startDashboardServer serves HTML on / and live JSON snapshot on /api/state", async () => {
+      const uiHome = createTempDir("asd-ui-home-");
+      const uiProj = createTempDir("asd-ui-proj-");
+      try {
+        const db = openProjectDb(uiProj, uiHome);
+        db.createOrGetSession({
+          sessionId: "sess-ui-1",
+          projectRoot: uiProj,
+          mainHarness: "claude-code",
+        });
+        db.upsertTasks("sess-ui-1", [
+          { taskId: "T1.1", turn: 1, title: "Web UI Test Task" },
+        ]);
+        db.close();
+
+        const handle = await startDashboardServer({
+          port: 0,
+          projectRoot: uiProj,
+          homeDir: uiHome,
+        });
+        try {
+          const htmlRes = await fetch(`${handle.url}/`);
+          assert.equal(htmlRes.status, 200);
+          const htmlText = await htmlRes.text();
+          assert.ok(htmlText.includes("ASD Multi-Agent Control Plane"));
+
+          const stateRes = await fetch(`${handle.url}/api/state`);
+          assert.equal(stateRes.status, 200);
+          const stateJson = (await stateRes.json()) as {
+            session: { session_id: string };
+            tasks: Array<{ task_id: string; title: string }>;
+          };
+          assert.equal(stateJson.session.session_id, "sess-ui-1");
+          assert.equal(stateJson.tasks.length, 1);
+          assert.equal(stateJson.tasks[0]?.task_id, "T1.1");
+        } finally {
+          await handle.close();
+        }
+      } finally {
+        removeTempDir(uiHome);
+        removeTempDir(uiProj);
       }
     });
   });
