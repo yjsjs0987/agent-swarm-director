@@ -987,16 +987,22 @@ export async function syncHarnessConfigs(
           }
         }
 
-        // mcp_config.json
-        const mcpConfigPath = path.join(geminiDir, "mcp_config.json");
-        syncJsonMcpConfigFile({
-          filePath: mcpConfigPath,
-          harnessId: "antigravity",
-          catalog: catalogMcpServers,
-          nativeCapabilities: nativeCaps,
-          externalExistingKeys: externalGeminiKeys,
-        });
-        written.push(mcpConfigPath);
+        // mcp_config.json (legacy ~/.gemini/mcp_config.json + modern ~/.gemini/config/mcp_config.json)
+        const geminiMcpTargets = [path.join(geminiDir, "mcp_config.json")];
+        const geminiConfigDir = path.join(geminiDir, "config");
+        if (fs.existsSync(geminiConfigDir)) {
+          geminiMcpTargets.push(path.join(geminiConfigDir, "mcp_config.json"));
+        }
+        for (const mcpConfigPath of geminiMcpTargets) {
+          syncJsonMcpConfigFile({
+            filePath: mcpConfigPath,
+            harnessId: "antigravity",
+            catalog: catalogMcpServers,
+            nativeCapabilities: nativeCaps,
+            externalExistingKeys: externalGeminiKeys,
+          });
+          written.push(mcpConfigPath);
+        }
 
         break;
       }
@@ -1271,6 +1277,7 @@ export async function uninstallHarnessConfigs(
   }
 
   cleanupJsonMcpFile(path.join(geminiDir, "mcp_config.json"), "antigravity");
+  cleanupJsonMcpFile(path.join(geminiDir, "config", "mcp_config.json"), "antigravity");
 
   // Remove ASD-managed PATH CLI shims
   removeCliPathShims(homeDir, removedFiles);
