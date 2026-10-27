@@ -22,8 +22,8 @@ Agent Swarm Director (**ASD v2.2**) is the universal multi-harness successor to 
 - **Dual-Track Workspace Isolation**:
   - **LIGHT Track**: Fast in-place execution with automatic git checkpoint commits and instant rollback on test or boundary failure.
   - **HEAVY Track**: Isolated Git worktrees (`.asd/wt/<taskId>`) with automatic `node_modules` junction linking/unlinking and mutex-serialized `--no-ff` merging.
-- **Blind Cross-Model Adversarial Debate (`asd_debate`)**:
-  - Zero-polling parallel Round 1 critique across diverse model families (`claude`, `gpt`, `gemini`, `glm`) followed by Round 2 binding arbitration and automatic constraint injection into task acceptance criteria.
+- **Blind Cross-Model Adversarial Debate (`asd debate`)**:
+  - Zero-polling parallel Round 1 critique across diverse model families (`claude`, `gpt`, `gemini`, `glm`) followed by Round 2 binding arbitration and automatic constraint injection into task acceptance criteria—executed directly via CLI to bypass 60s MCP request timeouts.
 - **1ms Fail-Closed Policy Guard & Subagent Shield**:
   - Case-normalized realpath boundary enforcement blocking unauthorized edits and protected paths (`.git/`, `.asd/`, `.env*`, `*.pem`, `*.key`).
   - Subagent Shield prevents infinite stop-hook loops and blocks subagents from calling orchestration tools.
@@ -39,15 +39,18 @@ Agent Swarm Director (**ASD v2.2**) is the universal multi-harness successor to 
 
 ## Quick Start
 
+### A. With Global `PATH` Registration (Default)
 ```bash
-# 1. Initial install: synchronize harnesses globally & automatically register 'asd' on PATH
+# 1. Synchronize harnesses globally & automatically register 'asd' on PATH
 node --no-warnings src/cli/index.ts sync
-# (Optional: pass --no-path if you do not want 'asd' added to global PATH)
-# node --no-warnings src/cli/index.ts sync --no-path
 
-# 2. From now on, run 'asd' directly from ANY project directory!
+# 2. Run 'asd' directly from ANY project directory
 asd doctor
 asd status
+asd plan get
+asd dispatch --turn 1
+asd verify --task T1.1 --files "src/index.ts" --summary "Implemented feature"
+asd debate --topic "Architecture" --proposal "Use SQLite WAL mode"
 asd logs
 asd logs T1.1
 asd ui
@@ -56,36 +59,60 @@ asd ui
 npm test
 ```
 
+### B. Without Global `PATH` Registration (`--no-path`)
+```bash
+# 1. Synchronize harnesses globally without modifying global PATH
+node --no-warnings src/cli/index.ts sync --no-path
+
+# 2. Run commands via Node.js directly
+node --no-warnings src/cli/index.ts doctor
+node --no-warnings src/cli/index.ts status
+node --no-warnings src/cli/index.ts plan get
+node --no-warnings src/cli/index.ts dispatch --turn 1
+node --no-warnings src/cli/index.ts verify --task T1.1 --files "src/index.ts" --summary "Implemented feature"
+node --no-warnings src/cli/index.ts debate --topic "Architecture" --proposal "Use SQLite WAL mode"
+node --no-warnings src/cli/index.ts logs
+node --no-warnings src/cli/index.ts logs T1.1
+node --no-warnings src/cli/index.ts ui
+```
+
 ---
 
 ## CLI Commands
 
-| Command | Description |
-| :--- | :--- |
-| `asd sync [--force] [--no-path]` | Synchronizes global skills, 10 agents, hooks, missing MCP tools, and installs the `asd` CLI shim to global `PATH` (use `--no-path` to skip `PATH` installation). |
-| `asd status` | Displays the current project's SQLite session state, live TODO progress board, and any unapplied auto-stash warnings. |
-| `asd logs [taskId] [--json]` | Displays the most recent subagent prompt & execution log automatically, or inspects a specific task (`T1.1`, `t1.2`, etc.). |
-| `asd ui [--port <num>]` | Launches a zero-dependency local web dashboard (`http://127.0.0.1:3847`) with live task cards, click-to-inspect subagent logs, and debate verdicts. |
-| `asd doctor [--json]` | Runs a fast (<100ms) zero-token health check (Node version, SQLite WAL, Git repo, harness CLI binary paths & headless support, synthetic `PreToolUse` security probe). |
-| `asd clean [--pop]` | Removes leftover `.asd/wt/*` worktrees, prunes `asd/*` branches, and optionally restores auto-stashed changes (`--pop`). |
-| `asd uninstall` | Surgically removes all ASD-managed global hooks, TOML fences, skills, agents, and MCP entries while restoring original user configs 100%. |
+> **Note:** If installed with `--no-path`, replace `asd <command>` with `node --no-warnings src/cli/index.ts <command>`.
+
+| Command (with `PATH`) | Command (without `PATH`) | Description |
+| :--- | :--- | :--- |
+| `asd sync [--force] [--no-path]` | `node --no-warnings src/cli/index.ts sync [--force] [--no-path]` | Synchronizes global skills, 10 agents, hooks, missing MCP tools, and installs the `asd` CLI shim to global `PATH` (`--no-path` skips `PATH` shim installation). |
+| `asd plan [create\|get\|update\|sync_from_md]` | `node --no-warnings src/cli/index.ts plan [create\|get\|update\|sync_from_md]` | Creates, queries, updates, or reverse-syncs `.asd/PLAN.md` with the 3-table SQLite SSOT (`sessions`, `tasks`, `debates`). |
+| `asd dispatch [--turn <n>] [--mode <m>]` | `node --no-warnings src/cli/index.ts dispatch [--turn <n>] [--mode <m>]` | Concurrently dispatches wave tasks (`parallel_spawn` or `claim_only`) with automatic upstream `DoneClaim` context injection and zero MCP timeout limits. |
+| `asd verify --task <id> [--files <csv>]` | `node --no-warnings src/cli/index.ts verify --task <id> [--files <csv>]` | Enforces `allowedFiles` boundaries, secret redaction checks, test command verification, and LIGHT commit / HEAVY worktree merge. |
+| `asd debate --topic <t> --proposal <p>` | `node --no-warnings src/cli/index.ts debate --topic <t> --proposal <p>` | Executes parallel blind cross-model critiques and synthesizes binding arbiter verdicts with real-time progress streaming. |
+| `asd status [--json]` | `node --no-warnings src/cli/index.ts status [--json]` | Displays the current project's SQLite session state, live TODO progress board, and any unapplied auto-stash warnings. |
+| `asd logs [taskId] [--json]` | `node --no-warnings src/cli/index.ts logs [taskId] [--json]` | Displays the most recent subagent prompt & execution log automatically, or inspects a specific task (`T1.1`, `t1.2`, etc.). |
+| `asd ui [--port <num>]` | `node --no-warnings src/cli/index.ts ui [--port <num>]` | Launches a zero-dependency bilingual (Korean/English) local web dashboard (`http://127.0.0.1:3847`) with live task cards, subagent logs, and debate verdicts. |
+| `asd doctor [--json]` | `node --no-warnings src/cli/index.ts doctor [--json]` | Runs a fast (<100ms) zero-token health check (Node version, SQLite WAL, Git repo, harness CLI binary paths & headless support, synthetic `PreToolUse` security probe). |
+| `asd clean [--pop] [--all]` | `node --no-warnings src/cli/index.ts clean [--pop] [--all]` | Removes leftover `.asd/wt/*` worktrees, prunes `asd/*` branches, and optionally restores auto-stashed changes (`--pop`). |
+| `asd uninstall` | `node --no-warnings src/cli/index.ts uninstall` | Surgically removes all ASD-managed global hooks, TOML fences, skills, agents, `PATH` shims, and `_asdManaged` MCP entries while preserving user configs 100%. |
 
 ---
 
-## Built-in MCP Servers & Tools
+## Built-in Code Intelligence & Gap-Filling MCP Servers
 
-### 1. `asd-core` (`src/mcp/server.ts`)
-- `asd_plan`: Create, read, update, or reverse-sync `.asd/PLAN.md` with the 3-table SQLite SSOT (`sessions`, `tasks`, `debates`).
-- `asd_dispatch`: Concurrently spawn wave tasks (`parallel_spawn` or `claim_only`) with automatic upstream `DoneClaim` context injection.
-- `asd_verify`: Enforce `allowedFiles` boundaries, secret redaction checks, test command verification, and LIGHT commit / HEAVY worktree merge.
-- `asd_debate`: Execute parallel blind cross-model critiques and synthesize binding arbiter verdicts.
+All long-running orchestration actions (`plan`, `dispatch`, `verify`, `debate`) run directly via the `asd` CLI to eliminate 60-second MCP RPC timeouts (`-32001`). For fast read-only lookups, `asd sync` automatically fills in only the MCP servers missing from each harness:
 
-### 2. `asd-lsp` (`src/mcp/lsp-server.ts`)
-Automatically provided to harnesses without native CLI LSP:
+### 1. `lsp` (`src/mcp/lsp-server.ts`)
+Automatically provided to harnesses without native CLI LSP (skipped on OpenCode, which has native LSP):
 - `lsp_diagnostics`: Structured static type and syntax diagnostics (`tsc`, `node --check`, conflict marker detection).
 - `lsp_symbols`: Symbol declaration extraction (`function`, `class`, `interface`, `type`, `variable`, `struct`).
 - `lsp_definition`: Exact symbol definition lookup (`file`, `line`, `column`).
 - `lsp_references`: Project-wide symbol reference search (`file`, `line`, `column`, `isDefinition`).
+
+### 2. Gap-Filling Knowledge MCPs (`presets/default-mcp.jsonc`)
+- `context7` (`https://mcp.context7.com/mcp`): Up-to-date official library and framework documentation lookup.
+- `grep_app` (`https://mcp.grep.app/mcp`): Fast regex and code search across public GitHub repositories.
+- `websearch` (`https://mcp.exa.ai/mcp`): Real-time Exa web search (automatically skipped on harnesses with native web search such as Claude Code, Codex, and Antigravity).
 
 ---
 
