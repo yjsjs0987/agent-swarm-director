@@ -5,10 +5,6 @@
 {
   "_asdVersion": "2.2.0",
   "mcpServers": {
-    "asd-core": {
-      "command": "node",
-      "args": ["--no-warnings", "<ASD_ROOT>/src/mcp/server.ts"]
-    },
     "lsp": {
       "command": "node",
       "args": ["--no-warnings", "<ASD_ROOT>/src/mcp/lsp-server.ts"]

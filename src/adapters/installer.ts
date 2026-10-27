@@ -465,10 +465,10 @@ export function loadCatalogMcpServers(
     ...userCatalogServers,
   };
 
-  // Resolve <ASD_ROOT> placeholder in args
+  // Resolve <ASD_ROOT> placeholder in args (excluding legacy asd-core MCP)
   const resolved: Record<string, CatalogMcpEntry> = {};
   for (const [name, entry] of Object.entries(merged)) {
-    if (!entry || typeof entry !== "object") continue;
+    if (name === "asd-core" || !entry || typeof entry !== "object") continue;
     if (entry.command) {
       const args = Array.isArray(entry.args)
         ? entry.args.map((arg) =>
@@ -481,14 +481,6 @@ export function loadCatalogMcpServers(
     } else if (entry.url) {
       resolved[name] = { url: entry.url };
     }
-  }
-
-  // Always guarantee asd-core is present
-  if (!resolved["asd-core"]) {
-    resolved["asd-core"] = {
-      command: "node",
-      args: ["--no-warnings", path.join(asdRoot, "src", "mcp", "server.ts")],
-    };
   }
 
   return resolved;
@@ -509,9 +501,10 @@ function mergeJsonMcpServersForHarness(options: {
     externalExistingKeys,
   } = options;
 
-  // Keep only non-ASD-managed user entries first
+  // Keep only non-ASD-managed user entries first (and strip any legacy asd-core)
   const result: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(existingMcpServers)) {
+    if (k === "asd-core") continue;
     const isManaged =
       v !== null &&
       typeof v === "object" &&
@@ -522,20 +515,19 @@ function mergeJsonMcpServersForHarness(options: {
   }
 
   for (const [serverName, def] of Object.entries(catalog)) {
+    if (serverName === "asd-core") continue;
     const lowerName = serverName.toLowerCase();
 
-    if (serverName !== "asd-core") {
-      // 1. Native capability filter: skip if harness already has this feature built-in
-      if (nativeCapabilities.has(lowerName)) {
-        continue;
-      }
-      // 2. Existing user/plugin config dedup filter: skip if already defined by user
-      if (Object.prototype.hasOwnProperty.call(result, serverName)) {
-        continue;
-      }
-      if (externalExistingKeys?.has(serverName) || externalExistingKeys?.has(lowerName)) {
-        continue;
-      }
+    // 1. Native capability filter: skip if harness already has this feature built-in
+    if (nativeCapabilities.has(lowerName)) {
+      continue;
+    }
+    // 2. Existing user/plugin config dedup filter: skip if already defined by user
+    if (Object.prototype.hasOwnProperty.call(result, serverName)) {
+      continue;
+    }
+    if (externalExistingKeys?.has(serverName) || externalExistingKeys?.has(lowerName)) {
+      continue;
     }
 
     if (def.command) {
@@ -621,11 +613,10 @@ function buildCodexManagedTomlBlock(options: {
 
   const blocks: string[] = [];
   for (const [serverName, def] of Object.entries(catalog)) {
+    if (serverName === "asd-core") continue;
     const lowerName = serverName.toLowerCase();
-    if (serverName !== "asd-core") {
-      if (nativeCapabilities.has(lowerName)) continue;
-      if (existingKeys.has(serverName) || existingKeys.has(lowerName)) continue;
-    }
+    if (nativeCapabilities.has(lowerName)) continue;
+    if (existingKeys.has(serverName) || existingKeys.has(lowerName)) continue;
 
     if (def.command) {
       const normalizedArgs = (def.args ?? []).map((a) =>

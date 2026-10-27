@@ -195,43 +195,43 @@ describe("3. Capability-Aware & Dedup Gap-Filling MCP Sync", () => {
     try {
       await syncHarnessConfigs({ homeDir: cleanHome });
 
-      // 1. Claude Code: has native `websearch` -> gets `asd-core`, `lsp`, `context7`, `grep_app` (NO `websearch`)
+      // 1. Claude Code: has native `websearch` -> gets `lsp`, `context7`, `grep_app` (NO `websearch`, NO `asd-core`)
       const claudeJson = JSON.parse(
         fs.readFileSync(path.join(cleanHome, ".claude.json"), "utf8")
       );
-      assert.ok(claudeJson.mcpServers["asd-core"]);
+      assert.equal(claudeJson.mcpServers["asd-core"], undefined);
       assert.ok(claudeJson.mcpServers["lsp"]);
       assert.ok(claudeJson.mcpServers["context7"]);
       assert.equal(claudeJson.mcpServers["context7"].type, "http");
       assert.ok(claudeJson.mcpServers["grep_app"]);
       assert.equal(claudeJson.mcpServers["websearch"], undefined);
 
-      // 2. OpenCode: has native `lsp` -> gets `asd-core`, `context7`, `grep_app`, `websearch` (NO `lsp`)
+      // 2. OpenCode: has native `lsp` -> gets `context7`, `grep_app`, `websearch` (NO `lsp`, NO `asd-core`)
       const opencodeJson = JSON.parse(
         fs.readFileSync(path.join(cleanHome, ".config", "opencode", "opencode.json"), "utf8")
       );
-      assert.ok(opencodeJson.mcpServers["asd-core"]);
+      assert.equal(opencodeJson.mcpServers["asd-core"], undefined);
       assert.ok(opencodeJson.mcpServers["context7"]);
       assert.ok(opencodeJson.mcpServers["grep_app"]);
       assert.ok(opencodeJson.mcpServers["websearch"]);
       assert.equal(opencodeJson.mcpServers["lsp"], undefined);
 
-      // 3. Codex: has native `websearch` -> gets `asd-core`, `lsp`, `context7`, `grep_app` (NO `websearch`)
+      // 3. Codex: has native `websearch` -> gets `lsp`, `context7`, `grep_app` (NO `websearch`, NO `asd-core`)
       const codexToml = fs.readFileSync(
         path.join(cleanHome, ".codex", "config.toml"),
         "utf8"
       );
-      assert.ok(codexToml.includes("[mcp_servers.asd-core]"));
+      assert.ok(!codexToml.includes("[mcp_servers.asd-core]"));
       assert.ok(codexToml.includes("[mcp_servers.lsp]"));
       assert.ok(codexToml.includes("[mcp_servers.context7]"));
       assert.ok(codexToml.includes("[mcp_servers.grep_app]"));
       assert.ok(!codexToml.includes("[mcp_servers.websearch]"));
 
-      // 4. Antigravity (clean): has native `websearch` -> gets `asd-core`, `lsp`, `context7`, `grep_app` with `serverUrl` (NO `websearch`)
+      // 4. Antigravity (clean): has native `websearch` -> gets `lsp`, `context7`, `grep_app` with `serverUrl` (NO `websearch`, NO `asd-core`)
       const geminiMcp = JSON.parse(
         fs.readFileSync(path.join(cleanHome, ".gemini", "mcp_config.json"), "utf8")
       );
-      assert.ok(geminiMcp.mcpServers["asd-core"]);
+      assert.equal(geminiMcp.mcpServers["asd-core"], undefined);
       assert.ok(geminiMcp.mcpServers["lsp"]);
       assert.equal(
         geminiMcp.mcpServers["context7"].serverUrl,
@@ -276,18 +276,18 @@ describe("3. Capability-Aware & Dedup Gap-Filling MCP Sync", () => {
 
       await syncHarnessConfigs({ homeDir: omoHome });
 
-      // Antigravity mcp_config.json should ONLY have `asd-core` because context7, grep_app, websearch, lsp already exist in ~/.gemini/config/mcp_config.json
+      // Antigravity mcp_config.json should have 0 duplicated entries because context7, grep_app, websearch, lsp already exist in ~/.gemini/config/mcp_config.json
       const geminiMcp = JSON.parse(
         fs.readFileSync(path.join(omoHome, ".gemini", "mcp_config.json"), "utf8")
       );
-      assert.deepEqual(Object.keys(geminiMcp.mcpServers), ["asd-core"]);
+      assert.deepEqual(Object.keys(geminiMcp.mcpServers), []);
 
       // Codex config.toml should keep user's custom context7 and NOT duplicate it inside the fence
       const codexToml = fs.readFileSync(path.join(codexDir, "config.toml"), "utf8");
       const matches = codexToml.match(/\[mcp_servers\.context7\]/g) ?? [];
       assert.equal(matches.length, 1, "context7 should appear only once in config.toml");
       assert.ok(codexToml.includes("https://custom.context7.local/mcp"));
-      assert.ok(codexToml.includes("[mcp_servers.asd-core]"));
+      assert.ok(!codexToml.includes("[mcp_servers.asd-core]"));
       assert.ok(codexToml.includes("[mcp_servers.lsp]"));
       assert.ok(codexToml.includes("[mcp_servers.grep_app]"));
 
@@ -295,7 +295,7 @@ describe("3. Capability-Aware & Dedup Gap-Filling MCP Sync", () => {
       await uninstallHarnessConfigs({ homeDir: omoHome });
       const restoredToml = fs.readFileSync(path.join(codexDir, "config.toml"), "utf8");
       assert.ok(restoredToml.includes("https://custom.context7.local/mcp"));
-      assert.ok(!restoredToml.includes("[mcp_servers.asd-core]"));
+      assert.ok(!restoredToml.includes("[mcp_servers.lsp]"));
     } finally {
       removeTempDir(omoHome);
     }
