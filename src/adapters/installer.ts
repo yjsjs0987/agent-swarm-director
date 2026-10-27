@@ -33,6 +33,7 @@ import {
   type AgentRole,
   type HarnessAdapter,
   type HarnessId,
+  type RoutingConfig,
 } from "../core/types.ts";
 import {
   AntigravityAdapter,
@@ -214,7 +215,30 @@ export function getSkillTemplate(skillName: string): string {
   return `# ASD Skill: ${skillName}\n`;
 }
 
-export function generateAgentContent(role: AgentRole): string {
+/**
+ * Resolves the highest-priority model configured for a given AgentRole on a specific HarnessId
+ * by walking `[primary, ...fallbacks]` in `routing.jsonc`.
+ * Example: if `critic` has 1st priority `claude-code` and 2nd priority `opencode (glm-5.3-flash)`,
+ * calling `resolveHarnessRoleModel("critic", "opencode", routingConfig)` returns `"nvidia/z-ai/glm-5.3-flash"`.
+ */
+export function resolveHarnessRoleModel(
+  role: AgentRole,
+  harnessId: HarnessId,
+  routingConfig?: RoutingConfig | null
+): string | undefined {
+  const entry = routingConfig?.agents?.[role];
+  if (!entry) return undefined;
+  const candidates = [entry, ...(entry.fallbacks ?? [])];
+  const match = candidates.find(
+    (c) => c.harness === harnessId && typeof c.model === "string" && c.model.trim().length > 0
+  );
+  return match?.model;
+}
+
+export function generateAgentContent(
+  role: AgentRole,
+  opts?: { harnessId?: HarnessId; model?: string }
+): string {
   const roleDescriptions: Record<AgentRole, { title: string; desc: string; focus: string }> = {
     director: {
       title: "Director",
@@ -274,14 +298,26 @@ export function generateAgentContent(role: AgentRole): string {
     focus: "Specialized multi-agent execution.",
   };
 
-  return `---
-name: asd-${role}
-description: ASD v2.2 ${meta.title} Agent. ${meta.desc}
----
+  const frontmatterLines = [
+    `---`,
+    `name: asd-${role}`,
+    `description: ASD v2.2 ${meta.title} Agent. ${meta.desc}`,
+  ];
+  if (opts?.harnessId === "opencode") {
+    frontmatterLines.push(`mode: subagent`);
+  }
+  if (opts?.model) {
+    frontmatterLines.push(`model: ${opts.model}`);
+  }
+  frontmatterLines.push(`---`);
+
+  return `${frontmatterLines.join("\n")}
 
 # ASD Agent: asd-${role} (${meta.title})
 
-You are operating as the **${meta.title}** agent in the ASD v2.2 multi-agent system.
+You are operating as the **${meta.title}** agent in the ASD v2.2 multi-agent system.${
+    opts?.model ? `\n**Configured Model**: \`${opts.model}\` (synced from \`routing.jsonc\`)` : ""
+  }
 
 ## Responsibilities
 ${meta.desc}
@@ -296,13 +332,36 @@ ${meta.focus}
 `;
 }
 
-export function generateAllAgentsMarkdown(): string {
-  let md = `# ASD Multi-Agent Roster (v2.2.0)\n\nThis document defines the 10 standard specialist agent roles in ASD v2.2.\n\n`;
+export function generateAllAgentsMarkdown(
+  routingConfig?: RoutingConfig | null,
+  harnessId?: HarnessId
+): string {
+  let md = `# ASD Multi-Agent Roster (v2.2.0)
+
+This document defines the 10 standard specialist agent roles in ASD v2.2 and the delegation rules for \`LIGHT\` vs \`HEAVY\` execution modes.
+
+## Execution Mode & Subagent Delegation Rules
+
+1. **\`LIGHT\` Mode (Single-Harness Internal Subagent Delegation)**:
+   - **NEVER** spawn external CLI processes via \`asd dispatch --mode parallel_spawn\`, \`asd debate\`, or raw \`opencode run\` / \`claude -p\` / \`codex exec\` / \`agy\` commands.
+   - Delegate work to the current harness's native internal subagents (\`asd-<role>\`):
+     - **OpenCode**: Use the \`task\` tool with \`subagent_type: "asd-<role>"\` (each \`asd-<role>\` agent in \`~/.config/opencode/agent/asd-<role>.md\` is pre-configured with the highest-priority OpenCode model from \`routing.jsonc\`).
+     - **Claude Code**: Use the \`Agent\` / \`Task\` tool with \`subagent_type: "asd-<role>"\`.
+     - **Antigravity**: Use the \`invoke_subagent\` tool.
+   - Use \`asd\` CLI only for local state/verification bookkeeping: \`asd plan\`, \`asd dispatch --turn <N> --mode claim_only\`, and \`asd verify --task <ID>\`.
+
+2. **\`HEAVY\` Mode (Multi-Harness External CLI & Worktree Execution)**:
+   - Used only after explicit user confirmation when true cross-harness CLI diversity (\`asd debate\`) or parallel Git worktree isolation (\`asd dispatch --turn <N> --mode parallel_spawn\`) is required.
+
+---
+
+`;
 
   for (let i = 0; i < AGENT_ROLES.length; i++) {
     const role = AGENT_ROLES[i]!;
+    const model = harnessId ? resolveHarnessRoleModel(role, harnessId, routingConfig) : undefined;
     md += `## ${i + 1}. asd-${role}\n`;
-    md += generateAgentContent(role);
+    md += generateAgentContent(role, { harnessId, model });
     md += `\n---\n\n`;
   }
 
@@ -739,6 +798,22 @@ export async function syncHarnessConfigs(
   const nativeCapabilitiesMap = loadHarnessNativeCapabilities();
   const catalogMcpServers = loadCatalogMcpServers(homeDir, asdRoot);
 
+  // Load routingConfig (local override if projectRoot provided, else global ~/.asd/routing.jsonc)
+  let routingConfig: RoutingConfig | null = null;
+  try {
+    const localRoutingPath = options?.projectRoot
+      ? path.join(options.projectRoot, ".asd", "routing.jsonc")
+      : null;
+    const globalRoutingPath = path.join(homeDir, ".asd", "routing.jsonc");
+    if (localRoutingPath && fs.existsSync(localRoutingPath)) {
+      routingConfig = parseJsonc<RoutingConfig>(fs.readFileSync(localRoutingPath, "utf8"));
+    } else if (fs.existsSync(globalRoutingPath)) {
+      routingConfig = parseJsonc<RoutingConfig>(fs.readFileSync(globalRoutingPath, "utf8"));
+    }
+  } catch {
+    routingConfig = null;
+  }
+
   const harnessResults: Record<HarnessId, HarnessSyncStatus> = {
     "claude-code": { harness: "claude-code", status: "skipped", skipped: true, filesWritten: [] },
     opencode: { harness: "opencode", status: "skipped", skipped: true, filesWritten: [] },
@@ -786,14 +861,15 @@ export async function syncHarnessConfigs(
       case "claude-code": {
         const claudeDir = path.join(homeDir, ".claude");
 
-        // 10 agent files
+        // 10 agent files (with highest-priority claude-code model from routing.jsonc)
         for (const role of AGENT_ROLES) {
           const agentPath = path.join(claudeDir, "agents", `asd-${role}.md`);
-          safeWriteText(agentPath, generateAgentContent(role));
+          const model = resolveHarnessRoleModel(role, "claude-code", routingConfig);
+          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "claude-code", model }));
           written.push(agentPath);
         }
 
-        // 5 skills
+        // All ASD skills
         for (const skill of ASD_SKILLS) {
           const skillPath = path.join(claudeDir, "skills", skill, "SKILL.md");
           safeWriteText(skillPath, getSkillTemplate(skill));
@@ -832,16 +908,24 @@ export async function syncHarnessConfigs(
       case "opencode": {
         const opencodeDir = path.join(homeDir, ".config", "opencode");
 
-        // 5 command files
+        // All ASD command files
         for (const skill of ASD_SKILLS) {
           const cmdPath = path.join(opencodeDir, "command", `${skill}.md`);
           safeWriteText(cmdPath, getSkillTemplate(skill));
           written.push(cmdPath);
         }
 
+        // 10 native OpenCode subagent files (with highest-priority opencode model from routing.jsonc)
+        for (const role of AGENT_ROLES) {
+          const agentPath = path.join(opencodeDir, "agent", `asd-${role}.md`);
+          const model = resolveHarnessRoleModel(role, "opencode", routingConfig);
+          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "opencode", model }));
+          written.push(agentPath);
+        }
+
         // AGENTS.md
         const agentsMdPath = path.join(opencodeDir, "AGENTS.md");
-        safeWriteText(agentsMdPath, generateAllAgentsMarkdown());
+        safeWriteText(agentsMdPath, generateAllAgentsMarkdown(routingConfig, "opencode"));
         written.push(agentsMdPath);
 
         // opencode.json
@@ -868,7 +952,7 @@ export async function syncHarnessConfigs(
       case "codex": {
         const codexDir = path.join(homeDir, ".codex");
 
-        // 5 skills
+        // All ASD skills
         for (const skill of ASD_SKILLS) {
           const skillPath = path.join(codexDir, "skills", skill, "SKILL.md");
           safeWriteText(skillPath, getSkillTemplate(skill));
@@ -877,7 +961,7 @@ export async function syncHarnessConfigs(
 
         // AGENTS.md
         const agentsMdPath = path.join(codexDir, "AGENTS.md");
-        safeWriteText(agentsMdPath, generateAllAgentsMarkdown());
+        safeWriteText(agentsMdPath, generateAllAgentsMarkdown(routingConfig, "codex"));
         written.push(agentsMdPath);
 
         // config.toml
@@ -907,14 +991,15 @@ export async function syncHarnessConfigs(
       case "antigravity": {
         const geminiDir = path.join(homeDir, ".gemini");
 
-        // 10 agents
+        // 10 agents (with highest-priority antigravity model from routing.jsonc)
         for (const role of AGENT_ROLES) {
           const agentPath = path.join(geminiDir, "agents", `asd-${role}.md`);
-          safeWriteText(agentPath, generateAgentContent(role));
+          const model = resolveHarnessRoleModel(role, "antigravity", routingConfig);
+          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "antigravity", model }));
           written.push(agentPath);
         }
 
-        // 5 skills
+        // All ASD skills
         for (const skill of ASD_SKILLS) {
           const skillPath = path.join(geminiDir, "skills", skill, "SKILL.md");
           safeWriteText(skillPath, getSkillTemplate(skill));
@@ -1214,6 +1299,10 @@ export async function uninstallHarnessConfigs(
     removeFile(path.join(opencodeDir, "command", `${skill}.md`), "opencode");
   }
   removeDirIfEmpty(path.join(opencodeDir, "command"));
+  for (const role of AGENT_ROLES) {
+    removeFile(path.join(opencodeDir, "agent", `asd-${role}.md`), "opencode");
+  }
+  removeDirIfEmpty(path.join(opencodeDir, "agent"));
   removeFile(path.join(opencodeDir, "AGENTS.md"), "opencode");
 
   cleanupJsonMcpFile(path.join(opencodeDir, "opencode.json"), "opencode", [

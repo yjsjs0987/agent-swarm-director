@@ -3,38 +3,41 @@ name: asd-debug
 description: Systematic hypothesis-driven debugging workflow for ASD v2.2. Reproduce first, diagnose, fix, and verify.
 ---
 
-# ASD Systematic Debugging Workflow (`/asd-debug`)
+# ASD v2.2 — Hypothesis-Driven Debugging Workflow (`/asd-debug`)
 
-You are executing the ASD v2.2 systematic debugging workflow.
+You are running a rigorous, evidence-backed debugging loop to resolve a failure or quarantined task.
 
-## Step 0: Symptom Investigation & Single Pre-Fix Briefing (MANDATORY)
-1. **Read-Only Investigation**: Inspect error logs, stack traces, and relevant source files without modifying production code.
-2. **Single Pre-Fix Briefing & Mode Confirmation**: Before writing/modifying any files or spawning cross-harness diagnosis, present **one consolidated briefing** to the user (unless autonomous execution was explicitly requested):
-   - **Root Cause Hypothesis & Fix Plan**: Explain the suspected cause, the reproduction test to be added, and the target files to be modified.
-   - **Multi-Harness Confirmation (`LIGHT` vs `HEAVY`)**:
-     - Ask whether to debug using **Single-Harness (`LIGHT`)** (main AI directly or internal subagents within the current harness) or **Multi-Harness (`HEAVY`)** (using `asd debate` across external harnesses / multi-harness workers).
-   - **Clarifying Questions (if any)**: Bundle any questions about reproduction steps or environment into this same single message.
+## 1. Mode Classification Criteria (`LIGHT` vs `HEAVY`)
 
-## Rule Zero: Reproduce First
-- Before modifying ANY application code, create a deterministic reproduction:
-  - A new failing test in `tests/`, or
-  - A runnable standalone test script.
-- Execute the reproduction script to confirm the failure matches the user's reported symptom.
-- Do NOT guess or edit production files until the failure is reliably reproduced.
+Evaluate the bug's scope to recommend `LIGHT` or `HEAVY`:
+- **Recommend `LIGHT` (Single-Harness Internal Subagent Delegation)** when:
+  - The bug is reproducible locally and localized to 1–3 files or a single subsystem.
+  - Root-cause tracing (`asd-scout`), hypothesis critique (`asd-critic`), and minimal fix implementation (`asd-worker`) can be delegated via the current harness's native internal subagents (using the harness-matched model from `routing.jsonc`).
+- **Recommend `HEAVY` (Multi-Harness External CLI Escalation)** when:
+  - Repeated local hypotheses have failed (3-Strike escalation) or the bug spans complex cross-cutting concurrency/architecture boundaries requiring an external cross-harness oracle (`asd debate` via external CLI).
 
-## Workflow
+## 2. Debugging Protocol
 
-### 1. Hypothesis & Cross-Diagnosis
-- Formulate testable hypotheses explaining the root cause.
-- If the issue is complex and the user opted for cross-model diagnosis, run `asd debate --topic "<topic>" --proposal "<hypothesis>"` via terminal CLI (add `--harness <currentHarness>` if staying within a single harness).
+1. **Step 1: Reproduce First & Gather Evidence**
+   - Identify the exact failing command, stack trace, or quarantined task log in `.asd/sessions/`.
+   - Delegate read-only log/codebase tracing to `asd-scout` via your harness's internal subagent tool (`task` in OpenCode, `Agent`/`Task` in Claude Code, `invoke_subagent` in Antigravity).
+   - Run the reproduction test to confirm the failure deterministically before proposing any code changes.
 
-### 2. Targeted Fix
-- Apply the minimal correct change to resolve the root cause (directly in-place by main AI for small fixes, or via internal subagent / `asd dispatch` according to the selected mode).
-- Adhere strictly to `allowedFiles` boundaries.
-- Never delete or disable existing tests to make CI green.
+2. **Step 2: Formulate Hypotheses & Confirm Mode with User**
+   - List the top 1–3 root-cause hypotheses with file:line citations and a proposed minimal fix + regression test plan.
+   - Present your AI mode recommendation (`LIGHT (Recommended)` for internal subagent fix/review vs `HEAVY` for external cross-harness escalation) and **ask for user confirmation** before modifying files.
 
-### 3. Verification & Regression Guard
-- Run the reproduction test: must now PASS.
-- Run the entire test suite: must PASS with zero regressions.
-- Run `asd verify --task <taskId> --files "<changedFiles>" --summary "<fix summary>"` to lock in the checkpoint commit and update the `progressBoard`.
-- Print the updated `progressBoard` verbatim to the user.
+3. **Step 3: Execute Diagnosis & Minimal Fix**
+   - **If `LIGHT` Mode is Confirmed (Internal Subagent Delegation — NO External CLI Spawning)**:
+     - Do **NOT** spawn external CLI processes via `asd dispatch --mode parallel_spawn` or `asd debate`.
+     - Optionally consult `asd-critic` via the internal subagent tool (`task(subagent_type="asd-critic", ...)`) to stress-test the root-cause hypothesis.
+     - Apply the minimal fix within `allowedFiles` (directly or by delegating to `asd-worker` via the internal subagent tool) and add a regression test.
+   - **If `HEAVY` Mode is Confirmed (External Cross-Harness Escalation)**:
+     - Run `asd debate` with the failure evidence and competing hypotheses to get a cross-harness diagnosis, then dispatch the verified fix.
+
+4. **Step 4: Gate Verification (`asd verify`)**
+   - Run verification via `asd verify`:
+     ```bash
+     asd verify --task <T-ID> --cmd "<reproduction_and_regression_test_cmd>"
+     ```
+   - Confirm zero regressions across the test suite, display the updated `progressBoard`, and report the result to the user.

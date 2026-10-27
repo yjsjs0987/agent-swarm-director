@@ -699,7 +699,7 @@ describe("ASD CLI (src/cli/index.ts)", () => {
       }
     });
 
-    test("CLI orchestration commands (plan, dispatch, verify, debate guard) work directly without MCP", () => {
+    test("CLI orchestration commands (plan, dispatch, verify, debate guard) work directly without MCP", async () => {
       const orchHome = createTempDir("asd-orch-home-");
       const orchProj = createTempDir("asd-orch-proj-");
       initGitRepo(orchProj);
@@ -762,6 +762,35 @@ describe("ASD CLI (src/cli/index.ts)", () => {
         );
         assert.equal(subDebate.exitCode, 1);
         assert.ok(subDebate.stderr.includes("Subagents cannot invoke orchestration tools"));
+
+        // 5. Open non-TTY stdin pipe must NOT cause 'asd plan' or 'asd debate' to block
+        const openPipeCheck = await new Promise<{ exitCode: number; stdout: string }>((resolve, reject) => {
+          const child = child_process.spawn(
+            process.execPath,
+            ["--no-warnings", cliPath, "plan", "get", "--home", orchHome],
+            {
+              cwd: orchProj,
+              stdio: ["pipe", "pipe", "pipe"],
+              windowsHide: true,
+            }
+          );
+          // Deliberately keep child.stdin open (do NOT call child.stdin.end())
+          let out = "";
+          child.stdout?.on("data", (c) => {
+            out += String(c);
+          });
+          const t = setTimeout(() => {
+            child.kill("SIGKILL");
+            reject(new Error("CLI hung waiting for open non-TTY stdin pipe"));
+          }, 4000);
+          child.on("close", (code) => {
+            clearTimeout(t);
+            child.stdin?.destroy();
+            resolve({ exitCode: code ?? -1, stdout: out });
+          });
+        });
+        assert.equal(openPipeCheck.exitCode, 0);
+        assert.ok(openPipeCheck.stdout.includes("sess-cli-orch-1"));
       } finally {
         removeTempDir(orchHome);
         removeTempDir(orchProj);

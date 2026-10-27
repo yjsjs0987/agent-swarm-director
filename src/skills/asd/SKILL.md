@@ -3,46 +3,77 @@ name: asd
 description: Universal end-to-end multi-agent autonomous workflow for ASD v2.2. Plans, executes across waves, displays live progress boards, and generates final summary.
 ---
 
-# ASD Autonomous Multi-Agent Workflow (`/asd`)
+# ASD v2.2 — Universal Autonomous Workflow (`/asd`)
 
-You are executing the end-to-end ASD v2.2 autonomous multi-agent workflow.
-Follow this strict sequence:
+You are the **Director** orchestrating an end-to-end multi-agent software engineering workflow.
 
-## Step 0: Single Pre-Flight Briefing & Mode Confirmation (MANDATORY)
-Before writing/modifying any files or dispatching any tasks, present **one consolidated briefing** to the user and wait for confirmation (unless the user explicitly instructed autonomous execution such as *"알아서 해줘"* / *"자동으로 끝까지 진행해"*):
-1. **Work Summary**: Concisely explain what tasks will be performed, which files will be created/modified, and the expected impact.
-2. **Execution Mode Question (`LIGHT` vs `HEAVY` / Multi-Harness vs Single-Harness)**:
-   - Ask the user whether to proceed in:
-     - **`LIGHT` Mode (Current Harness Only)**: Small tasks are handled directly by the main AI in-place; larger/parallel subtasks use internal subagents within the current harness (`claim_only`). No external harness CLIs are spawned.
-     - **`HEAVY` Mode (Multi-Harness Concurrent)**: Spawns multiple external harnesses (e.g., Claude Code, OpenCode, Codex) concurrently in isolated Git worktrees (`.asd/wt/`).
-3. **Clarifying Questions (if any)**: Bundle any requirements questions into this same single message. Do NOT ask multiple separate rounds of questions.
+## 1. Mode Classification Criteria (`LIGHT` vs `HEAVY`)
 
-## Step 1: Planning & Decomposition (`asd plan`)
-1. If the architecture or approach was ambiguous and the user requested cross-model validation, run `asd debate --topic "<topic>" --proposal "<proposal>"` (append `--harness <currentHarness>` if the user chose single-harness mode).
-2. Run `asd plan create --payload '{"tasks":[...]}'` via terminal CLI with:
-   - `action`: `"create"`
-   - `tasks`: array of decomposed tasks with explicit `turn` (1, 2, ...), `track` (`LIGHT` for current-harness execution, `HEAVY` for multi-harness worktree execution), `role`, `category`, `difficulty`, `targetFiles`, `verifyCmd`, and `acceptance`.
-3. Print the returned `progressBoard` verbatim and confirm `.asd/PLAN.md`.
+Before execution or debate, evaluate the task complexity and classify it into `LIGHT` or `HEAVY`:
 
-## Step 2: Live Progress & Wave Execution (`asd dispatch` & `asd verify`)
-1. Execute turn-by-turn and wave-by-wave via terminal CLI (`asd dispatch --turn <N>`, `asd verify --task <id> ...`) so long-running subagents never hit MCP 60s timeouts:
-   - **For `LIGHT` track tasks (Current Harness Mode)**:
-     - `asd dispatch --turn <N>` automatically claims `LIGHT` tasks in `claim_only` mode on the current harness.
-     - Small tasks: modify files directly in-place by the main AI, then run `asd verify --task <id> --files "<file1,file2>" --summary "<summary>"`.
-     - Multi-agent tasks within `LIGHT`: delegate to the current harness's native subagents, then run `asd verify`.
-   - **For `HEAVY` track tasks (Multi-Harness Mode)**:
-     - `asd dispatch --turn <N> --mode parallel_spawn` spawns multiple external harnesses in isolated git worktrees (`.asd/wt/<turn>-<taskId>`), verifies them, and merges into main.
-2. **MANDATORY LIVE PROGRESS DIRECTIVE**:
-   - After EVERY subagent or wave completion, print the returned `progressBoard` verbatim to the user so they can watch live progress.
-   - Never suppress or summarize the `progressBoard` block.
+- **Recommend `LIGHT` (Single-Harness Internal Subagent Delegation)** when:
+  - The task touches a focused scope (e.g., 1–3 files or a single module/domain) with low merge-conflict risk.
+  - Work can run inside the current workspace without needing isolated Git worktrees.
+  - You need fast codebase exploration (`asd-scout`), requirement analysis (`asd-analyst`), scoped implementation (`asd-worker` / `asd-builder`), or fast in-harness adversarial critique (`asd-critic`).
+  - *Note*: In `LIGHT` mode, native subagents (`asd-<role>`) automatically use the current harness's highest-priority model from `routing.jsonc` (primary or fallback) synced via `asd sync`.
+- **Recommend `HEAVY` (Multi-Harness External CLI & Git Worktree Execution)** when:
+  - Multiple independent tasks modify different modules in parallel and require isolated Git worktrees (`.asd/wt/<taskId>`).
+  - High-risk architectural or security changes require cross-harness blind debate across separate external CLI binaries (`claude`, `opencode`, `codex`, `agy`).
 
-## Step 3: Failure Recovery & Circuit Breaker
-- If a task verification fails:
-  - Attempt 1: automated rollback to clean baseline and retry.
-  - Attempt 2: second retry with captured failure context.
-  - Attempt 3: escalation to architect role (`@cx` or highest tier).
-  - If `no_progress_count >= 3`, circuit breaker halts execution to protect repository state.
+## 2. Execution Protocol
 
-## Step 4: Verification & Summary (`summary.md`)
-1. Verify the overall repository state: tests pass, lint is clean, git diff is clean.
-2. Render final `summary.md` detailing completed tasks, changed files, test results, and any escalated decisions.
+1. **Step 1: Context & Codebase Discovery (Internal Delegation)**
+   - Inspect the repository structure and existing `.asd/PLAN.md`.
+   - For non-trivial exploration, delegate internally using your harness's native subagent tool (`task` with `subagent_type: "asd-scout"` in OpenCode, `Agent`/`Task` with `asd-scout` in Claude Code, or `invoke_subagent` in Antigravity).
+   - If the user request is ambiguous, ask brief, targeted clarifying questions before planning.
+
+2. **Step 2: Generate Plan (`asd plan`) & Recommend Mode**
+   - Decompose the goal into discrete tasks with:
+     - `id` (e.g., `T-1`, `T-2`)
+     - `title`, `agent` (`architect`, `builder`, `worker`, `scout`, `verifier`), `turn` (wave number >= 1)
+     - `track` (`"LIGHT"` or `"HEAVY"` matching the recommended mode)
+     - `allowedFiles` (strict glob/path boundaries)
+     - `verificationCmd` (automated test command)
+   - Synchronize the plan into SQLite and `.asd/PLAN.md`:
+     ```bash
+     asd plan --title "<Goal>" --tasks '<JSON_ARRAY>'
+     ```
+   - Render the initial `progressBoard` from the output.
+
+3. **Step 3: User Confirmation Gate (Mandatory Mode Selection & AI Recommendation)**
+   - Present the generated plan and your AI mode recommendation (`LIGHT (Recommended)` or `HEAVY (Recommended)`) with a 1–2 sentence rationale based on Section 1.
+   - Explicitly ask the user to confirm:
+     1. Whether to run an optional **Adversarial Debate** first (`LIGHT` internal critic subagent vs `HEAVY` cross-harness CLI debate, or skip).
+     2. Which **Execution Mode** to use: **`LIGHT` (Internal Subagents)** or **`HEAVY` (Multi-Harness Worktree Spawn)**, highlighting your recommended choice.
+   - **Wait for explicit user confirmation before proceeding to Step 4.**
+
+4. **Step 4: Wave Execution Loop (Turn 1..N)**
+   - **If User Confirmed `LIGHT` Mode (Internal Subagent Delegation — NO External CLI Spawning)**:
+     - **STRICT PROHIBITION**: Do **NOT** run `asd dispatch --mode parallel_spawn`, do **NOT** run `asd debate` via CLI, and do **NOT** spawn external `opencode run`, `claude -p`, `codex exec`, or `agy` processes via Bash.
+     - Ensure task `track` in `.asd/PLAN.md` is `"LIGHT"`.
+     - Claim task ownership in ASD state only:
+       ```bash
+       asd dispatch --turn <N> --mode claim_only
+       ```
+     - Delegate each task in the wave using the **current harness's native internal subagent tool** so the synced `routing.jsonc` model for this harness is applied:
+       - **OpenCode**: Call the `task` tool with `subagent_type: "asd-<agent>"` (e.g., `"asd-builder"`, `"asd-worker"`, `"asd-verifier"`).
+       - **Claude Code**: Call the `Agent` / `Task` tool with `subagent_type: "asd-<agent>"`.
+       - **Antigravity**: Call `invoke_subagent` with the corresponding role and model tier.
+       - **Codex CLI**: Delegate to native subagent or execute directly within `allowedFiles`.
+     - After the internal subagent completes each task, run verification:
+       ```bash
+       asd verify --task <T-ID> --cmd "<verificationCmd>"
+       ```
+   - **If User Confirmed `HEAVY` Mode (Multi-Harness External CLI & Worktree Spawn)**:
+     - Dispatch the wave across external harnesses and isolated Git worktrees:
+       ```bash
+       asd dispatch --turn <N> --mode parallel_spawn
+       ```
+     - Verify each completed task:
+       ```bash
+       asd verify --task <T-ID> --cmd "<verificationCmd>"
+       ```
+   - Display the updated `progressBoard` after every wave.
+
+5. **Step 5: Final Summary**
+   - Output the final `progressBoard`, list all verified tasks and modified files, and summarize verification results.

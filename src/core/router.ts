@@ -90,10 +90,12 @@ export interface ResolvedRoute {
   harness: HarnessId;
   model: string;
   modelFamily: ModelFamily;
+  thinkingEffort?: string;
   fallbacks: Array<{
     harness: HarnessId;
     model: string;
     modelFamily: string;
+    thinkingEffort?: string;
   }>;
   tier: 1 | 2 | 3 | 4;
   fallbackApplied?: boolean;

@@ -75,6 +75,7 @@ import type {
 } from "../core/types.ts";
 import {
   createTaskWorktree,
+  getChangedFiles,
   prepareBaseline,
   type TaskWorktreeInfo,
   verifyAndCommitLightTask,
@@ -890,7 +891,9 @@ export class AsdMcpServer {
         }
 
         let spawnResult = await spawnSubagent({
-          projectRoot: wtInfo ? wtInfo.wtPath : this.projectRoot,
+          projectRoot: this.projectRoot,
+          cwd: wtInfo ? wtInfo.wtPath : this.projectRoot,
+          worktreePath: wtInfo ? wtInfo.wtPath : null,
           homeDir: this.homeDir,
           mainSessionId: sessionId,
           subSessionId,
@@ -916,7 +919,7 @@ export class AsdMcpServer {
           }
         };
 
-        const needsFallbackRetry = (res: { exitCode: number | null; timedOut: boolean; metaPath: string }): boolean => {
+        const needsFallbackRetry = (res: { exitCode: number | null; timedOut?: boolean; metaPath: string }): boolean => {
           if (res.exitCode !== 0 || res.timedOut) return true;
           const out = readSpawnOutput(res.metaPath);
           if (!isFallbackTriggerOutput(out)) return false;
@@ -945,7 +948,9 @@ export class AsdMcpServer {
             activeRoute.thinkingEffort ?? t.thinking_effort
           );
           const fbResult = await spawnSubagent({
-            projectRoot: wtInfo ? wtInfo.wtPath : this.projectRoot,
+            projectRoot: this.projectRoot,
+            cwd: wtInfo ? wtInfo.wtPath : this.projectRoot,
+            worktreePath: wtInfo ? wtInfo.wtPath : null,
             homeDir: this.homeDir,
             mainSessionId: sessionId,
             subSessionId: fbSubSessionId,
@@ -971,7 +976,9 @@ export class AsdMcpServer {
             t.thinking_effort
           );
           const retryResult = await spawnSubagent({
-            projectRoot: wtInfo ? wtInfo.wtPath : this.projectRoot,
+            projectRoot: this.projectRoot,
+            cwd: wtInfo ? wtInfo.wtPath : this.projectRoot,
+            worktreePath: wtInfo ? wtInfo.wtPath : null,
             homeDir: this.homeDir,
             mainSessionId: sessionId,
             subSessionId: `${subSessionId}-default`,
@@ -992,7 +999,7 @@ export class AsdMcpServer {
         }
 
         // Verification
-        let verifyResult: { verified: boolean; commitSha?: string; error?: string; status?: TaskStatus };
+        let verifyResult: { verified: boolean; commitSha?: string; error?: string; status?: TaskStatus; changedFiles?: string[] };
         if (t.track === "LIGHT") {
           verifyResult = verifyAndCommitLightTask({
             projectRoot: this.projectRoot,
@@ -1021,7 +1028,7 @@ export class AsdMcpServer {
         if (verifyResult.verified) {
           const claim: DoneClaim = {
             summary: `Completed task ${t.task_id}: ${t.title}`,
-            changed_files: allowedFiles,
+            changed_files: verifyResult.changedFiles ?? allowedFiles,
             key_decisions: [`Executed with @${activeRoute.harness}/${activeRoute.model}`],
             risks: [],
           };

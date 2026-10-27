@@ -250,18 +250,12 @@ export interface SubagentLogRecord {
   dirPath: string;
 }
 
-export function runAsdLogs(options?: {
-  taskId?: string;
-  projectRoot?: string;
-  homeDir?: string;
-}): { found: boolean; record: SubagentLogRecord | null; availableTaskIds: string[] } {
-  const projectRoot = path.resolve(options?.projectRoot || process.cwd());
-  const sessionsRoot = path.join(projectRoot, ".asd", "sessions");
+export function scanSubagentLogs(projectRoot: string): SubagentLogRecord[] {
+  const sessionsRoot = path.join(path.resolve(projectRoot), ".asd", "sessions");
   if (!fs.existsSync(sessionsRoot)) {
-    return { found: false, record: null, availableTaskIds: [] };
+    return [];
   }
 
-  const targetTaskId = options?.taskId?.trim().toUpperCase();
   const records: SubagentLogRecord[] = [];
 
   try {
@@ -279,20 +273,25 @@ export function runAsdLogs(options?: {
         if (!fs.existsSync(metaPath)) continue;
 
         try {
+          const metaStat = fs.statSync(metaPath);
           const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as Record<string, unknown>;
           const promptPath = path.join(dirPath, "prompt.md");
           const outputPath = path.join(dirPath, "output.log");
           const prompt = fs.existsSync(promptPath) ? fs.readFileSync(promptPath, "utf8") : "";
           const outputLog = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf8") : "";
+          const startedAt =
+            typeof meta.startedAt === "number" && meta.startedAt > 0
+              ? meta.startedAt
+              : Math.round(metaStat.birthtimeMs || metaStat.mtimeMs || 0);
           records.push({
-            sessionId: String(meta.mainSessionId ?? sDir.name),
+            sessionId: String(meta.parentSessionId ?? meta.mainSessionId ?? sDir.name),
             subSessionId: String(meta.subSessionId ?? subDir.name),
             taskId: String(meta.taskId ?? ""),
             role: String(meta.role ?? ""),
             harness: String(meta.harness ?? ""),
             model: String(meta.model ?? ""),
             status: String(meta.status ?? "unknown"),
-            startedAt: Number(meta.startedAt ?? 0),
+            startedAt,
             finishedAt: typeof meta.finishedAt === "number" ? meta.finishedAt : undefined,
             prompt,
             outputLog,
@@ -304,14 +303,34 @@ export function runAsdLogs(options?: {
       }
     }
   } catch {
-    return { found: false, record: null, availableTaskIds: [] };
+    return [];
   }
 
   records.sort((a, b) => b.startedAt - a.startedAt);
-  const availableTaskIds = [...new Set(records.map((r) => r.taskId).filter(Boolean))];
+  return records;
+}
+
+export function runAsdLogs(options?: {
+  taskId?: string;
+  projectRoot?: string;
+  homeDir?: string;
+}): { found: boolean; record: SubagentLogRecord | null; availableTaskIds: string[] } {
+  const projectRoot = path.resolve(options?.projectRoot || process.cwd());
+  const records = scanSubagentLogs(projectRoot);
+  if (records.length === 0) {
+    return { found: false, record: null, availableTaskIds: [] };
+  }
+
+  const targetTaskId = options?.taskId?.trim().toUpperCase();
+  const availableTaskIds = [...new Set(records.map((r) => r.taskId || r.subSessionId).filter(Boolean))];
 
   const matched = targetTaskId
-    ? records.find((r) => r.taskId.toUpperCase() === targetTaskId) ?? null
+    ? records.find(
+        (r) =>
+          r.taskId.toUpperCase() === targetTaskId ||
+          r.subSessionId.toUpperCase() === targetTaskId ||
+          r.subSessionId.toUpperCase().includes(targetTaskId)
+      ) ?? null
     : records[0] ?? null;
 
   return {
@@ -465,14 +484,7 @@ export function runAsdClean(options?: {
 
           if (stashPopped) {
             // Clear stashed_work_sha in SQLite session
-            db.withImmediateTx(() => {
-              const rawDb = (db as unknown as { db: DatabaseSync }).db;
-              rawDb
-                .prepare(
-                  "UPDATE sessions SET stashed_work_sha = NULL, updated_at = ? WHERE session_id = ?"
-                )
-                .run(Date.now(), session.session_id);
-            });
+            db.clearStashedWork(session.session_id);
           }
         }
       }
@@ -538,13 +550,27 @@ Options:
   -h, --help                         Show this help message
   -v, --version                      Show ASD version
       --json                         Output result in JSON format
+      --project-root <dir>           Target project root directory (default: cwd)
+      --home <dir>                   Custom home directory path
+      --harness <id>                 Target harness (claude-code|opencode|codex|antigravity)
+      --session <id>                 Target session ID
+      --task <id>                    Target task ID (or comma-separated IDs for dispatch)
+      --turn <num>                   Target wave/turn number for dispatch
+      --mode <mode>                  Dispatch mode (parallel_spawn|claim_only)
+      --action <act>                 Plan action (create|get|update|sync_from_md)
+      --topic <text>                 Debate topic for 'asd debate'
+      --proposal <text>              Debate proposal text for 'asd debate'
+      --proposal-file <path>         Path to proposal markdown/text file for 'asd debate'
+      --summary <text>               Completion summary for 'asd verify'
+      --files <list>                 Comma-separated changed files for 'asd verify'
+      --cmd <command>                Explicit verification command override for 'asd verify'
+      --payload <json|->             Inline JSON payload (or '-' to read JSON from stdin)
+      --file <path>                  Path to JSON payload file
       --port <num>                   Port for 'asd ui' web dashboard (default: 3847)
       --force                        Force overwriting existing configurations (sync)
       --no-path                      Skip installing 'asd' CLI shim to global PATH (sync)
       --pop                          Restore stashed work (clean)
       --all                          Clean all leftover workspace state (clean)
-      --home <dir>                   Custom home directory path
-      --harness <id>                 Target harness for hook evaluation
 `);
 }
 
@@ -956,12 +982,29 @@ export async function main(
 
         try {
           let jsonPayload: Record<string, unknown> = {};
+          const hasCliFlags = Boolean(
+            subcommand ||
+              parsed.rest.length > 0 ||
+              options.action ||
+              options.session ||
+              options.task ||
+              options.turn !== undefined ||
+              options.mode ||
+              options.harness ||
+              options.topic ||
+              options.proposal ||
+              options.proposalFile ||
+              options.summary ||
+              options.files ||
+              options.cmd
+          );
+          const explicitStdin = options.payload === "-";
           const rawJsonInput =
-            options.payload ||
+            (options.payload && !explicitStdin ? options.payload : "") ||
             (options.file && fs.existsSync(options.file)
               ? fs.readFileSync(options.file, "utf8")
               : "") ||
-            readStdin();
+            (explicitStdin ? readStdin() : "");
           if (rawJsonInput && rawJsonInput.trim()) {
             try {
               jsonPayload = JSON.parse(rawJsonInput.trim()) as Record<string, unknown>;
@@ -973,6 +1016,7 @@ export async function main(
               );
             }
           }
+          void hasCliFlags;
 
           if (command === "plan") {
             const action = (options.action ||

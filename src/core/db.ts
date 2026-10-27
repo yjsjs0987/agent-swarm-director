@@ -69,6 +69,7 @@ export interface TaskRow {
   sub_session_id: string | null;
   commit_sha: string | null;
   duration_ms: number | null;
+  thinking_effort?: string | null;
 }
 
 export interface TaskInput {
@@ -312,6 +313,16 @@ export class SqliteDriver {
           "UPDATE sessions SET stashed_work_sha = ?, updated_at = ? WHERE session_id = ?"
         )
         .run(stashSha, Date.now(), sessionId);
+    });
+  }
+
+  clearStashedWork(sessionId: string): void {
+    this.withImmediateTx(() => {
+      this.db
+        .prepare(
+          "UPDATE sessions SET stashed_work_sha = NULL, updated_at = ? WHERE session_id = ?"
+        )
+        .run(Date.now(), sessionId);
     });
   }
 

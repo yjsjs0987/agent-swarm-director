@@ -23,6 +23,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { loadRoutingConfig } from "./config.ts";
 import { openProjectDb } from "./db.ts";
 import type { SqliteDriver, SessionRow, TaskRow } from "./db.ts";
 import { renderPlanMd, renderProgressBoard } from "./render.ts";
@@ -300,15 +301,7 @@ function tryParseJsonObject(raw: string): ParsedOpening | null {
   }
 }
 
-/**
- * Extracts structured verdict from subagent output:
- * 1. Markdown ```json code fences
- * 2. Entire raw text as JSON
- * 3. Embedded JSON object spanning from first '{' to last '}'
- */
-export function parseReviewerOpening(rawText: string): ParsedOpening | null {
-  if (!rawText || typeof rawText !== "string") return null;
-
+function parseDirectText(rawText: string): ParsedOpening | null {
   // 1. Look for markdown code fence
   const codeBlockRegex = /```(?:json)?\s*([\s\S]*?)\s*```/g;
   let match: RegExpExecArray | null;
@@ -331,6 +324,73 @@ export function parseReviewerOpening(rawText: string): ParsedOpening | null {
     const candidate = rawText.slice(firstBrace, lastBrace + 1);
     const parsed = tryParseJsonObject(candidate);
     if (parsed) return parsed;
+  }
+
+  return null;
+}
+
+function extractTextFromJsonEnvelope(obj: Record<string, unknown>): string[] {
+  const texts: string[] = [];
+  if (typeof obj.text === "string" && obj.text.trim()) texts.push(obj.text);
+  if (typeof obj.result === "string" && obj.result.trim()) texts.push(obj.result);
+  if (typeof obj.response === "string" && obj.response.trim()) texts.push(obj.response);
+  if (typeof obj.content === "string" && obj.content.trim()) texts.push(obj.content);
+  if (typeof obj.message === "string" && obj.message.trim()) texts.push(obj.message);
+  if (obj.part && typeof obj.part === "object") {
+    const part = obj.part as Record<string, unknown>;
+    if (typeof part.text === "string" && part.text.trim()) texts.push(part.text);
+  }
+  if (obj.item && typeof obj.item === "object") {
+    const item = obj.item as Record<string, unknown>;
+    if (typeof item.text === "string" && item.text.trim()) texts.push(item.text);
+  }
+  if (obj.msg && typeof obj.msg === "object") {
+    const msg = obj.msg as Record<string, unknown>;
+    if (typeof msg.message === "string" && msg.message.trim()) texts.push(msg.message);
+  }
+  return texts;
+}
+
+/**
+ * Extracts structured verdict from subagent output:
+ * 0. Unwraps JSON / NDJSON CLI envelopes (OpenCode `part.text`, Claude `result`, Codex `item.text`, Antigravity `response`)
+ * 1. Markdown ```json code fences
+ * 2. Entire raw text as JSON
+ * 3. Embedded JSON object spanning from first '{' to last '}'
+ */
+export function parseReviewerOpening(rawText: string): ParsedOpening | null {
+  if (!rawText || typeof rawText !== "string") return null;
+
+  const directParsed = parseDirectText(rawText);
+  if (directParsed) return directParsed;
+
+  // Unwrap NDJSON lines or JSON envelope objects emitted by CLI harnesses (--format json / --output-format json)
+  const extractedChunks: string[] = [];
+  const lines = rawText.split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) continue;
+    try {
+      const envObj = JSON.parse(trimmed) as Record<string, unknown>;
+      if (envObj && typeof envObj === "object") {
+        const directLine = tryParseJsonObject(trimmed);
+        if (directLine) return directLine;
+        const chunks = extractTextFromJsonEnvelope(envObj);
+        for (const chunk of chunks) {
+          const parsedChunk = parseDirectText(chunk);
+          if (parsedChunk) return parsedChunk;
+          extractedChunks.push(chunk);
+        }
+      }
+    } catch {
+      // ignore non-JSON line
+    }
+  }
+
+  if (extractedChunks.length > 0) {
+    const combined = extractedChunks.join("\n");
+    const parsedCombined = parseDirectText(combined);
+    if (parsedCombined) return parsedCombined;
   }
 
   return null;
@@ -484,6 +544,9 @@ export async function runDebateBroker(
     // 1. Select Reviewers prioritizing cross-model family diversity
     let diversityDegraded = false;
     const reviewers: ReviewerSpec[] = [];
+    const effectiveRoutingConfig =
+      options.routingConfig ??
+      loadRoutingConfig(options.projectRoot, options.homeDir);
     const effectiveCapabilities: RuntimeCapabilities | undefined =
       options.runtimeCapabilities ??
       (!options.commandRunner
@@ -516,7 +579,7 @@ export async function runDebateBroker(
       const sel1 = selectDiverseReviewer(
         proposerRoute,
         role1,
-        options.routingConfig,
+        effectiveRoutingConfig,
         effectiveCapabilities
       );
       if (sel1.diversityDegraded) diversityDegraded = true;
@@ -540,7 +603,7 @@ export async function runDebateBroker(
             modelFamily: sel1.modelFamily,
           },
           role2,
-          options.routingConfig,
+          effectiveRoutingConfig,
           effectiveCapabilities
         );
         if (sel2.diversityDegraded) diversityDegraded = true;
@@ -638,7 +701,7 @@ export async function runDebateBroker(
       while (shouldFallback(spawnResult)) {
         const nextFb = resolveFallback(
           activeRouteState,
-          options.routingConfig,
+          effectiveRoutingConfig,
           effectiveCapabilities
         );
         if (!nextFb) break;
@@ -868,7 +931,7 @@ export async function runDebateBroker(
             modelFamily: rejectLead.modelFamily,
           },
           "arbiter",
-          options.routingConfig,
+          effectiveRoutingConfig,
           effectiveCapabilities
         );
         if (arbiterSel.diversityDegraded) diversityDegraded = true;
@@ -949,7 +1012,7 @@ export async function runDebateBroker(
         while (shouldFallbackArb(arbResult)) {
           const nextFb = resolveFallback(
             arbRouteState,
-            options.routingConfig,
+            effectiveRoutingConfig,
             effectiveCapabilities
           );
           if (!nextFb) break;

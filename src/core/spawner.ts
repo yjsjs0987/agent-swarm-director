@@ -72,6 +72,7 @@ export interface SpawnSubagentResult {
   exitCode: number;
   durationMs: number;
   metaPath: string;
+  timedOut?: boolean;
 }
 
 // ============================================================================
@@ -269,6 +270,7 @@ export function spawnSubagent(
     worktreePath: options.worktreePath ?? null,
     allowedFiles: options.allowedFiles,
     status: "running",
+    startedAt,
   };
   const writeMeta = (): void => {
     fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
@@ -294,6 +296,7 @@ export function spawnSubagent(
     let pid = 0;
     let settled = false;
     let killRequested = false;
+    let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
     const finish = (exitCode: number, status: "done" | "failed"): void => {
@@ -301,16 +304,19 @@ export function spawnSubagent(
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
       if (options.signal) options.signal.removeEventListener("abort", onAbort);
+      const finishedAt = Date.now();
       meta = {
         ...meta,
         pid,
         status,
-        durationMs: Date.now() - startedAt,
+        startedAt,
+        finishedAt,
+        durationMs: finishedAt - startedAt,
       };
       writeMeta();
       // Resolve only after the log stream has flushed to disk.
       logStream.end(() => {
-        resolve({ exitCode, durationMs: meta.durationMs ?? 0, metaPath });
+        resolve({ exitCode, durationMs: meta.durationMs ?? 0, metaPath, timedOut });
       });
     };
 
@@ -324,13 +330,18 @@ export function spawnSubagent(
       finish(-1, "failed");
     };
 
+    const onTimeout = (): void => {
+      timedOut = true;
+      onAbort();
+    };
+
     if (options.signal) {
       options.signal.addEventListener("abort", onAbort, { once: true });
       // Insurance: an already-aborted signal must not skip the kill path.
       if (options.signal.aborted && !settled) onAbort();
     }
     if (options.timeoutMs !== undefined) {
-      timer = setTimeout(onAbort, options.timeoutMs);
+      timer = setTimeout(onTimeout, options.timeoutMs);
       timer.unref?.();
     }
 

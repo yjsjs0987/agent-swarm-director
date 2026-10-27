@@ -24,7 +24,7 @@ import {
   type TaskRow,
 } from "../core/db.ts";
 import { ASD_VERSION } from "../core/types.ts";
-import { type SubagentLogRecord } from "./index.ts";
+import { scanSubagentLogs, type SubagentLogRecord } from "./index.ts";
 
 export interface DashboardSnapshot {
   version: string;
@@ -41,6 +41,15 @@ export interface DashboardSnapshot {
   >;
 }
 
+const DOCTOR_CACHE_TTL_MS = 30_000;
+const doctorCache = new Map<
+  string,
+  {
+    expiresAt: number;
+    harnesses: DashboardSnapshot["harnesses"];
+  }
+>();
+
 function detectSystemLocale(): string {
   try {
     const resolved = Intl.DateTimeFormat().resolvedOptions().locale;
@@ -49,56 +58,6 @@ function detectSystemLocale(): string {
     // Ignore
   }
   return process.env.LC_ALL || process.env.LANG || "en-US";
-}
-
-function collectAllSubagentLogs(projectRoot: string): SubagentLogRecord[] {
-  const sessionsRoot = path.join(projectRoot, ".asd", "sessions");
-  if (!fs.existsSync(sessionsRoot)) return [];
-
-  const records: SubagentLogRecord[] = [];
-  try {
-    const sessionDirs = fs.readdirSync(sessionsRoot, { withFileTypes: true });
-    for (const sDir of sessionDirs) {
-      if (!sDir.isDirectory()) continue;
-      const subagentsDir = path.join(sessionsRoot, sDir.name, "subagents");
-      if (!fs.existsSync(subagentsDir)) continue;
-
-      const subDirs = fs.readdirSync(subagentsDir, { withFileTypes: true });
-      for (const subDir of subDirs) {
-        if (!subDir.isDirectory()) continue;
-        const dirPath = path.join(subagentsDir, subDir.name);
-        const metaPath = path.join(dirPath, "meta.json");
-        if (!fs.existsSync(metaPath)) continue;
-
-        try {
-          const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as Record<string, unknown>;
-          const promptPath = path.join(dirPath, "prompt.md");
-          const outputPath = path.join(dirPath, "output.log");
-          records.push({
-            sessionId: String(meta.mainSessionId ?? sDir.name),
-            subSessionId: String(meta.subSessionId ?? subDir.name),
-            taskId: String(meta.taskId ?? ""),
-            role: String(meta.role ?? ""),
-            harness: String(meta.harness ?? ""),
-            model: String(meta.model ?? ""),
-            status: String(meta.status ?? "unknown"),
-            startedAt: Number(meta.startedAt ?? 0),
-            finishedAt: typeof meta.finishedAt === "number" ? meta.finishedAt : undefined,
-            prompt: fs.existsSync(promptPath) ? fs.readFileSync(promptPath, "utf8") : "",
-            outputLog: fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf8") : "",
-            dirPath,
-          });
-        } catch {
-          // Ignore malformed entry
-        }
-      }
-    }
-  } catch {
-    return [];
-  }
-
-  records.sort((a, b) => b.startedAt - a.startedAt);
-  return records;
 }
 
 export async function collectDashboardSnapshot(options?: {
@@ -129,8 +88,21 @@ export async function collectDashboardSnapshot(options?: {
     }
   }
 
-  const subagentLogs = collectAllSubagentLogs(projectRoot);
-  const doctor = await runAsdDoctor({ projectRoot, homeDir });
+  const subagentLogs = scanSubagentLogs(projectRoot);
+  const cacheKey = `${projectRoot}::${homeDir ?? ""}`;
+  const now = Date.now();
+  const cached = doctorCache.get(cacheKey);
+  let harnesses: DashboardSnapshot["harnesses"];
+  if (cached && cached.expiresAt > now) {
+    harnesses = cached.harnesses;
+  } else {
+    const doctor = await runAsdDoctor({ projectRoot, homeDir });
+    harnesses = doctor.harnesses;
+    doctorCache.set(cacheKey, {
+      expiresAt: now + DOCTOR_CACHE_TTL_MS,
+      harnesses,
+    });
+  }
 
   return {
     version: ASD_VERSION,
@@ -141,7 +113,7 @@ export async function collectDashboardSnapshot(options?: {
     tasks,
     debates,
     subagentLogs,
-    harnesses: doctor.harnesses,
+    harnesses,
   };
 }
 
@@ -390,6 +362,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
 
     let currentLang = detectInitialLang();
     let selectedTaskId = null;
+    let selectedSubSessionId = null;
     let latestState = null;
 
     function updateLangButtons() {
@@ -420,6 +393,13 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
 
     function selectTask(taskId) {
       selectedTaskId = taskId;
+      selectedSubSessionId = null;
+      render(latestState);
+    }
+
+    function selectSubSession(subSessionId) {
+      selectedSubSessionId = subSessionId;
+      selectedTaskId = null;
       render(latestState);
     }
 
@@ -490,26 +470,58 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         document.getElementById("debateList").innerHTML =
           \`<div class="meta-bar">\${t.noDebates}</div>\`;
       } else {
-        document.getElementById("debateList").innerHTML = debates.map(d => \`
-          <div style="border-bottom:1px solid var(--border); padding:8px 0;">
-            <strong>\${esc(d.debate_id)}</strong> — \${esc(d.topic)}
-            <span class="badge st-running">\${esc(d.status)}</span>
-          </div>
-        \`).join("");
+        document.getElementById("debateList").innerHTML = debates.map(d => {
+          let iv = null;
+          try {
+            if (d.insight_verdict_json) iv = JSON.parse(d.insight_verdict_json);
+          } catch {}
+          const verdictBadge = iv && iv.verdict
+            ? \`<span class="badge \${iv.verdict === 'APPROVE' ? 'st-done' : iv.verdict === 'MINOR_AMEND' ? 'st-running' : 'st-failed'}">\${esc(iv.verdict)}</span>\`
+            : "";
+          const decisionsHtml = iv && Array.isArray(iv.decisions) && iv.decisions.length
+            ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Decisions:</strong><ul style="margin:4px 0 0 18px;padding:0;">\${iv.decisions.map(x => \`<li>\${esc(x)}</li>\`).join("")}</ul></div>\`
+            : "";
+          const constraintsHtml = iv && Array.isArray(iv.hard_constraints) && iv.hard_constraints.length
+            ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Hard Constraints:</strong><ul style="margin:4px 0 0 18px;padding:0;">\${iv.hard_constraints.map(x => \`<li>\${esc(x)}</li>\`).join("")}</ul></div>\`
+            : "";
+          const risksHtml = iv && Array.isArray(iv.risks) && iv.risks.length
+            ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Risks:</strong><ul style="margin:4px 0 0 18px;padding:0;">\${iv.risks.map(x => \`<li>\${esc(x)}</li>\`).join("")}</ul></div>\`
+            : "";
+          return \`
+            <div style="border-bottom:1px solid var(--border); padding:10px 0;">
+              <div>
+                <strong>\${esc(d.debate_id)}</strong> — \${esc(d.topic)}
+                <span class="badge st-\${d.status === 'done' ? 'done' : 'running'}">\${esc(d.status)}</span>
+                \${verdictBadge}
+              </div>
+              \${decisionsHtml}
+              \${constraintsHtml}
+              \${risksHtml}
+            </div>
+          \`;
+        }).join("");
       }
 
       const logs = data.subagentLogs || [];
-      const activeLog = selectedTaskId
-        ? logs.find(l => l.taskId.toUpperCase() === selectedTaskId.toUpperCase())
-        : logs[0];
+      const activeLog = selectedSubSessionId
+        ? logs.find(l => l.subSessionId === selectedSubSessionId)
+        : selectedTaskId
+          ? logs.find(l => l.taskId.toUpperCase() === selectedTaskId.toUpperCase())
+          : logs[0];
 
       if (!activeLog) {
         document.getElementById("inspector").innerHTML =
           \`<div class="meta-bar">\${t.noLogs}\${selectedTaskId ? t.forTask + esc(selectedTaskId) : ''}.</div>\`;
       } else {
         const statusText = t.statusMap[activeLog.status] || activeLog.status;
+        const logPills = logs.slice(0, 12).map(l => {
+          const isCur = l.subSessionId === activeLog.subSessionId;
+          const label = (l.taskId || l.role || "sub") + " @" + l.harness;
+          return \`<span class="badge \${isCur ? 'st-running' : 'st-pending'}" style="cursor:pointer;margin-bottom:4px;" onclick="selectSubSession('\${esc(l.subSessionId)}')">\${esc(label)}</span>\`;
+        }).join("");
         document.getElementById("inspector").innerHTML = \`
-          <div><strong>\${esc(activeLog.taskId)}</strong> — \${esc(activeLog.harness)} (\${esc(activeLog.model)})</div>
+          <div style="margin-bottom:8px;">\${logPills}</div>
+          <div><strong>\${esc(activeLog.taskId || activeLog.role || activeLog.subSessionId)}</strong> — \${esc(activeLog.harness)} (\${esc(activeLog.model)})</div>
           <div class="meta-bar">\${t.subSession}: \${esc(activeLog.subSessionId)} | \${t.statusLabel}: \${esc(statusText)}</div>
           <div class="card-title" style="margin-top:10px;">\${t.outputLog}</div>
           <pre>\${esc(activeLog.outputLog || t.emptyText)}</pre>

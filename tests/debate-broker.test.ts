@@ -696,5 +696,26 @@ Hope this helps!
         result.hardConstraints.includes("Fallback to default CLI model succeeded")
       );
     });
+
+    test("unwraps OpenCode NDJSON event stream containing escaped JSON markdown fence", () => {
+      const ndjson = [
+        JSON.stringify({ type: "step_start", timestamp: 1000, part: { type: "step-start" } }),
+        JSON.stringify({
+          type: "text",
+          timestamp: 2000,
+          part: {
+            type: "text",
+            text: '```json\n{\n  "verdict": "MINOR_AMEND",\n  "hard_constraints": ["Preserve NDJSON compatibility"],\n  "decisions": ["Unwrap part.text before parsing"],\n  "risks": ["Escaped quotes in outer JSON"],\n  "reasoning": "OpenCode --format json wraps assistant markdown inside NDJSON text events"\n}\n```',
+          },
+        }),
+        JSON.stringify({ type: "step_finish", timestamp: 3000, part: { type: "step-finish" } }),
+      ].join("\r\n");
+
+      const parsed = parseReviewerOpening(ndjson);
+      assert.ok(parsed);
+      assert.equal(parsed.verdict, "MINOR_AMEND");
+      assert.deepEqual(parsed.hard_constraints, ["Preserve NDJSON compatibility"]);
+      assert.deepEqual(parsed.decisions, ["Unwrap part.text before parsing"]);
+    });
   });
 });

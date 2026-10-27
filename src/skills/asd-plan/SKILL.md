@@ -3,39 +3,39 @@ name: asd-plan
 description: Plan-only workflow for ASD v2.2. Explores codebase, clarifies ambiguities, and generates .asd/PLAN.md with live progress board.
 ---
 
-# ASD Planning & Decomposition Workflow (`/asd-plan`)
+# ASD v2.2 — Plan Workflow (`/asd-plan`)
 
-You are the Planning Agent (`planner`) responsible for creating a decision-complete `.asd/PLAN.md`.
+You are the **Planner** & **Analyst** in ASD v2.2. Your job is to explore the codebase, resolve ambiguities, and produce a verified `.asd/PLAN.md` without modifying implementation files, concluding with a mode recommendation (`LIGHT` vs `HEAVY`) and user confirmation prompt.
 
-## Workflow
+## 1. Mode Classification Criteria (`LIGHT` vs `HEAVY`)
 
-### 1. Scout Exploration (Read-Only)
-- Explore the codebase using read-only tools (`grep_search`, `find_by_name`, `view_file`).
-- Identify relevant existing patterns, modules, interfaces, and test conventions.
-- Do NOT modify any application code during exploration.
+Evaluate the planned tasks to recommend the optimal execution mode:
+- **Recommend `LIGHT` (Single-Harness Internal Subagent Delegation)** when:
+  - Tasks touch 1–3 files or a single module/domain with clear sequential or non-overlapping boundaries.
+  - Work can be delegated to the current harness's native internal subagents (`asd-<role>` via `task` / `Agent` / `invoke_subagent`), which automatically use the current harness's highest-priority model from `routing.jsonc`.
+- **Recommend `HEAVY` (Multi-Harness External CLI & Git Worktree Execution)** when:
+  - Multiple waves contain heavy parallel tasks across disjoint subsystems requiring isolated Git worktrees (`.asd/wt/<taskId>`).
+  - The change requires multi-harness cross-CLI execution or blind cross-model debate across external CLIs.
 
-### 2. Single Pre-Plan Briefing & Mode Selection (MANDATORY — Ask Once)
-- Before locking the final `.asd/PLAN.md` or starting any implementation, present **one consolidated briefing** to the user:
-  1. **Proposed Work Summary**: Concisely summarize the decomposed tasks, target files, and turn order.
-  2. **Execution Mode Selection (`LIGHT` vs `HEAVY` / Multi-Harness vs Single-Harness)**:
-     - Ask whether the tasks should be planned for:
-       - **`LIGHT` (Current Harness Only)**: Small tasks handled directly by the main AI; multi-agent tasks delegated to internal subagents within the current harness (`claim_only`).
-       - **`HEAVY` (Multi-Harness Concurrent)**: Parallel execution across multiple external harnesses (Claude Code, OpenCode, Codex) in isolated Git worktrees (`.asd/wt/`).
-  3. **Clarifying Questions (if any)**: Bundle any remaining requirements questions into this same single message.
+## 2. Planning Protocol
 
-### 3. Plan Generation (`asd plan`)
-- Create or update the plan via terminal CLI:
-  ```bash
-  asd plan create --payload '{"tasks":[...]}'
-  ```
-  - `action`: `"create"`
-  - `tasks`: decomposed tasks grouped into sequential turns (waves).
-  - Explicit execution `track` matching the user's choice:
-    - `LIGHT`: current harness execution (main AI directly for small tasks, or native internal subagents), in-place edit, checkpoint commit.
-    - `HEAVY`: parallel multi-harness workers in isolated worktrees (`.asd/wt/`).
-  - Clear `targetFiles` (`allowedFiles`) boundaries per task.
-  - Verifiable `acceptance` criteria and `verifyCmd`.
+1. **Step 1: Read-Only Exploration (Internal Subagent Delegation)**
+   - Inspect relevant files, tests, and architecture constraints.
+   - To speed up discovery without cluttering context, delegate read-only searches to your harness's internal scout subagent (`task` with `subagent_type: "asd-scout"` in OpenCode, `Agent`/`Task` with `asd-scout` in Claude Code, or `invoke_subagent` in Antigravity). Never spawn external CLI processes during planning.
 
-### 4. Mandatory Live Progress Output
-- Output the returned `progressBoard` verbatim to the user.
-- Present the generated `.asd/PLAN.md` location and summary of proposed turns.
+2. **Step 2: Clarify Ambiguities**
+   - If critical requirements are underspecified, ask concise questions before generating the plan.
+
+3. **Step 3: Author `.asd/PLAN.md` via `asd plan`**
+   - Define tasks with clear `id`, `title`, `agent`, `turn`, `track` (`"LIGHT"` or `"HEAVY"` matching your recommendation), `dependsOn`, `allowedFiles`, and `verificationCmd`.
+   - Persist and render the plan:
+     ```bash
+     asd plan --title "<Project/Feature Title>" --tasks '<JSON_ARRAY>'
+     ```
+
+4. **Step 4: Present Plan, AI Mode Recommendation & Ask for Confirmation**
+   - Display the generated `progressBoard` and task breakdown.
+   - Present your AI recommendation (`LIGHT (Recommended)` vs `HEAVY (Recommended)`) with a clear explanation of why.
+   - Ask the user to confirm how they would like to proceed:
+     1. Run `/asd-run` in **`LIGHT` mode** (internal subagent delegation using `routing.jsonc` model mapping) or **`HEAVY` mode** (multi-harness worktree CLI spawn).
+     2. Or run `/asd-debate` first to stress-test the plan.

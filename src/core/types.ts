@@ -115,6 +115,8 @@ export interface SubagentSessionMeta {
   worktreePath: string | null;
   allowedFiles: string[];
   status: "running" | "done" | "failed";
+  startedAt?: number;
+  finishedAt?: number;
   durationMs?: number;
 }
 
@@ -125,11 +127,13 @@ export interface SubagentSessionMeta {
 export interface RouteEntry {
   harness: HarnessId;
   model: string;
-  modelFamily: "claude" | "gpt" | "gemini" | "glm" | "deepseek";
+  modelFamily: "claude" | "gpt" | "gemini" | "glm" | "deepseek" | string;
+  thinkingEffort?: string;
   fallbacks: Array<{
     harness: HarnessId;
     model: string;
     modelFamily: string;
+    thinkingEffort?: string;
   }>;
 }
 
@@ -243,6 +247,7 @@ export interface AsdVerifyOutput {
   rollbackPerformed?: boolean;
   violations?: string[];
   testOutput?: string;
+  error?: string;
   progressBoard: string;
 }
 
