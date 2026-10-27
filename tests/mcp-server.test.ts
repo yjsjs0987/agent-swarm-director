@@ -644,6 +644,110 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
       assert.equal(dispatchResp.results[0]?.status, "running");
       assert.equal(dispatchResp.results[0]?.harness, "opencode");
     });
+
+    test("parallel_spawn automatically steps through same-harness & cross-harness fallbacks on rate-limit or network error", async () => {
+      const projectRoot = makeProjectRoot();
+      // Write a custom project routing.jsonc with multiple models on opencode in fallbacks
+      const asdDir = path.join(projectRoot, ".asd");
+      fs.mkdirSync(asdDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(asdDir, "routing.jsonc"),
+        JSON.stringify(
+          {
+            version: "2.2.0",
+            agents: {
+              critic: {
+                harness: "opencode",
+                model: "glm-5",
+                modelFamily: "glm",
+                fallbacks: [
+                  { harness: "opencode", model: "deepseek-r1", modelFamily: "deepseek" },
+                  { harness: "opencode", model: "qwen-2.5-coder", modelFamily: "qwen" },
+                ],
+              },
+              worker: {
+                harness: "opencode",
+                model: "glm-5",
+                modelFamily: "glm",
+                fallbacks: [],
+              },
+            },
+            categories: {
+              medium: {
+                harness: "opencode",
+                model: "glm-5",
+                modelFamily: "glm",
+                fallbacks: [],
+              },
+            },
+          },
+          null,
+          2
+        ),
+        "utf8"
+      );
+
+      const triedModels: string[] = [];
+      const mockRunner: CommandRunner = {
+        async run(_cmd, args, opts) {
+          const modelIdx = args.indexOf("--model");
+          const model = modelIdx !== -1 ? args[modelIdx + 1] ?? "" : "";
+          triedModels.push(model);
+          opts.onSpawn?.(8888);
+
+          // Simulate 1st model (glm-5) failing with 429 Rate Limit, 2nd model (deepseek-r1) failing with network error,
+          // and 3rd model (qwen-2.5-coder) succeeding!
+          if (model === "glm-5") {
+            opts.onStderr("Error: 429 Too Many Requests - rate limit exceeded\n");
+            return { exitCode: 1, pid: 8888 };
+          }
+          if (model === "deepseek-r1") {
+            opts.onStderr("Error: ECONNRESET network error\n");
+            return { exitCode: 1, pid: 8888 };
+          }
+
+          fs.writeFileSync(path.join(opts.cwd, "fallback-ok.ts"), "export const ok = true;\n", "utf8");
+          opts.onStdout("Done with qwen-2.5-coder\n");
+          return { exitCode: 0, pid: 8888 };
+        },
+      };
+
+      const server = new AsdMcpServer({
+        projectRoot,
+        commandRunner: mockRunner,
+        autoSync: false,
+      });
+      openServers.push(server);
+
+      await server.handleRequest("asd_plan", {
+        action: "create",
+        sessionId: "dispatch-fb-chain",
+        mainHarness: "opencode",
+        tasks: [
+          {
+            taskId: "T1.1",
+            turn: 1,
+            title: "Task with multi-model fallback on same harness",
+            track: "LIGHT",
+            role: "critic",
+            category: "general",
+            difficulty: "medium",
+            targetFiles: ["fallback-ok.ts"],
+          },
+        ],
+      });
+
+      const dispatchResp = (await server.handleRequest("asd_dispatch", {
+        sessionId: "dispatch-fb-chain",
+        turn: 1,
+        mode: "parallel_spawn",
+      })) as AsdDispatchOutput;
+
+      assert.deepEqual(triedModels, ["glm-5", "deepseek-r1", "qwen-2.5-coder"]);
+      assert.equal(dispatchResp.results[0]?.status, "done");
+      assert.equal(dispatchResp.results[0]?.harness, "opencode");
+      assert.equal(dispatchResp.results[0]?.model, "qwen-2.5-coder");
+    });
   });
 
   describe("5. asd_verify Tool", () => {

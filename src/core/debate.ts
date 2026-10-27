@@ -29,11 +29,14 @@ import { renderPlanMd, renderProgressBoard } from "./render.ts";
 import {
   detectAvailableCliHarnesses,
   inferModelFamily,
+  isFallbackTriggerOutput,
+  resolveFallback,
   selectDiverseReviewer,
 } from "./router.ts";
 import type {
   DiverseReviewerSelection,
   ProposalRouteInput,
+  ResolvedRoute,
   RuntimeCapabilities,
 } from "./router.ts";
 import { spawnSubagent } from "./spawner.ts";
@@ -65,6 +68,11 @@ export interface ReviewerSpec {
   model: string;
   modelFamily: string;
   diversityDegraded: boolean;
+  fallbacks?: Array<{
+    harness: HarnessId;
+    model: string;
+    modelFamily: string;
+  }>;
 }
 
 export interface ReviewerOpening {
@@ -519,6 +527,7 @@ export async function runDebateBroker(
         model: sel1.model,
         modelFamily: sel1.modelFamily,
         diversityDegraded: sel1.diversityDegraded,
+        fallbacks: sel1.route.fallbacks,
       });
 
       // Select Reviewer 2 diverse against Reviewer 1 and proposer
@@ -550,6 +559,7 @@ export async function runDebateBroker(
             model: sel2.model,
             modelFamily: sel2.modelFamily,
             diversityDegraded: sel2.diversityDegraded,
+            fallbacks: sel2.route.fallbacks,
           });
         }
       }
@@ -595,15 +605,79 @@ export async function runDebateBroker(
         timeoutMs: options.timeoutMs,
       });
 
-      // Fallback retry without --model if the specified preset model is not configured in the CLI harness
+      // Step through configured fallbacks (same harness different model, or cross-harness)
+      // when CLI exits non-zero, times out, or reports quota/rate-limit/network failure.
+      let activeHarness = reviewer.harness;
       let activeModel = reviewer.model;
+      let activeFamily = reviewer.modelFamily;
+      let activeRouteState: ResolvedRoute = {
+        harness: reviewer.harness,
+        model: reviewer.model,
+        modelFamily: reviewer.modelFamily,
+        fallbacks: reviewer.fallbacks ?? [],
+        tier: 2,
+      };
+
+      const shouldFallback = (res: { exitCode: number | null; timedOut: boolean; metaPath: string }): boolean => {
+        if (res.exitCode !== 0 || res.timedOut) return true;
+        try {
+          const outFile = path.join(path.dirname(res.metaPath), "output.log");
+          if (fs.existsSync(outFile)) {
+            const raw = fs.readFileSync(outFile, "utf8");
+            if (!parseReviewerOpening(raw) && isFallbackTriggerOutput(raw)) {
+              return true;
+            }
+          }
+        } catch {
+          // ignore
+        }
+        return false;
+      };
+
+      let fbIdx = 0;
+      while (shouldFallback(spawnResult)) {
+        const nextFb = resolveFallback(
+          activeRouteState,
+          options.routingConfig,
+          effectiveCapabilities
+        );
+        if (!nextFb) break;
+        fbIdx++;
+        activeRouteState = nextFb;
+        activeHarness = nextFb.harness;
+        activeModel = nextFb.model;
+        activeFamily = nextFb.modelFamily;
+        const fbCmdInfo = options.commandBuilder
+          ? options.commandBuilder(activeHarness, round1Prompt, activeModel)
+          : buildDefaultHarnessCommand(activeHarness, round1Prompt, activeModel);
+        const fbResult = await spawnSubagent({
+          projectRoot: options.projectRoot,
+          homeDir: options.homeDir,
+          mainSessionId: options.sessionId,
+          subSessionId: `${subSessionId}-fb${fbIdx}`,
+          role: reviewer.role,
+          harness: activeHarness,
+          model: activeModel,
+          taskId: options.taskId ?? "",
+          prompt: round1Prompt,
+          allowedFiles: [],
+          command: fbCmdInfo.command,
+          args: fbCmdInfo.args,
+          commandRunner: options.commandRunner,
+          signal: options.signal,
+          timeoutMs: options.timeoutMs,
+        });
+        spawnResult = fbResult;
+      }
+
+      // Final fallback retry without --model if all configured fallbacks failed
       if (
-        spawnResult.exitCode !== 0 &&
-        reviewer.model &&
+        shouldFallback(spawnResult) &&
+        activeModel &&
         !options.commandBuilder
       ) {
         const defaultCmdInfo = buildDefaultHarnessCommand(
-          reviewer.harness,
+          activeHarness,
           round1Prompt,
           ""
         );
@@ -613,7 +687,7 @@ export async function runDebateBroker(
           mainSessionId: options.sessionId,
           subSessionId: `${subSessionId}-default`,
           role: reviewer.role,
-          harness: reviewer.harness,
+          harness: activeHarness,
           model: "default",
           taskId: options.taskId ?? "",
           prompt: round1Prompt,
@@ -658,9 +732,9 @@ export async function runDebateBroker(
       const opening: ReviewerOpening = {
         reviewerId: `r1-${index + 1}`,
         role: reviewer.role,
-        harness: reviewer.harness,
+        harness: activeHarness,
         model: activeModel,
-        modelFamily: reviewer.modelFamily,
+        modelFamily: activeFamily,
         verdict: parsed.verdict,
         hard_constraints: parsed.hard_constraints,
         decisions: parsed.decisions,
@@ -805,6 +879,7 @@ export async function runDebateBroker(
           model: arbiterSel.model,
           modelFamily: arbiterSel.modelFamily,
           diversityDegraded: arbiterSel.diversityDegraded,
+          fallbacks: arbiterSel.route.fallbacks,
         };
       }
 
@@ -843,14 +918,76 @@ export async function runDebateBroker(
           timeoutMs: options.timeoutMs,
         });
 
+        let activeArbHarness = arbiterSpec.harness;
         let activeArbModel = arbiterSpec.model;
+        let activeArbFamily = arbiterSpec.modelFamily;
+        let arbRouteState: ResolvedRoute = {
+          harness: arbiterSpec.harness,
+          model: arbiterSpec.model,
+          modelFamily: arbiterSpec.modelFamily,
+          fallbacks: arbiterSpec.fallbacks ?? [],
+          tier: 2,
+        };
+
+        const shouldFallbackArb = (res: { exitCode: number | null; timedOut: boolean; metaPath: string }): boolean => {
+          if (res.exitCode !== 0 || res.timedOut) return true;
+          try {
+            const outFile = path.join(path.dirname(res.metaPath), "output.log");
+            if (fs.existsSync(outFile)) {
+              const raw = fs.readFileSync(outFile, "utf8");
+              if (!parseReviewerOpening(raw) && isFallbackTriggerOutput(raw)) {
+                return true;
+              }
+            }
+          } catch {
+            // ignore
+          }
+          return false;
+        };
+
+        let arbFbIdx = 0;
+        while (shouldFallbackArb(arbResult)) {
+          const nextFb = resolveFallback(
+            arbRouteState,
+            options.routingConfig,
+            effectiveCapabilities
+          );
+          if (!nextFb) break;
+          arbFbIdx++;
+          arbRouteState = nextFb;
+          activeArbHarness = nextFb.harness;
+          activeArbModel = nextFb.model;
+          activeArbFamily = nextFb.modelFamily;
+          const fbR2Cmd = options.commandBuilder
+            ? options.commandBuilder(activeArbHarness, r2Prompt, activeArbModel)
+            : buildDefaultHarnessCommand(activeArbHarness, r2Prompt, activeArbModel);
+          const fbArbResult = await spawnSubagent({
+            projectRoot: options.projectRoot,
+            homeDir: options.homeDir,
+            mainSessionId: options.sessionId,
+            subSessionId: `${r2SubSessionId}-fb${arbFbIdx}`,
+            role: arbiterSpec.role,
+            harness: activeArbHarness,
+            model: activeArbModel,
+            taskId: options.taskId ?? "",
+            prompt: r2Prompt,
+            allowedFiles: [],
+            command: fbR2Cmd.command,
+            args: fbR2Cmd.args,
+            commandRunner: options.commandRunner,
+            signal: options.signal,
+            timeoutMs: options.timeoutMs,
+          });
+          arbResult = fbArbResult;
+        }
+
         if (
-          arbResult.exitCode !== 0 &&
-          arbiterSpec.model &&
+          shouldFallbackArb(arbResult) &&
+          activeArbModel &&
           !options.commandBuilder
         ) {
           const defaultR2Cmd = buildDefaultHarnessCommand(
-            arbiterSpec.harness,
+            activeArbHarness,
             r2Prompt,
             ""
           );
@@ -860,7 +997,7 @@ export async function runDebateBroker(
             mainSessionId: options.sessionId,
             subSessionId: `${r2SubSessionId}-default`,
             role: arbiterSpec.role,
-            harness: arbiterSpec.harness,
+            harness: activeArbHarness,
             model: "default",
             taskId: options.taskId ?? "",
             prompt: r2Prompt,
@@ -905,9 +1042,9 @@ export async function runDebateBroker(
         arbiterOpening = {
           reviewerId: "r2-arbiter",
           role: arbiterSpec.role,
-          harness: arbiterSpec.harness,
+          harness: activeArbHarness,
           model: activeArbModel,
-          modelFamily: arbiterSpec.modelFamily,
+          modelFamily: activeArbFamily,
           verdict: parsedArb.verdict,
           hard_constraints: parsedArb.hard_constraints,
           decisions: parsedArb.decisions,

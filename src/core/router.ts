@@ -585,6 +585,18 @@ function resolveBaseRoute(
 // ============================================================================
 
 /**
+ * Detects whether a CLI subagent stdout/stderr log indicates a rate-limit, quota,
+ * network, timeout, or model configuration error that should trigger fallback
+ * to the next entry in `fallbacks`.
+ */
+export function isFallbackTriggerOutput(output: string): boolean {
+  if (!output || typeof output !== "string") return false;
+  return /rate[\s_-]?limit|quota[\s_-]?exceeded|insufficient[_\s]quota|credit balance|too many requests|\b429\b|\b502\b|\b503\b|\b504\b|overloaded|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up|network error|fetch failed|model[_\s]+not[_\s]+found|invalid[_\s]+model|unknown[_\s]+model/i.test(
+    output
+  );
+}
+
+/**
  * Resolve the next valid fallback from a current route's fallback chain,
  * respecting runtime capabilities (e.g. available harnesses and headless support).
  */
@@ -881,6 +893,7 @@ export function selectDiverseReviewer(
   // 4. Rank candidates:
   // - Priority 1: Different modelFamily (weight 100)
   // - Priority 2: Different harness (weight 10)
+  // - Priority 3: Different model within the same harness/family (weight 5)
   const scored = candidates.map((cand, index) => {
     let score = 0;
     if (cand.modelFamily !== propFamily) {
@@ -888,6 +901,9 @@ export function selectDiverseReviewer(
     }
     if (propHarness && cand.harness !== propHarness) {
       score += 10;
+    }
+    if (proposalRoute.model && cand.model !== proposalRoute.model) {
+      score += 5;
     }
     return { cand, score, index };
   });

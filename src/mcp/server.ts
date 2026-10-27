@@ -35,7 +35,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { autoSyncIfNeeded } from "../adapters/installer.ts";
-import { resolveAsdPaths } from "../core/config.ts";
+import { loadRoutingConfig, resolveAsdPaths } from "../core/config.ts";
 import { openProjectDb, type SessionRow, type SqliteDriver, type TaskRow } from "../core/db.ts";
 import { buildDefaultHarnessCommand, runDebateBroker } from "../core/debate.ts";
 import {
@@ -48,8 +48,11 @@ import {
 import {
   detectAvailableCliHarnesses,
   escalateTaskRoute,
+  isFallbackTriggerOutput,
   normalizeAntigravityModel,
+  resolveFallback,
   resolveRoute,
+  type ResolvedRoute,
 } from "../core/router.ts";
 import { spawnSubagent, type CommandRunner } from "../core/spawner.ts";
 import type {
@@ -828,6 +831,7 @@ export class AsdMcpServer {
         : !this.commandRunner
           ? { availableHarnesses: detectAvailableCliHarnesses() }
           : undefined;
+      const routingCfg = loadRoutingConfig(this.projectRoot, this.homeDir);
       while (currentAttempts < 3) {
         const esc = escalateTaskRoute(
           {
@@ -837,7 +841,7 @@ export class AsdMcpServer {
             mode: "parallel_spawn",
           } as TaskRow,
           currentAttempts,
-          undefined,
+          routingCfg,
           runtimeCaps
         );
         const route = esc.route;
@@ -902,9 +906,66 @@ export class AsdMcpServer {
           signal,
         });
 
-        if (spawnResult.exitCode !== 0 && route.model && !this.commandRunner) {
+        let activeRoute: ResolvedRoute = route;
+        const readSpawnOutput = (metaPath: string): string => {
+          try {
+            const logFile = path.join(path.dirname(metaPath), "output.log");
+            return fs.existsSync(logFile) ? fs.readFileSync(logFile, "utf8") : "";
+          } catch {
+            return "";
+          }
+        };
+
+        const needsFallbackRetry = (res: { exitCode: number | null; timedOut: boolean; metaPath: string }): boolean => {
+          if (res.exitCode !== 0 || res.timedOut) return true;
+          const out = readSpawnOutput(res.metaPath);
+          if (!isFallbackTriggerOutput(out)) return false;
+          const workDir = wtInfo ? wtInfo.wtPath : this.projectRoot;
+          return getChangedFiles(workDir).length === 0;
+        };
+
+        // Step through configured fallbacks (same harness different model, or cross-harness)
+        // when CLI exits non-zero, times out, or reports quota/rate-limit/network failure.
+        let fbIndex = 0;
+        while (needsFallbackRetry(spawnResult)) {
+          const nextFb = resolveFallback(activeRoute, routingCfg, runtimeCaps);
+          if (!nextFb) break;
+          fbIndex++;
+          activeRoute = nextFb;
+          const fbSubSessionId = `sub-${t.turn}-${t.task_id}-${t.role}-${activeRoute.harness}-fb${fbIndex}`;
+          this.db.updateTaskStatus(sessionId, t.task_id, "running", {
+            assignedHarness: activeRoute.harness,
+            assignedModel: activeRoute.model,
+            subSessionId: fbSubSessionId,
+          });
+          const fbCmdInfo = buildDefaultHarnessCommand(
+            activeRoute.harness,
+            prompt,
+            activeRoute.model,
+            activeRoute.thinkingEffort ?? t.thinking_effort
+          );
+          const fbResult = await spawnSubagent({
+            projectRoot: wtInfo ? wtInfo.wtPath : this.projectRoot,
+            homeDir: this.homeDir,
+            mainSessionId: sessionId,
+            subSessionId: fbSubSessionId,
+            role: t.role as AgentRole,
+            harness: activeRoute.harness,
+            model: activeRoute.model,
+            taskId: t.task_id,
+            prompt,
+            allowedFiles,
+            command: fbCmdInfo.command,
+            args: fbCmdInfo.args,
+            commandRunner: this.commandRunner,
+            signal,
+          });
+          spawnResult = fbResult;
+        }
+
+        if (needsFallbackRetry(spawnResult) && activeRoute.model && !this.commandRunner) {
           const defaultCmdInfo = buildDefaultHarnessCommand(
-            route.harness,
+            activeRoute.harness,
             prompt,
             "",
             t.thinking_effort
@@ -915,7 +976,7 @@ export class AsdMcpServer {
             mainSessionId: sessionId,
             subSessionId: `${subSessionId}-default`,
             role: t.role as AgentRole,
-            harness: route.harness,
+            harness: activeRoute.harness,
             model: "default",
             taskId: t.task_id,
             prompt,
@@ -961,7 +1022,7 @@ export class AsdMcpServer {
           const claim: DoneClaim = {
             summary: `Completed task ${t.task_id}: ${t.title}`,
             changed_files: allowedFiles,
-            key_decisions: [`Executed with @${route.harness}/${route.model}`],
+            key_decisions: [`Executed with @${activeRoute.harness}/${activeRoute.model}`],
             risks: [],
           };
           this.db.recordTaskVerified(
@@ -977,7 +1038,7 @@ export class AsdMcpServer {
             t.turn,
             completedCount,
             totalCount,
-            `[✓ ${t.task_id} 완료 (@${route.harness}/${route.model}, ${(spawnResult.durationMs / 1000).toFixed(1)}s)]`
+            `[✓ ${t.task_id} 완료 (@${activeRoute.harness}/${activeRoute.model}, ${(spawnResult.durationMs / 1000).toFixed(1)}s)]`
           );
 
           // Update PLAN.md atomically
@@ -987,8 +1048,8 @@ export class AsdMcpServer {
           finalResult = {
             taskId: t.task_id,
             status: "done",
-            harness: route.harness,
-            model: route.model,
+            harness: activeRoute.harness,
+            model: activeRoute.model,
             commitSha: verifyResult.commitSha,
             durationMs: spawnResult.durationMs,
           };
@@ -1000,8 +1061,8 @@ export class AsdMcpServer {
             finalResult = {
               taskId: t.task_id,
               status: "failed",
-              harness: route.harness,
-              model: route.model,
+              harness: activeRoute.harness,
+              model: activeRoute.model,
               durationMs: spawnResult.durationMs,
               error: verifyResult.error || "Verification failed after 3 attempts",
             };
