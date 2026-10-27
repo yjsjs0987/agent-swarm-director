@@ -64,6 +64,7 @@ export interface SyncHarnessOptions {
   force?: boolean;
   projectRoot?: string;
   asdCliPath?: string;
+  noPath?: boolean;
 }
 
 export interface HarnessSyncStatus {
@@ -78,6 +79,7 @@ export interface SyncHarnessConfigsResult {
   skipped: boolean;
   configHash: string;
   harnesses: Record<HarnessId, HarnessSyncStatus>;
+  cliShimsInstalled?: string[];
 }
 
 export interface UninstallHarnessOptions {
@@ -653,6 +655,82 @@ function stripAsdManagedMcpEntries(mcpObj: Record<string, unknown>): void {
   }
 }
 
+function getCliShimTargetDirs(homeDir: string): string[] {
+  const dirs = [path.join(homeDir, ".asd", "bin")];
+  const isRealHome = path.resolve(homeDir) === path.resolve(os.homedir());
+  if (isRealHome) {
+    if (process.platform === "win32") {
+      const npmBin = path.join(
+        process.env.APPDATA || path.join(homeDir, "AppData", "Roaming"),
+        "npm"
+      );
+      dirs.push(npmBin);
+    } else {
+      dirs.push(path.join(homeDir, ".local", "bin"));
+    }
+  }
+  return dirs;
+}
+
+function installCliPathShims(homeDir: string, asdCliPath: string): string[] {
+  const written: string[] = [];
+  const normalizedCli = path.resolve(asdCliPath);
+  const shContent = `#!/usr/bin/env sh\n# ASD-MANAGED-SHIM\nexec node --no-warnings "${normalizedCli.replaceAll("\\", "/")}" "$@"\n`;
+  const cmdContent = `@ECHO off\r\nREM ASD-MANAGED-SHIM\r\nnode --no-warnings "${normalizedCli}" %*\r\n`;
+  const ps1Content = `# ASD-MANAGED-SHIM\r\n& node --no-warnings "${normalizedCli}" @args\r\nexit $LASTEXITCODE\r\n`;
+
+  for (const binDir of getCliShimTargetDirs(homeDir)) {
+    try {
+      ensureDir(binDir);
+      const shPath = path.join(binDir, "asd");
+      fs.writeFileSync(shPath, shContent, { encoding: "utf8", mode: 0o755 });
+      written.push(shPath);
+
+      if (process.platform === "win32") {
+        const cmdPath = path.join(binDir, "asd.cmd");
+        fs.writeFileSync(cmdPath, cmdContent, "utf8");
+        written.push(cmdPath);
+
+        const ps1Path = path.join(binDir, "asd.ps1");
+        fs.writeFileSync(ps1Path, ps1Content, "utf8");
+        written.push(ps1Path);
+      }
+    } catch {
+      // Ignore permission issues on system bin directories
+    }
+  }
+  return written;
+}
+
+function removeCliPathShims(homeDir: string, removedFiles: string[]): void {
+  for (const binDir of getCliShimTargetDirs(homeDir)) {
+    for (const name of ["asd", "asd.cmd", "asd.ps1"]) {
+      const filePath = path.join(binDir, name);
+      if (!fs.existsSync(filePath)) continue;
+      try {
+        const content = fs.readFileSync(filePath, "utf8");
+        if (content.includes("ASD-MANAGED-SHIM")) {
+          fs.unlinkSync(filePath);
+          removedFiles.push(filePath);
+        }
+      } catch {
+        // Ignore unlink errors
+      }
+    }
+    try {
+      if (
+        binDir.endsWith(path.join(".asd", "bin")) &&
+        fs.existsSync(binDir) &&
+        fs.readdirSync(binDir).length === 0
+      ) {
+        fs.rmdirSync(binDir);
+      }
+    } catch {
+      // Ignore
+    }
+  }
+}
+
 // ============================================================================
 // Core Synchronizer: Strictly Global-Only
 // ============================================================================
@@ -947,11 +1025,17 @@ export async function syncHarnessConfigs(
   };
   saveLastSync(homeDir, updatedLastSync);
 
+  // Install global PATH CLI shims unless --no-path is specified
+  const cliShimsInstalled = options?.noPath
+    ? []
+    : installCliPathShims(homeDir, asdCliPath);
+
   return {
     status: anyUpdated ? "updated" : "skipped",
     skipped: !anyUpdated,
     configHash,
     harnesses: harnessResults,
+    cliShimsInstalled,
   };
 }
 
@@ -1187,6 +1271,9 @@ export async function uninstallHarnessConfigs(
   }
 
   cleanupJsonMcpFile(path.join(geminiDir, "mcp_config.json"), "antigravity");
+
+  // Remove ASD-managed PATH CLI shims
+  removeCliPathShims(homeDir, removedFiles);
 
   // Remove last-sync.json
   const lastSyncPath = path.join(homeDir, ".asd", "state", "last-sync.json");

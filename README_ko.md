@@ -41,23 +41,19 @@
 ## 빠른 시작 (Quick Start)
 
 ```bash
-# 1. 실행 환경 및 보안 정책 프로브 진단 (<100ms, 토큰 소모 0)
-node --no-warnings src/cli/index.ts doctor
-
-# 2. 4개 하네스 글로벌 설정에 스킬, 에이전트, 훅, 부족한 MCP 일괄 동기화
+# 1. 최초 1회 설치: 4개 하네스 글로벌 설정 동기화 및 전역 PATH에 'asd' 명령어 자동 등록
 node --no-warnings src/cli/index.ts sync
+# (선택: 전역 PATH에 'asd' 명령어를 등록하고 싶지 않다면 --no-path 옵션 사용)
+# node --no-warnings src/cli/index.ts sync --no-path
 
-# 3. 현재 프로젝트 세션 상태 및 실시간 TODO 진행 보드 확인
-node --no-warnings src/cli/index.ts status
+# 2. 이후부터는 어느 프로젝트 폴더에서든 'asd' 명령어를 바로 사용할 수 있습니다!
+asd doctor
+asd status
+asd logs
+asd logs T1.1
+asd ui
 
-# 4. 가장 최근 서브에이전트 로그 조회 (또는 특정 작업 ID 지정: T1.1)
-node --no-warnings src/cli/index.ts logs
-node --no-warnings src/cli/index.ts logs T1.1
-
-# 5. 경량 로컬 웹 대시보드 실행 (http://127.0.0.1:3847)
-node --no-warnings src/cli/index.ts ui
-
-# 6. 전체 자동화 테스트 스위트 실행
+# 3. 전체 자동화 테스트 스위트 실행
 npm test
 ```
 
@@ -67,7 +63,7 @@ npm test
 
 | 명령어 | 설명 |
 | :--- | :--- |
-| `asd sync [--force]` | 4개 하네스의 글로벌 설정에 스킬, 10개 에이전트, 보안 훅, 부족한 MCP 도구를 멱등성(Idempotent) 있게 동기화합니다. |
+| `asd sync [--force] [--no-path]` | 4개 하네스의 글로벌 설정에 스킬, 10개 에이전트, 보안 훅, 부족한 MCP 도구를 동기화하고 전역 `PATH`에 `asd` 명령어를 자동 등록합니다 (`--no-path` 지정 시 `PATH` 등록 생략). |
 | `asd status` | 현재 프로젝트의 SQLite 세션 상태, 실시간 TODO 진행 보드, 미적용 자동 스태시(auto-stash) 경고를 출력합니다. |
 | `asd logs [taskId] [--json]` | 인자 없이 실행하면 가장 최근 서브에이전트 실행 로그를 자동 출력하며, `T1.1`(또는 `t1.1`)처럼 작업 번호를 지정하면 해당 작업의 서브에이전트 로그를 조회합니다. |
 | `asd ui [--port <num>]` | 외부 패키지 0개의 경량 로컬 웹 대시보드(`http://127.0.0.1:3847`)를 실행하여 실시간 진행률, 마우스 클릭을 통한 서브에이전트 로그/프롬프트 조회, 토론 판결문을 브라우저에서 제공합니다. |

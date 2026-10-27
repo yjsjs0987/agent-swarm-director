@@ -40,23 +40,19 @@ Agent Swarm Director (**ASD v2.2**) is the universal multi-harness successor to 
 ## Quick Start
 
 ```bash
-# 1. Verify environment & policy probe (<100ms, zero tokens)
-node --no-warnings src/cli/index.ts doctor
-
-# 2. Synchronize skills, agents, hooks, and gap-filling MCP configs globally
+# 1. Initial install: synchronize harnesses globally & automatically register 'asd' on PATH
 node --no-warnings src/cli/index.ts sync
+# (Optional: pass --no-path if you do not want 'asd' added to global PATH)
+# node --no-warnings src/cli/index.ts sync --no-path
 
-# 3. Check current project session & live TODO progress board
-node --no-warnings src/cli/index.ts status
+# 2. From now on, run 'asd' directly from ANY project directory!
+asd doctor
+asd status
+asd logs
+asd logs T1.1
+asd ui
 
-# 4. Inspect latest subagent log (or a specific task, e.g. T1.1)
-node --no-warnings src/cli/index.ts logs
-node --no-warnings src/cli/index.ts logs T1.1
-
-# 5. Launch lightweight local web dashboard (http://127.0.0.1:3847)
-node --no-warnings src/cli/index.ts ui
-
-# 6. Run the full verification test suite
+# 3. Run the full verification test suite
 npm test
 ```
 
@@ -66,7 +62,7 @@ npm test
 
 | Command | Description |
 | :--- | :--- |
-| `asd sync [--force]` | Synchronizes global skills, 10 agents, hooks, and missing MCP tools across all 4 harnesses idempotently. |
+| `asd sync [--force] [--no-path]` | Synchronizes global skills, 10 agents, hooks, missing MCP tools, and installs the `asd` CLI shim to global `PATH` (use `--no-path` to skip `PATH` installation). |
 | `asd status` | Displays the current project's SQLite session state, live TODO progress board, and any unapplied auto-stash warnings. |
 | `asd logs [taskId] [--json]` | Displays the most recent subagent prompt & execution log automatically, or inspects a specific task (`T1.1`, `t1.2`, etc.). |
 | `asd ui [--port <num>]` | Launches a zero-dependency local web dashboard (`http://127.0.0.1:3847`) with live task cards, click-to-inspect subagent logs, and debate verdicts. |

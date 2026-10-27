@@ -78,6 +78,7 @@ export interface CliArgs {
     all?: boolean;
     help?: boolean;
     version?: boolean;
+    noPath?: boolean;
   };
   options: {
     home?: string;
@@ -108,6 +109,8 @@ export function parseCliArgs(args: string[]): CliArgs {
       flags.pop = true;
     } else if (arg === "--all") {
       flags.all = true;
+    } else if (arg === "--no-path" || arg === "--noPath") {
+      flags.noPath = true;
     } else if (arg === "--home") {
       options.home = args[++i];
     } else if (arg.startsWith("--home=")) {
@@ -479,7 +482,7 @@ Usage:
   asd <command> [options]
 
 Commands:
-  sync [--force] [--home <dir>]      Sync ASD harnesses, agents, and skills globally
+  sync [--force] [--no-path]         Sync ASD harnesses globally and install 'asd' CLI to PATH
   status [--json]                    Display current session progress board and warnings
   logs [taskId] [--json]             Inspect latest (or task-specific) subagent prompt & output log
   ui [--port <num>] [--json]         Launch lightweight local web dashboard (default port: 3847)
@@ -495,6 +498,7 @@ Options:
       --json                         Output result in JSON format
       --port <num>                   Port for 'asd ui' web dashboard (default: 3847)
       --force                        Force overwriting existing configurations (sync)
+      --no-path                      Skip installing 'asd' CLI shim to global PATH (sync)
       --pop                          Restore stashed work (clean)
       --all                          Clean all leftover workspace state (clean)
       --home <dir>                   Custom home directory path
@@ -532,6 +536,7 @@ export async function main(
           homeDir,
           force: flags.force,
           projectRoot,
+          noPath: flags.noPath,
         });
         if (flags.json) {
           console.log(JSON.stringify(res, null, 2));
@@ -546,6 +551,14 @@ export async function main(
                 ? ` (${s.filesWritten.length} files)`
                 : "";
             console.log(`  - ${h}: ${s.status}${files}`);
+          }
+          if (flags.noPath) {
+            console.log(`CLI PATH Shims: skipped (--no-path)`);
+          } else if (res.cliShimsInstalled && res.cliShimsInstalled.length > 0) {
+            console.log(`CLI PATH Shims (${res.cliShimsInstalled.length}):`);
+            for (const shim of res.cliShimsInstalled) {
+              console.log(`  - ${shim}`);
+            }
           }
         }
         return 0;

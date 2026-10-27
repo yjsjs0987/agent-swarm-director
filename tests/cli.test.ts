@@ -669,5 +669,31 @@ describe("ASD CLI (src/cli/index.ts)", () => {
         removeTempDir(uiProj);
       }
     });
+
+    test("asd sync installs CLI shims by default and skips them when --no-path is passed", () => {
+      const noPathHome = createTempDir("asd-nopath-home-");
+      const withPathHome = createTempDir("asd-withpath-home-");
+      try {
+        // 1. With --no-path: .asd/bin should NOT be created
+        const resNoPath = runCli(["sync", "--no-path", "--home", noPathHome]);
+        assert.equal(resNoPath.exitCode, 0);
+        assert.equal(fs.existsSync(path.join(noPathHome, ".asd", "bin", "asd")), false);
+
+        // 2. Default sync: .asd/bin/asd (and asd.cmd on win32) SHOULD be created, and removed on uninstall
+        const resWithPath = runCli(["sync", "--home", withPathHome]);
+        assert.equal(resWithPath.exitCode, 0);
+        assert.equal(fs.existsSync(path.join(withPathHome, ".asd", "bin", "asd")), true);
+        if (process.platform === "win32") {
+          assert.equal(fs.existsSync(path.join(withPathHome, ".asd", "bin", "asd.cmd")), true);
+        }
+
+        const resUninstall = runCli(["uninstall", "--home", withPathHome]);
+        assert.equal(resUninstall.exitCode, 0);
+        assert.equal(fs.existsSync(path.join(withPathHome, ".asd", "bin", "asd")), false);
+      } finally {
+        removeTempDir(noPathHome);
+        removeTempDir(withPathHome);
+      }
+    });
   });
 });
