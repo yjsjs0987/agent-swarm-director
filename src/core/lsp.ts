@@ -14,6 +14,7 @@
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { resolveSpawnCommand } from "./spawner.ts";
 
 // ============================================================================
 // Types
@@ -191,12 +192,13 @@ function toRelativeFile(projectRoot: string, absOrRel: string): string {
 // ============================================================================
 
 const defaultRunner: LspCommandRunner = (cmd, args, cwd) => {
-  const res = spawnSync(cmd, args, {
+  const resolved = resolveSpawnCommand(cmd, args);
+  const res = spawnSync(resolved.command, resolved.args, {
     cwd,
     encoding: "utf8",
     timeout: 15000,
     windowsHide: true,
-    shell: process.platform === "win32" && (cmd === "npx" || cmd.endsWith(".cmd")),
+    shell: resolved.shell,
   });
   return {
     exitCode: res.status ?? (res.error ? 1 : 0),

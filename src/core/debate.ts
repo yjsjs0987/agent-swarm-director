@@ -161,7 +161,8 @@ export interface DebateBrokerResult extends AsdDebateOutput {
 export function buildDefaultHarnessCommand(
   harness: HarnessId,
   prompt: string,
-  model: string
+  model: string,
+  thinkingEffort?: string | null
 ): { command: string; args: string[] } {
   switch (harness) {
     case "claude-code": {
@@ -177,11 +178,13 @@ export function buildDefaultHarnessCommand(
     case "codex": {
       const args = ["exec", prompt, "--json"];
       if (model) args.push("-m", model);
+      if (thinkingEffort) args.push("-c", `model_reasoning_effort=${thinkingEffort}`);
       return { command: "codex", args };
     }
     case "antigravity": {
       const args = ["-p", prompt, "--output-format", "json"];
       if (model) args.push("--model", model);
+      if (thinkingEffort) args.push("--effort", thinkingEffort);
       return { command: "agy", args };
     }
     default: {

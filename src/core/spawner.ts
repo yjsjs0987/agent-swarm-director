@@ -75,17 +75,104 @@ export interface SpawnSubagentResult {
 }
 
 // ============================================================================
+// Windows .cmd / npm Shim Safe Resolver
+// ============================================================================
+
+/**
+ * Resolves a command and arguments for safe cross-platform execution.
+ * On Windows, npm global CLIs (`claude`, `codex`, `opencode`, `agy`, `npx`)
+ * are installed as `.cmd` batch shims, which throw ENOENT when spawned with
+ * `shell: false`, or break on multiline prompts when spawned with `shell: true`.
+ *
+ * This resolver locates the `.cmd` shim on PATH, extracts the underlying Node.js
+ * entrypoint script if it is an npm shim, and invokes `process.execPath` directly
+ * with `shell: false`.
+ */
+export function resolveSpawnCommand(
+  cmd: string,
+  args: string[],
+  env: Record<string, string | undefined> = process.env
+): { command: string; args: string[]; shell: boolean } {
+  if (process.platform !== "win32") {
+    return { command: cmd, args, shell: false };
+  }
+
+  // Direct node or .exe invocation needs no translation
+  const lowerCmd = cmd.toLowerCase();
+  if (lowerCmd === "node" || lowerCmd === "node.exe" || lowerCmd.endsWith(".exe")) {
+    return { command: cmd, args, shell: false };
+  }
+
+  // Locate candidate on PATH if not already an existing path
+  let resolvedPath = "";
+  if (path.isAbsolute(cmd) || cmd.includes("\\") || cmd.includes("/")) {
+    if (fs.existsSync(cmd)) {
+      resolvedPath = cmd;
+    } else if (fs.existsSync(`${cmd}.cmd`)) {
+      resolvedPath = `${cmd}.cmd`;
+    } else if (fs.existsSync(`${cmd}.exe`)) {
+      return { command: `${cmd}.exe`, args, shell: false };
+    }
+  } else {
+    const pathEnv = env.PATH || env.Path || process.env.PATH || process.env.Path || "";
+    const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+    for (const dir of dirs) {
+      const exeCandidate = path.join(dir, `${cmd}.exe`);
+      if (fs.existsSync(exeCandidate)) {
+        return { command: exeCandidate, args, shell: false };
+      }
+      const cmdCandidate = path.join(dir, `${cmd}.cmd`);
+      if (fs.existsSync(cmdCandidate)) {
+        resolvedPath = cmdCandidate;
+        break;
+      }
+      const batCandidate = path.join(dir, `${cmd}.bat`);
+      if (fs.existsSync(batCandidate)) {
+        resolvedPath = batCandidate;
+        break;
+      }
+    }
+  }
+
+  if (resolvedPath && /\.(cmd|bat)$/i.test(resolvedPath)) {
+    try {
+      const shimContent = fs.readFileSync(resolvedPath, "utf8");
+      const shimDir = path.dirname(resolvedPath);
+      // Match standard npm cmd shim pattern: "%dp0%\node_modules\...\bin.js" %*
+      const match = shimContent.match(/"%(?:~)?dp0%\\([^"]+\.(?:c?m?js))"\s+%\*/i);
+      if (match?.[1]) {
+        const scriptPath = path.resolve(shimDir, match[1]);
+        if (fs.existsSync(scriptPath)) {
+          return {
+            command: process.execPath,
+            args: [scriptPath, ...args],
+            shell: false,
+          };
+        }
+      }
+    } catch {
+      // Fall through to cmd.exe wrapper
+    }
+    return { command: resolvedPath, args, shell: true };
+  }
+
+  return { command: cmd, args, shell: false };
+}
+
+// ============================================================================
 // Default runner: real child_process.spawn
 // ============================================================================
 
 const defaultCommandRunner: CommandRunner = {
   run(cmd, args, opts) {
     return new Promise((resolve) => {
-      const child = child_process.spawn(cmd, args, {
+      const resolved = resolveSpawnCommand(cmd, args, opts.env);
+      const child = child_process.spawn(resolved.command, resolved.args, {
         cwd: opts.cwd,
         env: opts.env,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        shell: resolved.shell,
         // POSIX: own process group so process.kill(-pid) reaps the tree.
         // Windows: do NOT detach — taskkill /T handles the tree.
         detached: process.platform !== "win32",

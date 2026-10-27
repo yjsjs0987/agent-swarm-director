@@ -180,17 +180,97 @@ export function getAdapter(harnessId?: string): HarnessAdapter {
 // ============================================================================
 
 export function getLatestSession(db: SqliteDriver): SessionRow | undefined {
-  if (typeof (db as unknown as { getLatestSession?: () => SessionRow | undefined }).getLatestSession === "function") {
-    return (db as unknown as { getLatestSession: () => SessionRow | undefined }).getLatestSession();
+  return db.getLatestSession();
+}
+
+// ============================================================================
+// Subagent Log Inspector (`asd logs [taskId]`)
+// ============================================================================
+
+export interface SubagentLogRecord {
+  sessionId: string;
+  subSessionId: string;
+  taskId: string;
+  role: string;
+  harness: string;
+  model: string;
+  status: string;
+  startedAt: number;
+  finishedAt?: number;
+  prompt: string;
+  outputLog: string;
+  dirPath: string;
+}
+
+export function runAsdLogs(options?: {
+  taskId?: string;
+  projectRoot?: string;
+  homeDir?: string;
+}): { found: boolean; record: SubagentLogRecord | null; availableTaskIds: string[] } {
+  const projectRoot = path.resolve(options?.projectRoot || process.cwd());
+  const sessionsRoot = path.join(projectRoot, ".asd", "sessions");
+  if (!fs.existsSync(sessionsRoot)) {
+    return { found: false, record: null, availableTaskIds: [] };
   }
+
+  const targetTaskId = options?.taskId?.trim().toUpperCase();
+  const records: SubagentLogRecord[] = [];
+
   try {
-    const rawDb = (db as unknown as { db: DatabaseSync }).db;
-    return rawDb
-      .prepare("SELECT * FROM sessions ORDER BY created_at DESC LIMIT 1")
-      .get() as unknown as SessionRow | undefined;
+    const sessionDirs = fs.readdirSync(sessionsRoot, { withFileTypes: true });
+    for (const sDir of sessionDirs) {
+      if (!sDir.isDirectory()) continue;
+      const subagentsDir = path.join(sessionsRoot, sDir.name, "subagents");
+      if (!fs.existsSync(subagentsDir)) continue;
+
+      const subDirs = fs.readdirSync(subagentsDir, { withFileTypes: true });
+      for (const subDir of subDirs) {
+        if (!subDir.isDirectory()) continue;
+        const dirPath = path.join(subagentsDir, subDir.name);
+        const metaPath = path.join(dirPath, "meta.json");
+        if (!fs.existsSync(metaPath)) continue;
+
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+          const promptPath = path.join(dirPath, "prompt.md");
+          const outputPath = path.join(dirPath, "output.log");
+          const prompt = fs.existsSync(promptPath) ? fs.readFileSync(promptPath, "utf8") : "";
+          const outputLog = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf8") : "";
+          records.push({
+            sessionId: String(meta.mainSessionId ?? sDir.name),
+            subSessionId: String(meta.subSessionId ?? subDir.name),
+            taskId: String(meta.taskId ?? ""),
+            role: String(meta.role ?? ""),
+            harness: String(meta.harness ?? ""),
+            model: String(meta.model ?? ""),
+            status: String(meta.status ?? "unknown"),
+            startedAt: Number(meta.startedAt ?? 0),
+            finishedAt: typeof meta.finishedAt === "number" ? meta.finishedAt : undefined,
+            prompt,
+            outputLog,
+            dirPath,
+          });
+        } catch {
+          // Ignore malformed subagent meta
+        }
+      }
+    }
   } catch {
-    return undefined;
+    return { found: false, record: null, availableTaskIds: [] };
   }
+
+  records.sort((a, b) => b.startedAt - a.startedAt);
+  const availableTaskIds = [...new Set(records.map((r) => r.taskId).filter(Boolean))];
+
+  const matched = targetTaskId
+    ? records.find((r) => r.taskId.toUpperCase() === targetTaskId) ?? null
+    : records[0] ?? null;
+
+  return {
+    found: matched !== null,
+    record: matched,
+    availableTaskIds,
+  };
 }
 
 // ============================================================================
@@ -394,6 +474,7 @@ Usage:
 Commands:
   sync [--force] [--home <dir>]      Sync ASD harnesses, agents, and skills globally
   status [--json]                    Display current session progress board and warnings
+  logs [taskId] [--json]             Inspect latest (or task-specific) subagent prompt & output log
   doctor [--json]                    Verify environment, tools, and policy health
   clean [--pop] [--all]              Clean temporary worktrees and restore auto-stash
   uninstall [--home <dir>]           Surgically restore user harness configurations
@@ -518,6 +599,38 @@ export async function main(
         return 0;
       }
 
+      case "logs": {
+        const res = runAsdLogs({
+          taskId: subcommand,
+          projectRoot,
+          homeDir,
+        });
+        if (flags.json) {
+          console.log(JSON.stringify(res, null, 2));
+          return res.found ? 0 : 1;
+        }
+        if (!res.found || !res.record) {
+          const hint =
+            res.availableTaskIds.length > 0
+              ? ` Available task logs: ${res.availableTaskIds.join(", ")}`
+              : "";
+          console.log(
+            subcommand
+              ? `No subagent log found for task '${subcommand}'.${hint}`
+              : "No subagent logs found in .asd/sessions/."
+          );
+          return 0;
+        }
+        const r = res.record;
+        console.log(`=== ASD Subagent Log [${r.taskId}] ===`);
+        console.log(`SubSession : ${r.subSessionId}`);
+        console.log(`Harness    : ${r.harness} (${r.model}) | Role: ${r.role}`);
+        console.log(`Status     : ${r.status}`);
+        console.log(`Log Path   : ${r.dirPath}`);
+        console.log(`\n--- Output Log ---\n${r.outputLog.trim() || "(empty)"}`);
+        return 0;
+      }
+
       case "doctor": {
         const res = await runAsdDoctor({ homeDir, projectRoot });
         if (flags.json) {
@@ -540,9 +653,10 @@ export async function main(
           console.log(`Policy Probe: ${res.policyProbe.ok ? "OK" : "FAIL"}`);
           console.log("Harness CLI Availability:");
           for (const [h, info] of Object.entries(res.harnesses)) {
-            console.log(
-              `  - ${h}: ${info.installed ? "Available" : "Not found"}`
-            );
+            const detail = info.installed
+              ? `Available (${info.resolvedPath ?? info.binary}) [Headless: ${info.headlessSupported ? "Yes" : "No"}]`
+              : "Not found";
+            console.log(`  - ${h}: ${detail}`);
           }
           console.log(`Duration: ${res.durationMs.toFixed(1)}ms`);
           if (!res.ok) {

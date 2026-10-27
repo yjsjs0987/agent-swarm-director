@@ -242,6 +242,13 @@ export class SqliteDriver {
       .get(sessionId) as unknown as SessionRow | undefined;
   }
 
+  /** Return the most recently created session, or undefined if none exists. */
+  getLatestSession(): SessionRow | undefined {
+    return this.db
+      .prepare("SELECT * FROM sessions ORDER BY created_at DESC LIMIT 1")
+      .get() as unknown as SessionRow | undefined;
+  }
+
   /** Insert the session if absent; return the stored row either way. */
   createOrGetSession(session: SessionInput): SessionRow {
     return this.withImmediateTx(() => {

@@ -19,7 +19,9 @@ import * as path from "node:path";
 import { after, before, describe, test } from "node:test";
 
 import { openProjectDb } from "../src/core/db.ts";
-import { getLatestSession } from "../src/cli/index.ts";
+import { buildDefaultHarnessCommand } from "../src/core/debate.ts";
+import { resolveSpawnCommand } from "../src/core/spawner.ts";
+import { getLatestSession, runAsdLogs } from "../src/cli/index.ts";
 import { runGit } from "../src/core/workspace.ts";
 
 function createTempDir(prefix: string): string {
@@ -503,6 +505,123 @@ describe("ASD CLI (src/cli/index.ts)", () => {
       } finally {
         removeTempDir(breakerHome);
         removeTempDir(breakerProject);
+      }
+    });
+  });
+
+  // ==========================================================================
+  // 8. asd logs, thinkingEffort command flags, and Windows .cmd resolver
+  // ==========================================================================
+  describe("8. asd logs, thinkingEffort, and Windows .cmd shim resolver", () => {
+    test("runAsdLogs retrieves latest subagent log and case-insensitive taskId log", () => {
+      const logProj = createTempDir("asd-cli-logs-proj-");
+      try {
+        const sub1Dir = path.join(logProj, ".asd", "sessions", "sess-1", "subagents", "sub-1-T1.1");
+        const sub2Dir = path.join(logProj, ".asd", "sessions", "sess-1", "subagents", "sub-1-T1.2");
+        fs.mkdirSync(sub1Dir, { recursive: true });
+        fs.mkdirSync(sub2Dir, { recursive: true });
+
+        fs.writeFileSync(
+          path.join(sub1Dir, "meta.json"),
+          JSON.stringify({
+            mainSessionId: "sess-1",
+            subSessionId: "sub-1-T1.1",
+            taskId: "T1.1",
+            role: "builder",
+            harness: "claude-code",
+            model: "claude-sonnet-4-6",
+            status: "done",
+            startedAt: 1000,
+          }),
+          "utf8"
+        );
+        fs.writeFileSync(path.join(sub1Dir, "output.log"), "Task 1.1 completed.\n", "utf8");
+
+        fs.writeFileSync(
+          path.join(sub2Dir, "meta.json"),
+          JSON.stringify({
+            mainSessionId: "sess-1",
+            subSessionId: "sub-1-T1.2",
+            taskId: "T1.2",
+            role: "reviewer",
+            harness: "codex",
+            model: "gpt-5.4",
+            status: "failed",
+            startedAt: 2000,
+          }),
+          "utf8"
+        );
+        fs.writeFileSync(path.join(sub2Dir, "output.log"), "Task 1.2 failed check.\n", "utf8");
+
+        // No taskId -> returns latest (T1.2)
+        const latest = runAsdLogs({ projectRoot: logProj });
+        assert.equal(latest.found, true);
+        assert.equal(latest.record?.taskId, "T1.2");
+        assert.match(latest.record?.outputLog ?? "", /Task 1\.2 failed check/);
+
+        // Specific taskId (case-insensitive t1.1) -> returns T1.1
+        const specific = runAsdLogs({ projectRoot: logProj, taskId: "t1.1" });
+        assert.equal(specific.found, true);
+        assert.equal(specific.record?.taskId, "T1.1");
+        assert.match(specific.record?.outputLog ?? "", /Task 1\.1 completed/);
+      } finally {
+        removeTempDir(logProj);
+      }
+    });
+
+    test("buildDefaultHarnessCommand includes thinkingEffort flags for codex and antigravity", () => {
+      const codexCmd = buildDefaultHarnessCommand("codex", "do work", "gpt-5.4", "xhigh");
+      assert.deepEqual(codexCmd.args, [
+        "exec",
+        "do work",
+        "--json",
+        "-m",
+        "gpt-5.4",
+        "-c",
+        "model_reasoning_effort=xhigh",
+      ]);
+
+      const agyCmd = buildDefaultHarnessCommand("antigravity", "do work", "gemini-3.1-pro", "high");
+      assert.deepEqual(agyCmd.args, [
+        "-p",
+        "do work",
+        "--output-format",
+        "json",
+        "--model",
+        "gemini-3.1-pro",
+        "--effort",
+        "high",
+      ]);
+    });
+
+    test("resolveSpawnCommand unwraps npm .cmd shim on Windows to node execPath", () => {
+      const binDir = createTempDir("asd-shim-bin-");
+      try {
+        const pkgDir = path.join(binDir, "node_modules", "dummy-cli");
+        fs.mkdirSync(pkgDir, { recursive: true });
+        const entryJs = path.join(pkgDir, "cli.js");
+        fs.writeFileSync(entryJs, "console.log('ok');\n", "utf8");
+
+        const shimCmd = path.join(binDir, "dummy-cli.cmd");
+        fs.writeFileSync(
+          shimCmd,
+          `@ECHO off\r\n"%dp0%\\node_modules\\dummy-cli\\cli.js" %*\r\n`,
+          "utf8"
+        );
+
+        const resolved = resolveSpawnCommand("dummy-cli", ["-p", "hello\nworld"], {
+          PATH: binDir,
+        });
+        if (process.platform === "win32") {
+          assert.equal(resolved.command, process.execPath);
+          assert.equal(resolved.args[0], entryJs);
+          assert.equal(resolved.shell, false);
+        } else {
+          assert.equal(resolved.command, "dummy-cli");
+          assert.equal(resolved.shell, false);
+        }
+      } finally {
+        removeTempDir(binDir);
       }
     });
   });

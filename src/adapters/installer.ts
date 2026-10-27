@@ -114,7 +114,10 @@ export interface DoctorProbeResult {
   nodeVersion: { ok: boolean; version: string; minRequired: string };
   sqliteWal: { ok: boolean; message?: string };
   gitRepo: { ok: boolean; isRepo: boolean; message?: string };
-  harnesses: Record<HarnessId, { installed: boolean; headlessSupported: boolean; binary?: string }>;
+  harnesses: Record<
+    HarnessId,
+    { installed: boolean; headlessSupported: boolean; binary?: string; resolvedPath?: string | null }
+  >;
   policyProbe: { ok: boolean; gitBlocked: boolean; envBlocked: boolean; message?: string };
   errors: string[];
 }
@@ -1209,24 +1212,24 @@ export const runAsdUninstall = uninstallHarnessConfigs;
 // Doctor Probe: Fast <100ms Zero-Token Diagnostic
 // ============================================================================
 
-function checkBinaryOnPath(binaryName: string): boolean {
-  const pathEnv = process.env.PATH || "";
+function resolveBinaryOnPath(binaryName: string): string | null {
+  const pathEnv = process.env.PATH || process.env.Path || "";
   const dirs = pathEnv.split(path.delimiter).filter(Boolean);
-  const extensions = process.platform === "win32" ? ["", ".cmd", ".exe", ".bat", ".ps1"] : [""];
+  const extensions = process.platform === "win32" ? [".exe", ".cmd", ".bat", ".ps1", ""] : [""];
 
   for (const dir of dirs) {
     for (const ext of extensions) {
       const fullPath = path.join(dir, binaryName + ext);
       try {
-        if (fs.existsSync(fullPath)) {
-          return true;
+        if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+          return fullPath;
         }
       } catch {
         // Ignore permission or file system errors during probe
       }
     }
   }
-  return false;
+  return null;
 }
 
 export async function doctorProbe(
@@ -1284,34 +1287,41 @@ export async function doctorProbe(
   });
 
   // 4. Harness CLIs availability
-  const agyInstalled = checkBinaryOnPath("agy");
-  const harnesses: Record<HarnessId, { installed: boolean; headlessSupported: boolean; binary?: string }> = {
+  const claudePath = resolveBinaryOnPath("claude");
+  const opencodePath = resolveBinaryOnPath("opencode");
+  const codexPath = resolveBinaryOnPath("codex");
+  const agyPath = resolveBinaryOnPath("agy");
+  const harnesses: DoctorProbeResult["harnesses"] = {
     "claude-code": {
-      installed: checkBinaryOnPath("claude"),
-      headlessSupported: true,
+      installed: Boolean(claudePath),
+      headlessSupported: Boolean(claudePath),
       binary: "claude",
+      resolvedPath: claudePath,
     },
     opencode: {
-      installed: checkBinaryOnPath("opencode"),
-      headlessSupported: true,
+      installed: Boolean(opencodePath),
+      headlessSupported: Boolean(opencodePath),
       binary: "opencode",
+      resolvedPath: opencodePath,
     },
     codex: {
-      installed: checkBinaryOnPath("codex"),
-      headlessSupported: true,
+      installed: Boolean(codexPath),
+      headlessSupported: Boolean(codexPath),
       binary: "codex",
+      resolvedPath: codexPath,
     },
     antigravity: {
-      installed: agyInstalled,
-      headlessSupported: agyInstalled && antigravityAdapter.supportsHeadlessSpawn,
+      installed: Boolean(agyPath),
+      headlessSupported: Boolean(agyPath) && antigravityAdapter.supportsHeadlessSpawn,
       binary: "agy",
+      resolvedPath: agyPath,
     },
   };
   checks.push({
     name: "harness_clis",
     ok: true,
     message: Object.entries(harnesses)
-      .map(([k, v]) => `${k}: ${v.installed ? "installed" : "not found"}`)
+      .map(([k, v]) => `${k}: ${v.installed ? `installed (${v.resolvedPath})` : "not found"}`)
       .join(", "),
   });
 

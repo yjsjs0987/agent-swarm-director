@@ -507,18 +507,8 @@ export class AsdMcpServer {
 
     if (!sessionId || sessionId.trim() === "") {
       // Find latest session or generate a default ID
-      try {
-        const rawDb = (this.db as unknown as { db: { prepare: (sql: string) => { get: () => { session_id?: string } | undefined } } }).db;
-        const row = rawDb.prepare("SELECT session_id FROM sessions ORDER BY created_at DESC LIMIT 1").get();
-        if (row?.session_id) {
-          sessionId = row.session_id;
-        }
-      } catch {
-        // ignore
-      }
-      if (!sessionId) {
-        sessionId = `${Date.now()}-main`;
-      }
+      const latest = this.db.getLatestSession();
+      sessionId = latest?.session_id || `${Date.now()}-main`;
     }
 
     // Ensure session exists
@@ -803,7 +793,12 @@ export class AsdMcpServer {
         this.db.updateTaskStatus(sessionId, t.task_id, "running", { subSessionId });
 
         const prompt = buildPromptForTask(t, upCtx.upstreamDecisions, upCtx.upstreamFiles);
-        const cmdInfo = buildDefaultHarnessCommand(route.harness, prompt, route.model);
+        const cmdInfo = buildDefaultHarnessCommand(
+          route.harness,
+          prompt,
+          route.model,
+          route.thinkingEffort ?? t.thinking_effort
+        );
 
         let allowedFiles: string[] = [];
         try {

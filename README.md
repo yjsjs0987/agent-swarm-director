@@ -49,7 +49,11 @@ node --no-warnings src/cli/index.ts sync
 # 3. Check current project session & live TODO progress board
 node --no-warnings src/cli/index.ts status
 
-# 4. Run the full verification test suite
+# 4. Inspect latest subagent log (or a specific task, e.g. T1.1)
+node --no-warnings src/cli/index.ts logs
+node --no-warnings src/cli/index.ts logs T1.1
+
+# 5. Run the full verification test suite
 npm test
 ```
 
@@ -61,7 +65,8 @@ npm test
 | :--- | :--- |
 | `asd sync [--force]` | Synchronizes global skills, 10 agents, hooks, and missing MCP tools across all 4 harnesses idempotently. |
 | `asd status` | Displays the current project's SQLite session state, live TODO progress board, and any unapplied auto-stash warnings. |
-| `asd doctor [--json]` | Runs a fast (<100ms) zero-token health check (Node version, SQLite WAL, Git repo, harness CLIs, synthetic `PreToolUse` security probe). |
+| `asd logs [taskId] [--json]` | Displays the most recent subagent prompt & execution log automatically, or inspects a specific task (`T1.1`, `t1.2`, etc.). |
+| `asd doctor [--json]` | Runs a fast (<100ms) zero-token health check (Node version, SQLite WAL, Git repo, harness CLI binary paths & headless support, synthetic `PreToolUse` security probe). |
 | `asd clean [--pop]` | Removes leftover `.asd/wt/*` worktrees, prunes `asd/*` branches, and optionally restores auto-stashed changes (`--pop`). |
 | `asd uninstall` | Surgically removes all ASD-managed global hooks, TOML fences, skills, agents, and MCP entries while restoring original user configs 100%. |
 
