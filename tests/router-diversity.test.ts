@@ -36,6 +36,7 @@ import {
   SPECIALIST_ROLES,
   escalateTaskRoute,
   inferModelFamily,
+  normalizeAntigravityModel,
   resolveFallback,
   resolveRoute,
   selectDiverseReviewer,
@@ -506,6 +507,29 @@ test("inferModelFamily: correctly identifies model families from names", () => {
   assert.equal(inferModelFamily("gpt-5-codex"), "gpt");
   assert.equal(inferModelFamily("o3-mini"), "gpt");
   assert.equal(inferModelFamily("gemini-3-pro"), "gemini");
+  assert.equal(inferModelFamily("gemini-3.8-flash"), "gemini");
+  assert.equal(inferModelFamily("flash_lite"), "gemini");
+  assert.equal(inferModelFamily("flash"), "gemini");
+  assert.equal(inferModelFamily("pro"), "gemini");
+  assert.equal(inferModelFamily("inherit"), "gemini");
+  assert.equal(inferModelFamily("inherent"), "gemini");
   assert.equal(inferModelFamily("glm-5"), "glm");
   assert.equal(inferModelFamily("deepseek-r1"), "deepseek");
+});
+
+test("normalizeAntigravityModel: maps arbitrary Gemini/Antigravity names to native tiers", () => {
+  assert.equal(normalizeAntigravityModel("gemini-3-flash-lite"), "flash_lite");
+  assert.equal(normalizeAntigravityModel("gemini-3.8-flash-lite"), "flash_lite");
+  assert.equal(normalizeAntigravityModel("flash-lite"), "flash_lite");
+  assert.equal(normalizeAntigravityModel("flash_lite"), "flash_lite");
+  assert.equal(normalizeAntigravityModel("gemini-3.8-flash"), "flash");
+  assert.equal(normalizeAntigravityModel("gemini-3-flash"), "flash");
+  assert.equal(normalizeAntigravityModel("flash"), "flash");
+  assert.equal(normalizeAntigravityModel("gemini-3-pro"), "pro");
+  assert.equal(normalizeAntigravityModel("gemini-3.1-pro"), "pro");
+  assert.equal(normalizeAntigravityModel("pro"), "pro");
+  assert.equal(normalizeAntigravityModel("inherit"), "inherit");
+  assert.equal(normalizeAntigravityModel("inherent"), "inherit");
+  assert.equal(normalizeAntigravityModel(""), "inherit");
+  assert.equal(normalizeAntigravityModel(undefined), "inherit");
 });

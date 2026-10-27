@@ -26,7 +26,11 @@ import * as path from "node:path";
 import { openProjectDb } from "./db.ts";
 import type { SqliteDriver, SessionRow, TaskRow } from "./db.ts";
 import { renderPlanMd, renderProgressBoard } from "./render.ts";
-import { inferModelFamily, selectDiverseReviewer } from "./router.ts";
+import {
+  detectAvailableCliHarnesses,
+  inferModelFamily,
+  selectDiverseReviewer,
+} from "./router.ts";
 import type {
   DiverseReviewerSelection,
   ProposalRouteInput,
@@ -205,6 +209,23 @@ export function buildDefaultHarnessCommand(
 
 export function deduplicateStrings(items: string[]): string[] {
   return [...new Set(items.map((s) => s.trim()).filter(Boolean))];
+}
+
+function extractLogErrorSnippet(metaPath: string): string {
+  try {
+    const logPath = path.join(path.dirname(metaPath), "output.log");
+    if (!fs.existsSync(logPath)) return "";
+    const content = fs.readFileSync(logPath, "utf8").trim();
+    if (!content) return "";
+    const lines = content
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    const lastLine = lines[lines.length - 1] ?? "";
+    return lastLine.length > 200 ? `${lastLine.slice(0, 200)}...` : lastLine;
+  } catch {
+    return "";
+  }
 }
 
 export function formatDebateAcceptance(
@@ -453,6 +474,11 @@ export async function runDebateBroker(
     // 1. Select Reviewers prioritizing cross-model family diversity
     let diversityDegraded = false;
     const reviewers: ReviewerSpec[] = [];
+    const effectiveCapabilities: RuntimeCapabilities | undefined =
+      options.runtimeCapabilities ??
+      (!options.commandRunner
+        ? { availableHarnesses: detectAvailableCliHarnesses() }
+        : undefined);
 
     if (options.reviewerRoutes && options.reviewerRoutes.length > 0) {
       for (const route of options.reviewerRoutes) {
@@ -481,7 +507,7 @@ export async function runDebateBroker(
         proposerRoute,
         role1,
         options.routingConfig,
-        options.runtimeCapabilities
+        effectiveCapabilities
       );
       if (sel1.diversityDegraded) diversityDegraded = true;
 
@@ -504,7 +530,7 @@ export async function runDebateBroker(
           },
           role2,
           options.routingConfig,
-          options.runtimeCapabilities
+          effectiveCapabilities
         );
         if (sel2.diversityDegraded) diversityDegraded = true;
 
@@ -540,7 +566,7 @@ export async function runDebateBroker(
             reviewer.model
           );
 
-      const spawnResult = await spawnSubagent({
+      let spawnResult = await spawnSubagent({
         projectRoot: options.projectRoot,
         homeDir: options.homeDir,
         mainSessionId: options.sessionId,
@@ -558,9 +584,47 @@ export async function runDebateBroker(
         timeoutMs: options.timeoutMs,
       });
 
+      // Fallback retry without --model if the specified preset model is not configured in the CLI harness
+      let activeModel = reviewer.model;
+      if (
+        spawnResult.exitCode !== 0 &&
+        reviewer.model &&
+        !options.commandBuilder
+      ) {
+        const defaultCmdInfo = buildDefaultHarnessCommand(
+          reviewer.harness,
+          round1Prompt,
+          ""
+        );
+        const retryResult = await spawnSubagent({
+          projectRoot: options.projectRoot,
+          homeDir: options.homeDir,
+          mainSessionId: options.sessionId,
+          subSessionId: `${subSessionId}-default`,
+          role: reviewer.role,
+          harness: reviewer.harness,
+          model: "default",
+          taskId: options.taskId ?? "",
+          prompt: round1Prompt,
+          allowedFiles: [],
+          command: defaultCmdInfo.command,
+          args: defaultCmdInfo.args,
+          commandRunner: options.commandRunner,
+          signal: options.signal,
+          timeoutMs: options.timeoutMs,
+        });
+        if (retryResult.exitCode === 0) {
+          spawnResult = retryResult;
+          activeModel = "default";
+        }
+      }
+
       if (spawnResult.exitCode !== 0) {
+        const snippet = extractLogErrorSnippet(spawnResult.metaPath);
         throw new Error(
-          `Reviewer process exited with non-zero exit code ${spawnResult.exitCode}`
+          `Reviewer process exited with non-zero exit code ${spawnResult.exitCode}${
+            snippet ? ` (${snippet})` : ""
+          }`
         );
       }
 
@@ -584,7 +648,7 @@ export async function runDebateBroker(
         reviewerId: `r1-${index + 1}`,
         role: reviewer.role,
         harness: reviewer.harness,
-        model: reviewer.model,
+        model: activeModel,
         modelFamily: reviewer.modelFamily,
         verdict: parsed.verdict,
         hard_constraints: parsed.hard_constraints,
@@ -720,7 +784,7 @@ export async function runDebateBroker(
           },
           "arbiter",
           options.routingConfig,
-          options.runtimeCapabilities
+          effectiveCapabilities
         );
         if (arbiterSel.diversityDegraded) diversityDegraded = true;
 
@@ -750,7 +814,7 @@ export async function runDebateBroker(
 
       let arbiterOpening: ReviewerOpening;
       try {
-        const arbResult = await spawnSubagent({
+        let arbResult = await spawnSubagent({
           projectRoot: options.projectRoot,
           homeDir: options.homeDir,
           mainSessionId: options.sessionId,
@@ -768,9 +832,46 @@ export async function runDebateBroker(
           timeoutMs: options.timeoutMs,
         });
 
+        let activeArbModel = arbiterSpec.model;
+        if (
+          arbResult.exitCode !== 0 &&
+          arbiterSpec.model &&
+          !options.commandBuilder
+        ) {
+          const defaultR2Cmd = buildDefaultHarnessCommand(
+            arbiterSpec.harness,
+            r2Prompt,
+            ""
+          );
+          const retryArb = await spawnSubagent({
+            projectRoot: options.projectRoot,
+            homeDir: options.homeDir,
+            mainSessionId: options.sessionId,
+            subSessionId: `${r2SubSessionId}-default`,
+            role: arbiterSpec.role,
+            harness: arbiterSpec.harness,
+            model: "default",
+            taskId: options.taskId ?? "",
+            prompt: r2Prompt,
+            allowedFiles: [],
+            command: defaultR2Cmd.command,
+            args: defaultR2Cmd.args,
+            commandRunner: options.commandRunner,
+            signal: options.signal,
+            timeoutMs: options.timeoutMs,
+          });
+          if (retryArb.exitCode === 0) {
+            arbResult = retryArb;
+            activeArbModel = "default";
+          }
+        }
+
         if (arbResult.exitCode !== 0) {
+          const snippet = extractLogErrorSnippet(arbResult.metaPath);
           throw new Error(
-            `Arbiter process exited with code ${arbResult.exitCode}`
+            `Arbiter process exited with code ${arbResult.exitCode}${
+              snippet ? ` (${snippet})` : ""
+            }`
           );
         }
 
@@ -794,7 +895,7 @@ export async function runDebateBroker(
           reviewerId: "r2-arbiter",
           role: arbiterSpec.role,
           harness: arbiterSpec.harness,
-          model: arbiterSpec.model,
+          model: activeArbModel,
           modelFamily: arbiterSpec.modelFamily,
           verdict: parsedArb.verdict,
           hard_constraints: parsedArb.hard_constraints,

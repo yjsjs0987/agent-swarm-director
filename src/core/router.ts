@@ -13,6 +13,8 @@
  * - TypeScript erasableSyntaxOnly: true (no enum, type-only imports where applicable).
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { loadRoutingConfig } from "./config.ts";
 import type {
   AgentRole,
@@ -138,6 +140,85 @@ export interface DiverseReviewerSelection {
 }
 
 // ============================================================================
+// Helper: Antigravity Model Tier Normalization & CLI Harness Discovery
+// ============================================================================
+
+export type AntigravityModelTier = "inherit" | "flash_lite" | "flash" | "pro";
+
+/**
+ * Normalizes any Gemini/Antigravity model string (e.g. "gemini-3-flash-lite",
+ * "gemini-3.8-flash", "gemini-3-pro", "inherent", "pro") into one of Antigravity's
+ * 4 native subagent model tiers: "inherit" | "flash_lite" | "flash" | "pro".
+ */
+export function normalizeAntigravityModel(
+  model?: string | null
+): AntigravityModelTier {
+  if (!model) return "inherit";
+  const m = model.toLowerCase().trim();
+  if (
+    m === "flash_lite" ||
+    m === "flash-lite" ||
+    m.includes("flash_lite") ||
+    m.includes("flash-lite")
+  ) {
+    return "flash_lite";
+  }
+  if (m === "flash" || m.includes("flash")) {
+    return "flash";
+  }
+  if (m === "pro" || m.includes("pro")) {
+    return "pro";
+  }
+  if (m === "inherit" || m === "inherent") {
+    return "inherit";
+  }
+  return "inherit";
+}
+
+/**
+ * Detects which CLI harnesses (`claude-code`, `opencode`, `codex`) are installed
+ * on the current system PATH. Used during live subagent routing and debates so
+ * uninstalled harnesses are skipped automatically.
+ */
+export function detectAvailableCliHarnesses(
+  env: Record<string, string | undefined> = process.env
+): HarnessId[] {
+  const pathEnv = env.PATH || env.Path || process.env.PATH || process.env.Path || "";
+  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+  const candidates: Array<{ harness: HarnessId; bin: string }> = [
+    { harness: "claude-code", bin: "claude" },
+    { harness: "opencode", bin: "opencode" },
+    { harness: "codex", bin: "codex" },
+  ];
+
+  const found: HarnessId[] = [];
+  for (const { harness, bin } of candidates) {
+    let exists = false;
+    for (const dir of dirs) {
+      if (process.platform === "win32") {
+        if (
+          fs.existsSync(path.join(dir, `${bin}.cmd`)) ||
+          fs.existsSync(path.join(dir, `${bin}.exe`)) ||
+          fs.existsSync(path.join(dir, `${bin}.bat`)) ||
+          fs.existsSync(path.join(dir, bin))
+        ) {
+          exists = true;
+          break;
+        }
+      } else if (fs.existsSync(path.join(dir, bin))) {
+        exists = true;
+        break;
+      }
+    }
+    if (exists) {
+      found.push(harness);
+    }
+  }
+
+  return found.length > 0 ? found : [...CLI_HARNESSES];
+}
+
+// ============================================================================
 // Helper: Infer Model Family
 // ============================================================================
 
@@ -145,7 +226,7 @@ export interface DiverseReviewerSelection {
  * Infer the model family identifier from model name and optional harness hint.
  */
 export function inferModelFamily(model: string, harness?: HarnessId): string {
-  const m = model.toLowerCase();
+  const m = model.toLowerCase().trim();
   if (
     m.includes("claude") ||
     m.includes("sonnet") ||
@@ -162,7 +243,15 @@ export function inferModelFamily(model: string, harness?: HarnessId): string {
   ) {
     return "gpt";
   }
-  if (m.includes("gemini")) {
+  if (
+    m.includes("gemini") ||
+    m === "flash_lite" ||
+    m === "flash-lite" ||
+    m === "flash" ||
+    m === "pro" ||
+    m === "inherit" ||
+    m === "inherent"
+  ) {
     return "gemini";
   }
   if (m.includes("glm")) {

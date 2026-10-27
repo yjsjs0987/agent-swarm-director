@@ -646,5 +646,55 @@ Hope this helps!
       assert.equal(debateRow.status, "done");
       assert.equal(debateRow.task_id, null);
     });
+
+    test("retries without --model flag when preset model is unconfigured in CLI harness", async () => {
+      const projectRoot = makeProjectRoot();
+      const db = openProjectDb(projectRoot);
+      openDrivers.push(db);
+
+      const seenArgs: string[][] = [];
+      const mockRunner: CommandRunner = {
+        async run(cmd, args, opts) {
+          seenArgs.push(args);
+          opts.onSpawn?.(8008);
+          if (args.includes("--model") || args.includes("-m")) {
+            opts.onStderr("Error: model glm-5 not found in provider config\n");
+            return { exitCode: 1, pid: 8008 };
+          }
+          opts.onStdout(
+            JSON.stringify({
+              verdict: "APPROVE",
+              hard_constraints: ["Fallback to default CLI model succeeded"],
+              decisions: ["Use default model when preset model is missing"],
+              risks: [],
+              reasoning: "Default model worked cleanly",
+            })
+          );
+          return { exitCode: 0, pid: 8008 };
+        },
+      };
+
+      const result = await runDebateBroker({
+        projectRoot,
+        sessionId: "sess-model-fallback",
+        topic: "Unconfigured preset model fallback",
+        proposal: "Retry without --model if exitCode !== 0",
+        reviewerRoutes: [
+          { harness: "opencode", model: "glm-5", role: "analyst" },
+        ],
+        commandRunner: mockRunner,
+        db,
+      });
+
+      assert.equal(result.status, "done");
+      assert.equal(result.verdict, "APPROVE");
+      assert.equal(seenArgs.length, 2);
+      assert.ok(seenArgs[0]!.includes("--model"));
+      assert.ok(!seenArgs[1]!.includes("--model"));
+      assert.equal(result.round1Bundle.openings[0]?.model, "default");
+      assert.ok(
+        result.hardConstraints.includes("Fallback to default CLI model succeeded")
+      );
+    });
   });
 });

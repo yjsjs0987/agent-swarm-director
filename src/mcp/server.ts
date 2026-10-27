@@ -45,7 +45,12 @@ import {
   renderSessionSummaryMd,
   syncPlanFromMd,
 } from "../core/render.ts";
-import { escalateTaskRoute, resolveRoute } from "../core/router.ts";
+import {
+  detectAvailableCliHarnesses,
+  escalateTaskRoute,
+  normalizeAntigravityModel,
+  resolveRoute,
+} from "../core/router.ts";
 import { spawnSubagent, type CommandRunner } from "../core/spawner.ts";
 import type {
   AgentRole,
@@ -703,7 +708,15 @@ export class AsdMcpServer {
           difficulty: t.difficulty as DifficultyTier,
           harness: (t.assigned_harness as HarnessId) ?? undefined,
           model: t.assigned_model ?? undefined,
+          isSubagentSpawn: true,
+          mainHarness: session.main_harness as HarnessId,
+          mode: "claim_only",
         });
+
+        const effectiveModel =
+          route.harness === "antigravity"
+            ? normalizeAntigravityModel(route.model)
+            : route.model;
 
         let wtPath: string | undefined;
         if (t.track === "HEAVY") {
@@ -713,7 +726,7 @@ export class AsdMcpServer {
 
         this.db.updateTaskStatus(sessionId, t.task_id, "running", {
           assignedHarness: route.harness,
-          assignedModel: route.model,
+          assignedModel: effectiveModel,
           worktreePath: wtPath,
         });
 
@@ -721,7 +734,7 @@ export class AsdMcpServer {
           taskId: t.task_id,
           status: "running",
           harness: route.harness,
-          model: route.model,
+          model: effectiveModel,
           durationMs: 0,
         });
       }
@@ -760,8 +773,21 @@ export class AsdMcpServer {
       let finalResult: AsdDispatchOutput["results"][number] | null = null;
 
       // Up to 3 attempts with escalation
+      const runtimeCaps = !this.commandRunner
+        ? { availableHarnesses: detectAvailableCliHarnesses() }
+        : undefined;
       while (currentAttempts < 3) {
-        const esc = escalateTaskRoute(t, currentAttempts);
+        const esc = escalateTaskRoute(
+          {
+            ...t,
+            isSubagentSpawn: true,
+            mainHarness: session.main_harness as HarnessId,
+            mode: "parallel_spawn",
+          } as TaskRow,
+          currentAttempts,
+          undefined,
+          runtimeCaps
+        );
         const route = esc.route;
         if (!route) {
           this.db.updateTaskStatus(sessionId, t.task_id, "failed");
@@ -807,7 +833,7 @@ export class AsdMcpServer {
           allowedFiles = [];
         }
 
-        const spawnResult = await spawnSubagent({
+        let spawnResult = await spawnSubagent({
           projectRoot: wtInfo ? wtInfo.wtPath : this.projectRoot,
           homeDir: this.homeDir,
           mainSessionId: sessionId,
@@ -823,6 +849,34 @@ export class AsdMcpServer {
           commandRunner: this.commandRunner,
           signal,
         });
+
+        if (spawnResult.exitCode !== 0 && route.model && !this.commandRunner) {
+          const defaultCmdInfo = buildDefaultHarnessCommand(
+            route.harness,
+            prompt,
+            "",
+            t.thinking_effort
+          );
+          const retryResult = await spawnSubagent({
+            projectRoot: wtInfo ? wtInfo.wtPath : this.projectRoot,
+            homeDir: this.homeDir,
+            mainSessionId: sessionId,
+            subSessionId: `${subSessionId}-default`,
+            role: t.role as AgentRole,
+            harness: route.harness,
+            model: "default",
+            taskId: t.task_id,
+            prompt,
+            allowedFiles,
+            command: defaultCmdInfo.command,
+            args: defaultCmdInfo.args,
+            commandRunner: this.commandRunner,
+            signal,
+          });
+          if (retryResult.exitCode === 0) {
+            spawnResult = retryResult;
+          }
+        }
 
         // Verification
         let verifyResult: { verified: boolean; commitSha?: string; error?: string; status?: TaskStatus };
