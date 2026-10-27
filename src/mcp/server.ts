@@ -598,7 +598,10 @@ export class AsdMcpServer {
     input: AsdDispatchInput,
     signal?: AbortSignal
   ): Promise<AsdDispatchOutput & { dispatchedTasks: AsdDispatchOutput["results"] }> {
-    const sessionId = input.sessionId;
+    const sessionId =
+      input.sessionId?.trim() ||
+      this.db.getLatestSession()?.session_id ||
+      input.sessionId;
     let session = this.db.getSession(sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -996,7 +999,11 @@ export class AsdMcpServer {
   // ==========================================================================
 
   async handleVerify(input: AsdVerifyInput): Promise<AsdVerifyOutput> {
-    const { sessionId, taskId, doneClaim, verifyCmd } = input;
+    const { taskId, doneClaim, verifyCmd } = input;
+    const sessionId =
+      input.sessionId?.trim() ||
+      this.db.getLatestSession()?.session_id ||
+      input.sessionId;
     let session = this.db.getSession(sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
@@ -1094,17 +1101,31 @@ export class AsdMcpServer {
   // Tool 4: asd_debate
   // ==========================================================================
 
-  async handleDebate(input: AsdDebateInput, signal?: AbortSignal): Promise<AsdDebateOutput> {
+  async handleDebate(
+    input: AsdDebateInput,
+    signal?: AbortSignal,
+    onProgress?: (msg: string) => void
+  ): Promise<AsdDebateOutput> {
+    const sessionId =
+      input.sessionId?.trim() ||
+      this.db.getLatestSession()?.session_id ||
+      `${Date.now()}-main`;
+    let progressStep = 0;
     const brokerResult = await runDebateBroker({
       projectRoot: this.projectRoot,
       homeDir: this.homeDir,
-      sessionId: input.sessionId,
+      sessionId,
       taskId: input.taskId,
       topic: input.topic,
       proposal: input.proposal,
       commandRunner: this.commandRunner,
       db: this.db,
       signal,
+      onProgress: (msg) => {
+        progressStep++;
+        this.sendProgress(sessionId, progressStep, 4, msg);
+        onProgress?.(msg);
+      },
     });
 
     return {

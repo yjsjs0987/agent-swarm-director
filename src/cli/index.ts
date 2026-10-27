@@ -84,8 +84,20 @@ export interface CliArgs {
     home?: string;
     harness?: string;
     payload?: string;
+    file?: string;
     projectRoot?: string;
     port?: number;
+    session?: string;
+    task?: string;
+    turn?: number;
+    mode?: string;
+    action?: string;
+    topic?: string;
+    proposal?: string;
+    proposalFile?: string;
+    summary?: string;
+    files?: string;
+    cmd?: string;
   };
   rest: string[];
 }
@@ -95,8 +107,15 @@ export function parseCliArgs(args: string[]): CliArgs {
   const options: CliArgs["options"] = {};
   const positional: string[] = [];
 
+  const readOptVal = (arg: string, prefix: string, nextIdx: () => string | undefined): string | undefined => {
+    if (arg === prefix) return nextIdx();
+    if (arg.startsWith(`${prefix}=`)) return arg.substring(prefix.length + 1);
+    return undefined;
+  };
+
   for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
+    const arg = args[i]!;
+    const next = () => args[++i];
     if (arg === "--help" || arg === "-h") {
       flags.help = true;
     } else if (arg === "--version" || arg === "-v") {
@@ -111,20 +130,39 @@ export function parseCliArgs(args: string[]): CliArgs {
       flags.all = true;
     } else if (arg === "--no-path" || arg === "--noPath") {
       flags.noPath = true;
-    } else if (arg === "--home") {
-      options.home = args[++i];
-    } else if (arg.startsWith("--home=")) {
-      options.home = arg.substring("--home=".length);
-    } else if (arg === "--harness") {
-      options.harness = args[++i];
-    } else if (arg.startsWith("--harness=")) {
-      options.harness = arg.substring("--harness=".length);
-    } else if (arg === "--payload") {
-      options.payload = args[++i];
-    } else if (arg.startsWith("--payload=")) {
-      options.payload = arg.substring("--payload=".length);
+    } else if (arg === "--home" || arg.startsWith("--home=")) {
+      options.home = readOptVal(arg, "--home", next);
+    } else if (arg === "--harness" || arg.startsWith("--harness=")) {
+      options.harness = readOptVal(arg, "--harness", next);
+    } else if (arg === "--payload" || arg.startsWith("--payload=")) {
+      options.payload = readOptVal(arg, "--payload", next);
+    } else if (arg === "--file" || arg.startsWith("--file=")) {
+      options.file = readOptVal(arg, "--file", next);
+    } else if (arg === "--session" || arg.startsWith("--session=") || arg === "--session-id" || arg.startsWith("--session-id=")) {
+      options.session = readOptVal(arg, arg.startsWith("--session-id") ? "--session-id" : "--session", next);
+    } else if (arg === "--task" || arg.startsWith("--task=") || arg === "--task-id" || arg.startsWith("--task-id=")) {
+      options.task = readOptVal(arg, arg.startsWith("--task-id") ? "--task-id" : "--task", next);
+    } else if (arg === "--turn" || arg.startsWith("--turn=")) {
+      const t = Number.parseInt(readOptVal(arg, "--turn", next) || "", 10);
+      if (Number.isFinite(t)) options.turn = t;
+    } else if (arg === "--mode" || arg.startsWith("--mode=")) {
+      options.mode = readOptVal(arg, "--mode", next);
+    } else if (arg === "--action" || arg.startsWith("--action=")) {
+      options.action = readOptVal(arg, "--action", next);
+    } else if (arg === "--topic" || arg.startsWith("--topic=")) {
+      options.topic = readOptVal(arg, "--topic", next);
+    } else if (arg === "--proposal" || arg.startsWith("--proposal=")) {
+      options.proposal = readOptVal(arg, "--proposal", next);
+    } else if (arg === "--proposal-file" || arg.startsWith("--proposal-file=")) {
+      options.proposalFile = readOptVal(arg, "--proposal-file", next);
+    } else if (arg === "--summary" || arg.startsWith("--summary=")) {
+      options.summary = readOptVal(arg, "--summary", next);
+    } else if (arg === "--files" || arg.startsWith("--files=")) {
+      options.files = readOptVal(arg, "--files", next);
+    } else if (arg === "--cmd" || arg.startsWith("--cmd=") || arg === "--verify-cmd" || arg.startsWith("--verify-cmd=")) {
+      options.cmd = readOptVal(arg, arg.startsWith("--verify-cmd") ? "--verify-cmd" : "--cmd", next);
     } else if (arg === "--project-root" || arg === "--projectRoot") {
-      options.projectRoot = args[++i];
+      options.projectRoot = next();
     } else if (
       arg.startsWith("--project-root=") ||
       arg.startsWith("--projectRoot=")
@@ -132,7 +170,7 @@ export function parseCliArgs(args: string[]): CliArgs {
       const idx = arg.indexOf("=");
       options.projectRoot = arg.substring(idx + 1);
     } else if (arg === "--port" || arg === "-p") {
-      const p = Number.parseInt(args[++i] || "", 10);
+      const p = Number.parseInt(next() || "", 10);
       if (Number.isFinite(p)) options.port = p;
     } else if (arg.startsWith("--port=")) {
       const p = Number.parseInt(arg.substring("--port=".length), 10);
@@ -482,15 +520,19 @@ Usage:
   asd <command> [options]
 
 Commands:
-  sync [--force] [--no-path]         Sync ASD harnesses globally and install 'asd' CLI to PATH
-  status [--json]                    Display current session progress board and warnings
-  logs [taskId] [--json]             Inspect latest (or task-specific) subagent prompt & output log
-  ui [--port <num>] [--json]         Launch lightweight local web dashboard (default port: 3847)
-  doctor [--json]                    Verify environment, tools, and policy health
-  clean [--pop] [--all]              Clean temporary worktrees and restore auto-stash
-  uninstall [--home <dir>]           Surgically restore user harness configurations
-  hook <pre-tool-use|stop>           Internal hook evaluator for harnesses
-  mcp                                Start ASD MCP server over stdio
+  plan [create|get|update|sync_from_md]  Create, query, or sync .asd/PLAN.md & SQLite tasks
+  dispatch [--turn <n>] [--mode <m>]     Dispatch wave tasks in parallel_spawn or claim_only mode
+  verify --task <id> [--summary <s>]     Verify task boundaries, run tests, and commit/merge
+  debate --topic <t> --proposal <p>      Run zero-timeout cross-model blind debate via CLI
+  sync [--force] [--no-path]             Sync ASD harnesses globally and install 'asd' CLI to PATH
+  status [--json]                        Display current session progress board and warnings
+  logs [taskId] [--json]                 Inspect latest (or task-specific) subagent prompt & output log
+  ui [--port <num>] [--json]             Launch lightweight local web dashboard (default port: 3847)
+  doctor [--json]                        Verify environment, tools, and policy health
+  clean [--pop] [--all]                  Clean temporary worktrees and restore auto-stash
+  uninstall [--home <dir>]               Surgically restore user harness configurations
+  hook <pre-tool-use|stop>               Internal hook evaluator for harnesses
+  mcp                                    Start ASD MCP server over stdio
 
 Options:
   -h, --help                         Show this help message
@@ -899,6 +941,201 @@ export async function main(
           }
         }
         return 0;
+      }
+
+      case "plan":
+      case "dispatch":
+      case "verify":
+      case "debate": {
+        const { AsdMcpServer } = await import("../mcp/server.ts");
+        const server = new AsdMcpServer({
+          projectRoot,
+          homeDir,
+          autoSync: false,
+        });
+
+        try {
+          let jsonPayload: Record<string, unknown> = {};
+          const rawJsonInput =
+            options.payload ||
+            (options.file && fs.existsSync(options.file)
+              ? fs.readFileSync(options.file, "utf8")
+              : "") ||
+            readStdin();
+          if (rawJsonInput && rawJsonInput.trim()) {
+            try {
+              jsonPayload = JSON.parse(rawJsonInput.trim()) as Record<string, unknown>;
+            } catch (e) {
+              throw new Error(
+                `Invalid JSON payload provided to 'asd ${command}': ${
+                  e instanceof Error ? e.message : String(e)
+                }`
+              );
+            }
+          }
+
+          if (command === "plan") {
+            const action = (options.action ||
+              subcommand ||
+              jsonPayload.action ||
+              (Array.isArray(jsonPayload.tasks) ? "create" : "get")) as
+              | "create"
+              | "get"
+              | "update"
+              | "sync_from_md";
+            const input = {
+              ...jsonPayload,
+              action,
+              ...(options.session ? { sessionId: options.session } : {}),
+              ...(options.harness ? { mainHarness: options.harness } : {}),
+            };
+            const res = (await server.handleRequest("asd_plan", input)) as {
+              sessionId: string;
+              phase: string;
+              planMdPath: string;
+              progressBoard: string;
+            };
+            if (flags.json) {
+              console.log(JSON.stringify(res, null, 2));
+            } else {
+              console.log(res.progressBoard);
+              console.log(`\nSession ID: ${res.sessionId} | Phase: ${res.phase} | Plan: ${res.planMdPath}`);
+            }
+            return 0;
+          }
+
+          if (command === "dispatch") {
+            const taskIdsFromOpt = options.task
+              ? options.task.split(",").map((s) => s.trim()).filter(Boolean)
+              : undefined;
+            const input = {
+              sessionId: (options.session || (jsonPayload.sessionId as string) || ""),
+              ...jsonPayload,
+              ...(options.turn !== undefined ? { turn: options.turn } : {}),
+              ...(options.mode ? { mode: options.mode } : {}),
+              ...(taskIdsFromOpt ? { taskIds: taskIdsFromOpt } : {}),
+            };
+            const res = (await server.handleRequest("asd_dispatch", input)) as {
+              sessionId: string;
+              turn: number;
+              results: Array<{ taskId: string; status: string; harness: string; model: string; error?: string }>;
+              progressBoard: string;
+            };
+            if (flags.json) {
+              console.log(JSON.stringify(res, null, 2));
+            } else {
+              console.log(res.progressBoard);
+              for (const r of res.results) {
+                console.log(
+                  `- ${r.taskId}: ${r.status} (@${r.harness}/${r.model})${r.error ? ` [Error: ${r.error}]` : ""}`
+                );
+              }
+            }
+            return 0;
+          }
+
+          if (command === "verify") {
+            const taskId = options.task || subcommand || (jsonPayload.taskId as string) || "";
+            if (!taskId) {
+              throw new Error("Missing --task <taskId> for 'asd verify'");
+            }
+            const changedFiles = options.files
+              ? options.files.split(",").map((s) => s.trim()).filter(Boolean)
+              : [];
+            const summary = options.summary || parsed.rest[0] || `Verified task ${taskId}`;
+            const defaultClaim = {
+              summary,
+              changed_files: changedFiles,
+              key_decisions: [],
+              risks: [],
+            };
+            const input = {
+              sessionId: (options.session || (jsonPayload.sessionId as string) || ""),
+              taskId,
+              doneClaim: (jsonPayload.doneClaim as typeof defaultClaim) ?? defaultClaim,
+              ...(options.cmd ? { verifyCmd: options.cmd } : {}),
+              ...jsonPayload,
+            };
+            const res = (await server.handleRequest("asd_verify", input)) as {
+              verified: boolean;
+              taskId: string;
+              status: string;
+              commitSha?: string;
+              error?: string;
+              progressBoard: string;
+            };
+            if (flags.json) {
+              console.log(JSON.stringify(res, null, 2));
+            } else {
+              console.log(res.progressBoard);
+              console.log(
+                `\nVerify [${res.taskId}]: ${res.verified ? "PASS" : "FAIL"} (status: ${res.status})${
+                  res.commitSha ? ` | commit: ${res.commitSha}` : ""
+                }${res.error ? `\nReason: ${res.error}` : ""}`
+              );
+            }
+            return res.verified ? 0 : 1;
+          }
+
+          if (command === "debate") {
+            if (process.env.ASD_SESSION_ROLE === "subagent") {
+              throw new Error("Subagents cannot invoke orchestration tools");
+            }
+            const topic =
+              options.topic ||
+              (jsonPayload.topic as string) ||
+              subcommand ||
+              "";
+            let proposal =
+              options.proposal ||
+              (jsonPayload.proposal as string) ||
+              parsed.rest.join(" ") ||
+              "";
+            if (!proposal && options.proposalFile && fs.existsSync(options.proposalFile)) {
+              proposal = fs.readFileSync(options.proposalFile, "utf8");
+            }
+            if (!topic || !proposal) {
+              throw new Error(
+                "Usage: asd debate --topic \"<topic>\" --proposal \"<proposal>\" [--task <taskId>] [--session <sessionId>]"
+              );
+            }
+            const res = await server.handleDebate(
+              {
+                sessionId: options.session || (jsonPayload.sessionId as string) || "",
+                taskId: options.task || (jsonPayload.taskId as string) || undefined,
+                topic,
+                proposal,
+              },
+              undefined,
+              (msg) => {
+                if (!flags.json) {
+                  console.error(msg);
+                }
+              }
+            );
+            if (flags.json) {
+              console.log(JSON.stringify(res, null, 2));
+            } else {
+              console.log(`\n=== ASD Debate Verdict [${res.debateId}]: ${res.verdict} ===`);
+              if (res.decisions.length > 0) {
+                console.log(`Decisions:\n${res.decisions.map((d) => `  - ${d}`).join("\n")}`);
+              }
+              if (res.hardConstraints.length > 0) {
+                console.log(
+                  `Hard Constraints:\n${res.hardConstraints.map((c) => `  - ${c}`).join("\n")}`
+                );
+              }
+              if (res.risks.length > 0) {
+                console.log(`Risks:\n${res.risks.map((r) => `  - ${r}`).join("\n")}`);
+              }
+              console.log(`\n${res.progressBoard}`);
+            }
+            return 0;
+          }
+          return 0;
+        } finally {
+          server.close();
+        }
       }
 
       case "mcp": {

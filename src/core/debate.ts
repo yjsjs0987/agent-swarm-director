@@ -348,6 +348,7 @@ export function buildRound1Prompt(
     `## Instructions`,
     `You are an independent reviewer evaluating this architectural or implementation proposal.`,
     `Critique the proposal thoroughly, identify failure modes, assess risks, and formulate any necessary hard constraints or decisions.`,
+    `IMPORTANT: Do NOT call any tools, do NOT read files, and do NOT execute shell commands. Evaluate the proposal based solely on the context provided above and respond immediately.`,
     ``,
     `You MUST return your judgment strictly as a JSON block with this schema:`,
     `\`\`\`json`,
@@ -407,6 +408,7 @@ export function buildRound2Prompt(
     `At least one reviewer rejected the proposal or raised critical conflicts during Round 1.`,
     `As the final Arbiter, resolve the conflicts between the proposal and reviewer concerns.`,
     `Produce the definitive binding verdict and list of hard constraints and decisions.`,
+    `IMPORTANT: Do NOT call any tools, do NOT read files, and do NOT execute shell commands. Evaluate based solely on the context provided above and respond immediately.`,
     ``,
     `You MUST return your final judgment strictly as a JSON block with this schema:`,
     `\`\`\`json`,
@@ -534,13 +536,22 @@ export async function runDebateBroker(
         );
         if (sel2.diversityDegraded) diversityDegraded = true;
 
-        reviewers.push({
-          role: role2,
-          harness: sel2.harness,
-          model: sel2.model,
-          modelFamily: sel2.modelFamily,
-          diversityDegraded: sel2.diversityDegraded,
-        });
+        const isDuplicateClone =
+          !options.commandRunner &&
+          sel2.harness === sel1.harness &&
+          sel2.model === sel1.model;
+
+        if (isDuplicateClone) {
+          diversityDegraded = true;
+        } else {
+          reviewers.push({
+            role: role2,
+            harness: sel2.harness,
+            model: sel2.model,
+            modelFamily: sel2.modelFamily,
+            diversityDegraded: sel2.diversityDegraded,
+          });
+        }
       }
     }
 

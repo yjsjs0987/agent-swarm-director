@@ -22,7 +22,7 @@ You are executing the ASD v2.2 systematic debugging workflow.
 
 ### 2. Hypothesis & Cross-Diagnosis
 - Formulate testable hypotheses explaining the root cause.
-- If the issue is complex or architectural, invoke `asd_debate` for diverse model diagnosis.
+- If the issue is complex or architectural, run `asd debate --topic "<topic>" --proposal "<hypothesis>"` via terminal CLI for diverse model diagnosis without MCP timeout limits.
 
 ### 3. Targeted Fix
 - Apply the minimal correct change to resolve the root cause.
@@ -32,5 +32,5 @@ You are executing the ASD v2.2 systematic debugging workflow.
 ### 4. Verification & Regression Guard
 - Run the reproduction test: must now PASS.
 - Run the entire test suite: must PASS with zero regressions.
-- Invoke `asd_verify` to lock in the checkpoint commit and update the `progressBoard`.
+- Run `asd verify --task <taskId> --files "<changedFiles>" --summary "<fix summary>"` (or `asd_verify`) to lock in the checkpoint commit and update the `progressBoard`.
 - Print the updated `progressBoard` verbatim to the user.

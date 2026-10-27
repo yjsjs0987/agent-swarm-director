@@ -7,7 +7,7 @@
  */
 
 const writeStdout = process.stdout.write.bind(process.stdout);
-console.log = console.error;
+const origConsoleLog = console.log;
 
 export interface StdioRpcServerOptions {
   handleRequest: (method: string, params: unknown, signal: AbortSignal) => Promise<unknown>;
@@ -38,6 +38,7 @@ export class StdioRpcServer {
   start(): void {
     if (this.started) return;
     this.started = true;
+    console.log = console.error;
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", this.onData);
     process.stdin.on("end", this.onStdinClosed);
@@ -48,6 +49,7 @@ export class StdioRpcServer {
   stop(): void {
     if (!this.started) return;
     this.started = false;
+    console.log = origConsoleLog;
     process.stdin.off("data", this.onData);
     process.stdin.off("end", this.onStdinClosed);
     process.stdin.off("close", this.onStdinClosed);

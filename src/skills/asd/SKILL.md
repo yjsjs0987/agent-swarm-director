@@ -8,19 +8,19 @@ description: Universal end-to-end multi-agent autonomous workflow for ASD v2.2. 
 You are executing the end-to-end ASD v2.2 autonomous multi-agent workflow.
 Follow this strict 4-step sequence:
 
-## Step 1: Planning & Decomposition (`asd_plan`)
+## Step 1: Planning & Decomposition (`asd plan`)
 1. Assess user intent:
    - If the task is CLEAR: ask at most 1 clarifying question (or proceed immediately if all context is present).
-   - If UNCLEAR: draft a structured best-practice plan and conduct adversarial review.
-2. Invoke `asd_plan` with:
+   - If UNCLEAR: draft a structured best-practice plan and conduct adversarial review via `asd debate --topic "<topic>" --proposal "<proposal>"`.
+2. Run `asd plan create --payload '{"tasks":[...]}'` via terminal CLI (or `asd_plan`) with:
    - `action`: `"create"`
-   - `tasks`: array of decomposed tasks with explicit `turn` (1, 2, ...), `track` (`LIGHT` for sequential single-file/single-domain edits, `HEAVY` for concurrent multi-file edits), `role`, `domainCategory`, `difficulty`, `allowedFiles`, `verifyCmd`, and `acceptance`.
+   - `tasks`: array of decomposed tasks with explicit `turn` (1, 2, ...), `track` (`LIGHT` for sequential single-file/single-domain edits, `HEAVY` for concurrent multi-file edits), `role`, `category`, `difficulty`, `targetFiles`, `verifyCmd`, and `acceptance`.
 3. Check the returned `progressBoard` and `.asd/PLAN.md`.
 
-## Step 2: Live Progress & Wave Execution (`asd_dispatch` & `asd_verify`)
-1. Execute turn-by-turn and wave-by-wave:
-   - For `LIGHT` track tasks: in-place modification by single worker on clean baseline, followed by `asd_verify`. Checkpoint commit is automatically created upon pass.
-   - For `HEAVY` track tasks: parallel workers isolated in git worktrees (`.asd/wt/<turn>-<taskId>`), concurrent execution, followed by `asd_verify` and automated merge.
+## Step 2: Live Progress & Wave Execution (`asd dispatch` & `asd verify`)
+1. Execute turn-by-turn and wave-by-wave via terminal CLI (`asd dispatch --turn <N>`, `asd verify --task <id> ...`) so long-running subagents never hit MCP 60s timeouts:
+   - For `LIGHT` track tasks: in-place modification by single worker on clean baseline, followed by `asd verify`. Checkpoint commit is automatically created upon pass.
+   - For `HEAVY` track tasks: parallel workers isolated in git worktrees (`.asd/wt/<turn>-<taskId>`), concurrent execution, followed by `asd verify` and automated merge.
 2. **MANDATORY LIVE PROGRESS DIRECTIVE**:
    - After EVERY subagent or wave completion, print the returned `progressBoard` verbatim to the user so they can watch live progress.
    - Never suppress or summarize the `progressBoard` block.

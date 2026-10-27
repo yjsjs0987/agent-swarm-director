@@ -10,14 +10,20 @@ You are the Execution Orchestrator responsible for running or resuming `.asd/PLA
 ## Workflow
 
 ### 1. Reverse Synchronization (`sync_from_md`)
-- If `.asd/PLAN.md` exists and was edited by the user, synchronize state:
-  `asd_plan({ action: "sync_from_md" })`
+- If `.asd/PLAN.md` exists and was edited by the user, synchronize state via terminal CLI:
+  ```bash
+  asd plan sync_from_md
+  ```
 - Identify all pending (`[ ]`) or escalated (`[~]`) tasks.
 
-### 2. Wave-by-Wave Dispatch
-- For each turn:
-  1. Dispatch eligible tasks via `asd_dispatch`.
-  2. For `LIGHT` tasks: worker runs in-place, verifies via `asd_verify`, and creates a checkpoint commit.
+### 2. Wave-by-Wave Dispatch (via `asd dispatch` & `asd verify` CLI)
+- Prefer running `asd` CLI commands directly in the terminal to avoid MCP 60s request timeouts:
+  1. Dispatch eligible tasks for the current turn:
+     ```bash
+     asd dispatch --turn <N>
+     ```
+     *(Or `asd dispatch --turn <N> --mode claim_only` when delegating to native host subagents)*
+  2. For `LIGHT` tasks: worker runs in-place, verifies via `asd verify --task <taskId> --files "<file1,file2>" --summary "<summary>"`, and creates a checkpoint commit.
   3. For `HEAVY` tasks: workers run in parallel worktrees, commit to worktree branches, and merge to main via `withMergeLock`.
   4. If merge conflict occurs, aborts merge, restores baseline, and escalates task.
 

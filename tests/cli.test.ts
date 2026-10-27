@@ -698,5 +698,74 @@ describe("ASD CLI (src/cli/index.ts)", () => {
         removeTempDir(withPathHome);
       }
     });
+
+    test("CLI orchestration commands (plan, dispatch, verify, debate guard) work directly without MCP", () => {
+      const orchHome = createTempDir("asd-orch-home-");
+      const orchProj = createTempDir("asd-orch-proj-");
+      initGitRepo(orchProj);
+      try {
+        // 1. asd plan create
+        const planPayload = JSON.stringify({
+          sessionId: "sess-cli-orch-1",
+          tasks: [
+            {
+              taskId: "T1.1",
+              turn: 1,
+              title: "CLI Orchestrated Task",
+              track: "LIGHT",
+              targetFiles: ["hello.txt"],
+            },
+          ],
+        });
+        const planRes = runCli(
+          ["plan", "create", "--payload", planPayload, "--home", orchHome],
+          { cwd: orchProj }
+        );
+        assert.equal(planRes.exitCode, 0, `plan stderr: ${planRes.stderr}`);
+        assert.ok(planRes.stdout.includes("### 📊 ASD TODO 진행 현황"));
+        assert.ok(planRes.stdout.includes("T1.1"));
+
+        // 2. asd dispatch --mode claim_only (auto-resolving latest session without --session)
+        const dispRes = runCli(
+          ["dispatch", "--turn", "1", "--mode", "claim_only", "--home", orchHome],
+          { cwd: orchProj }
+        );
+        assert.equal(dispRes.exitCode, 0, `dispatch stderr: ${dispRes.stderr}`);
+        assert.ok(dispRes.stdout.includes("T1.1: running"));
+
+        // 3. Write allowed file and run asd verify --task T1.1
+        fs.writeFileSync(path.join(orchProj, "hello.txt"), "hello cli\n", "utf8");
+        const verRes = runCli(
+          [
+            "verify",
+            "--task",
+            "T1.1",
+            "--files",
+            "hello.txt",
+            "--summary",
+            "Created hello.txt via CLI",
+            "--home",
+            orchHome,
+          ],
+          { cwd: orchProj }
+        );
+        assert.equal(verRes.exitCode, 0, `verify stderr: ${verRes.stderr}`);
+        assert.ok(verRes.stdout.includes("Verify [T1.1]: PASS"));
+
+        // 4. Subagent guard blocks asd debate from subagents
+        const subDebate = runCli(
+          ["debate", "--topic", "T", "--proposal", "P", "--home", orchHome],
+          {
+            cwd: orchProj,
+            env: { ...process.env, ASD_SESSION_ROLE: "subagent" },
+          }
+        );
+        assert.equal(subDebate.exitCode, 1);
+        assert.ok(subDebate.stderr.includes("Subagents cannot invoke orchestration tools"));
+      } finally {
+        removeTempDir(orchHome);
+        removeTempDir(orchProj);
+      }
+    });
   });
 });

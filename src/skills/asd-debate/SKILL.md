@@ -15,11 +15,15 @@ You are orchestrating a cross-harness adversarial debate using the Core Debate B
   - `proposal`: The proposed solution or conflicting options.
   - `taskId`: Associated task ID (optional).
 
-### 2. Multi-Model Blind Review (Round 1)
-- Invoke `asd_debate`:
-  - Dispatches blind critique requests in parallel to diverse model families (e.g., Claude, GPT, GLM, Gemini).
-  - Proposers and critics do not see each other's identities during Round 1.
-  - If unanimous consensus is reached, the debate terminates early with an agreed verdict.
+### 2. Multi-Model Blind Review (Round 1 — Execute via `asd debate` CLI)
+- Run the debate directly via the terminal CLI (bypasses MCP 60s request timeouts and streams real-time progress):
+  ```bash
+  asd debate --topic "<topic>" --proposal "<proposal>" [--task <taskId>] [--session <sessionId>]
+  ```
+  *(Or write a longer proposal to `.asd/proposal.md` and run `asd debate --topic "<topic>" --proposal-file .asd/proposal.md`)*
+- Dispatches blind critique requests in parallel to diverse model families (e.g., Claude, GPT, GLM, Gemini).
+- Proposers and critics do not see each other's identities during Round 1.
+- If unanimous consensus is reached, the debate terminates early with an agreed verdict.
 
 ### 3. Arbiter Resolution (Round 2)
 - If disagreement persists:
