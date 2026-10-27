@@ -17,7 +17,7 @@ Agent Swarm Director (**ASD v2.2**) is the universal multi-harness successor to 
   - **Codex CLI** (`codex`)
   - **Antigravity** (`agy`)
 - **Capability-Aware Gap-Filling MCP Sync (`asd sync`)**:
-  - Automatically installs global skills (`/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`), 10 specialist agent personas, safety hooks (`PreToolUse`, `Stop`), and MCP servers into global user directories without polluting project repositories.
+  - Automatically installs global skills (`/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`, `/handoff` / `/asd-handoff`), 10 specialist agent personas, safety hooks (`PreToolUse`, `Stop`), and MCP servers into global user directories without polluting project repositories.
   - **Smart Deduplication**: Skips injecting MCP tools where a harness already has native built-in support (e.g., skips `lsp` on OpenCode; skips `websearch` on Claude Code, Codex, and Antigravity) or where the user already configured the MCP server.
 - **Dual-Track Execution (`LIGHT` Single-Harness vs `HEAVY` Multi-Harness)**:
   - **LIGHT Track (Current Harness Mode)**: Small tasks are handled directly by the main AI in-place; multi-agent subtasks use internal subagents within the current harness (`claim_only`), followed by automatic git checkpoint commits and instant rollback on test or boundary failure.
@@ -78,9 +78,9 @@ node --no-warnings src/cli/index.ts ui
 
 ---
 
-## In-Editor AI Skill Commands (`/asd*`)
+## In-Editor AI Skill Commands (`/asd*`, `/handoff`)
 
-Once `asd sync` has been run, you can invoke these 5 slash skills directly inside your AI coding chat (**Claude Code**, **OpenCode**, **Codex CLI**, or **Antigravity**).
+Once `asd sync` has been run, you can invoke these slash skills directly inside your AI coding chat (**Claude Code**, **OpenCode**, **Codex CLI**, or **Antigravity**).
 
 > **Single Pre-Flight Briefing Rule**: Before modifying any code or spawning external harnesses, every `/asd*` skill presents **one consolidated pre-flight briefing** that:
 > 1. Summarizes the planned tasks, target files, and expected impact.
@@ -94,6 +94,7 @@ Once `asd sync` has been run, you can invoke these 5 slash skills directly insid
 | **`/asd-run`** | **Execute / Resume `.asd/PLAN.md`** | Reverse-syncs any manual edits from `.asd/PLAN.md` (`asd plan sync_from_md`), confirms execution mode (`LIGHT` vs `HEAVY`), and runs all pending `[ ]` or escalated `[~]` tasks across turns until completion. |
 | **`/asd-debug <symptom>`** | **Hypothesis-Driven Debugging** | Investigates logs/stack traces read-only, presents a single pre-fix briefing (root-cause hypothesis, reproduction plan, and `LIGHT` vs `HEAVY` selection), writes a deterministic failing reproduction test first (**Rule Zero**), applies the minimal fix, and verifies zero regressions via `asd verify`. |
 | **`/asd-debate <topic>`** | **Adversarial Architecture Debate** | Summarizes the design proposal and asks whether to run across **multiple harnesses** (`HEAVY` blind cross-model critique across Claude, GPT, GLM, Gemini) or **single harness** (`LIGHT` via `--harness <current>`), synthesizes a binding verdict (`APPROVE` / `MINOR_AMEND` / `REJECT`), and injects hard constraints into `.asd/PLAN.md`. |
+| **`/handoff`** (or **`/asd-handoff`**) | **Multi-Harness Session Handoff** | Inspects conversation history, git state, `.asd/PLAN.md`, and active SQLite session/task progress (`asd status`), then generates `handoff.md` (`USER REQUESTS`, `GOAL`, `WORK COMPLETED`, `CURRENT STATE`, `PENDING TASKS`, `KEY FILES`, `IMPORTANT DECISIONS`, `EXPLICIT CONSTRAINTS`, `CONTEXT FOR CONTINUATION`) so any of the 4 harnesses can seamlessly resume work in a new session. |
 
 ### Execution Mode Comparison (`LIGHT` vs `HEAVY`)
 

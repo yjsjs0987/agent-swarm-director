@@ -17,6 +17,8 @@ export const ASD_SKILLS = [
   "asd-run",
   "asd-debate",
   "asd-debug",
+  "asd-handoff",
+  "handoff",
 ] as const;
 
 export type AsdSkill = (typeof ASD_SKILLS)[number];

@@ -18,7 +18,7 @@
   - **Codex CLI** (`codex`)
   - **Antigravity** (`agy`)
 - **빈자리만 채우는 지능형 MCP 및 스킬 동기화 (`asd sync`)**
-  - 프로젝트 폴더를 오염시키지 않고 글로벌 사용자 홈 디렉토리(`~/.claude`, `~/.config/opencode`, `~/.codex`, `~/.gemini`)에만 5개 핵심 스킬(`/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`), 10개 전문 에이전트 페르소나, 보안 훅(`PreToolUse`, `Stop`), MCP 서버를 자동 설치합니다.
+  - 프로젝트 폴더를 오염시키지 않고 글로벌 사용자 홈 디렉토리(`~/.claude`, `~/.config/opencode`, `~/.codex`, `~/.gemini`)에만 핵심 스킬(`/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`, `/handoff` / `/asd-handoff`), 10개 전문 에이전트 페르소나, 보안 훅(`PreToolUse`, `Stop`), MCP 서버를 자동 설치합니다.
   - **중복 방지(Gap-Filling) 주입**: 각 하네스가 기본 내장한 기능(예: OpenCode의 내장 `lsp`, Claude Code·Codex·Antigravity의 내장 `websearch`)이나 사용자가 이미 등록해 둔 MCP는 건너뛰고, **해당 하네스에 없는 도구만 자동으로 채워 넣습니다.**
 - **이중 트랙(Dual-Track) 실행 (`LIGHT` 현재 하네스 모드 vs `HEAVY` 다중 하네스 모드)**
   - **LIGHT 트랙 (현재 하네스 전용)**: 소규모 작업은 현재 메인 AI가 직접 인플레이스(In-place)로 처리하고, 다중 작업은 **현재 하네스 내부의 자체 서브에이전트**로 처리(`claim_only`)하며 외부 하네스 CLI를 띄우지 않습니다. 완료 시 자동 체크포인트 커밋을 생성하고 실패 시 즉시 롤백합니다.
@@ -79,9 +79,9 @@ node --no-warnings src/cli/index.ts ui
 
 ---
 
-## 에디터/채팅창 내 AI 스킬 명령어 (`/asd*`)
+## 에디터/채팅창 내 AI 스킬 명령어 (`/asd*`, `/handoff`)
 
-`asd sync`를 실행하면 **Claude Code**, **OpenCode**, **Codex CLI**, **Antigravity** 채팅창에서 아래 5가지 슬래시(`/`) 스킬 명령어를 바로 호출하여 사용할 수 있습니다.
+`asd sync`를 실행하면 **Claude Code**, **OpenCode**, **Codex CLI**, **Antigravity** 채팅창에서 아래 슬래시(`/`) 스킬 명령어를 바로 호출하여 사용할 수 있습니다.
 
 > **사전 1회 통합 브리핑 원칙**: 모든 `/asd*` 스킬은 실제 파일 수정이나 서브에이전트 실행 전에 **단 한 번만** 다음 내용을 묶어서 브리핑하고 확인을 받습니다:
 > 1. **수행할 작업 요약 및 설명**: 변경할 대상 파일, 작업 순서, 예상 영향을 요약합니다.
@@ -97,6 +97,7 @@ node --no-warnings src/cli/index.ts ui
 | **`/asd-run`** | **생성된 `.asd/PLAN.md` 실행 및 재개** | 사용자가 `.asd/PLAN.md`에서 수정한 내용을 역동기화(`asd plan sync_from_md`)한 뒤, 실행할 작업 요약과 `LIGHT`/`HEAVY` 모드를 확인받고 미완료(`[ ]`) 또는 에스컬레이션(`[~]`)된 태스크들을 순서대로 실행합니다. |
 | **`/asd-debug <증상/오류>`** | **재현 우선 체계적 디버깅** | 에러 로그와 코드를 분석해 **1회 사전 브리핑(원인 가설 + 수정 계획 + `LIGHT`/`HEAVY` 선택)**을 제시한 뒤, 실패를 재현하는 테스트를 먼저 작성(**Rule Zero**)하고 최소 수정 적용 및 전체 회귀 테스트 통과 후 `asd verify`로 체크포인트 커밋을 생성합니다. |
 | **`/asd-debate <주제/설계안>`** | **이기종 모델 블라인드 적대적 토론** | 논쟁이 되는 아키텍처/설계안을 요약하고 **여러 하네스(`HEAVY` — Claude, GPT, GLM 등 교차 블라인드 비평)**를 쓸지 **현재 하네스(`LIGHT` — `--harness <현재하네스>`)**만 쓸지 확인한 뒤, 1라운드 블라인드 비평 및 2라운드 심판(`arbiter`) 판결을 통해 합의안과 필수 제약 사항을 도출합니다. |
+| **`/handoff`** (또는 **`/asd-handoff`**) | **다중 하네스 세션 인수인계 문서 생성** | 현재까지의 사용자 요청, 완료된 작업, Git 및 테스트 상태, 활성 ASD 세션/`.asd/PLAN.md` 진행 현황(`asd status`), 핵심 의사결정과 제약 사항을 정리하여 루트 경로에 `handoff.md`로 저장합니다. 새 세션이나 다른 하네스(Claude Code ↔ OpenCode ↔ Codex ↔ Antigravity)로 전환해 이어서 작업할 때 사용합니다. |
 
 ### `LIGHT` 모드 vs `HEAVY` 모드 비교
 
