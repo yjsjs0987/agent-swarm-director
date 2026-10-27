@@ -282,6 +282,12 @@ describe("Installer & Sync Engine", () => {
       assert.ok(fs.existsSync(path.join(userHome, ".claude", "settings.json.asd-backup")));
       assert.ok(fs.existsSync(path.join(userHome, ".codex", "config.toml.asd-backup")));
       assert.ok(fs.existsSync(path.join(userHome, ".config", "opencode", "opencode.json.asd-backup")));
+
+      // Simulate user adding a new MCP entry AFTER asd sync ran
+      const ocPath = path.join(userHome, ".config", "opencode", "opencode.json");
+      const ocCurrent = JSON.parse(fs.readFileSync(ocPath, "utf8"));
+      ocCurrent.mcpServers["added-after-sync-mcp"] = { command: "post-sync-bin" };
+      fs.writeFileSync(ocPath, JSON.stringify(ocCurrent, null, 2), "utf8");
     });
 
     test("uninstall surgically restores original user configurations 100%", async () => {
@@ -308,7 +314,9 @@ describe("Installer & Sync Engine", () => {
       );
       assert.equal(opencodeJson.editor, "neovim");
       assert.ok(opencodeJson.mcpServers["custom-mcp"]);
+      assert.ok(opencodeJson.mcpServers["added-after-sync-mcp"]);
       assert.equal(opencodeJson.mcpServers["asd-core"], undefined);
+      assert.equal(opencodeJson.mcpServers["context7"], undefined);
 
       // ASD-generated files removed
       assert.equal(fs.existsSync(path.join(userHome, ".claude", "agents")), false);

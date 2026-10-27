@@ -1107,6 +1107,17 @@ export async function uninstallHarnessConfigs(
     }
   };
 
+  const removeBackupFile = (filePath: string) => {
+    const backupPath = `${filePath}.asd-backup`;
+    if (fs.existsSync(backupPath)) {
+      try {
+        fs.unlinkSync(backupPath);
+      } catch {
+        // Ignore
+      }
+    }
+  };
+
   // 1. Claude Code
   const claudeDir = path.join(homeDir, ".claude");
   for (const role of AGENT_ROLES) {
@@ -1121,10 +1132,7 @@ export async function uninstallHarnessConfigs(
   removeDirIfEmpty(path.join(claudeDir, "skills"));
 
   const claudeSettings = path.join(claudeDir, "settings.json");
-  if (restoreUserBackup(claudeSettings)) {
-    restoredFiles.push(claudeSettings);
-    harnessStatus["claude-code"].restored.push(claudeSettings);
-  } else if (fs.existsSync(claudeSettings)) {
+  if (fs.existsSync(claudeSettings)) {
     try {
       const cfg = JSON.parse(fs.readFileSync(claudeSettings, "utf8")) as Record<string, unknown>;
       if (cfg.hooks && typeof cfg.hooks === "object") {
@@ -1133,25 +1141,37 @@ export async function uninstallHarnessConfigs(
           hooks.PreToolUse = hooks.PreToolUse.filter(
             (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
           );
+          if (hooks.PreToolUse.length === 0) delete hooks.PreToolUse;
         }
         if (Array.isArray(hooks.Stop)) {
           hooks.Stop = hooks.Stop.filter(
             (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
           );
+          if (hooks.Stop.length === 0) delete hooks.Stop;
+        }
+        if (Object.keys(hooks).length === 0) {
+          delete cfg.hooks;
         }
       }
-      const hasPre = Array.isArray((cfg.hooks as Record<string, unknown[]>)?.PreToolUse) && ((cfg.hooks as Record<string, unknown[]>).PreToolUse?.length ?? 0) > 0;
-      const hasStop = Array.isArray((cfg.hooks as Record<string, unknown[]>)?.Stop) && ((cfg.hooks as Record<string, unknown[]>).Stop?.length ?? 0) > 0;
-      const otherKeys = Object.keys(cfg).filter((k) => k !== "hooks");
 
-      if (!hasPre && !hasStop && otherKeys.length === 0) {
+      removeBackupFile(claudeSettings);
+      if (Object.keys(cfg).length === 0) {
         removeFile(claudeSettings, "claude-code");
       } else {
         safeWriteJson(claudeSettings, cfg);
+        restoredFiles.push(claudeSettings);
+        harnessStatus["claude-code"].restored.push(claudeSettings);
       }
     } catch {
-      removeFile(claudeSettings, "claude-code");
+      if (restoreUserBackup(claudeSettings)) {
+        restoredFiles.push(claudeSettings);
+        harnessStatus["claude-code"].restored.push(claudeSettings);
+      } else {
+        removeFile(claudeSettings, "claude-code");
+      }
     }
+  } else {
+    removeBackupFile(claudeSettings);
   }
 
   function cleanupJsonMcpFile(
@@ -1159,12 +1179,10 @@ export async function uninstallHarnessConfigs(
     harness: HarnessId,
     extraDeleteKeys: string[] = []
   ): void {
-    if (restoreUserBackup(filePath)) {
-      restoredFiles.push(filePath);
-      harnessStatus[harness].restored.push(filePath);
+    if (!fs.existsSync(filePath)) {
+      removeBackupFile(filePath);
       return;
     }
-    if (!fs.existsSync(filePath)) return;
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
       if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
@@ -1178,13 +1196,21 @@ export async function uninstallHarnessConfigs(
           ? Object.keys(parsed.mcpServers).length
           : 0;
       const otherKeys = Object.keys(parsed).filter((k) => k !== "mcpServers");
+      removeBackupFile(filePath);
       if (mcpCount === 0 && otherKeys.length === 0) {
         removeFile(filePath, harness);
       } else {
         safeWriteJson(filePath, parsed);
+        restoredFiles.push(filePath);
+        harnessStatus[harness].restored.push(filePath);
       }
     } catch {
-      removeFile(filePath, harness);
+      if (restoreUserBackup(filePath)) {
+        restoredFiles.push(filePath);
+        harnessStatus[harness].restored.push(filePath);
+      } else {
+        removeFile(filePath, harness);
+      }
     }
   }
 
@@ -1214,21 +1240,28 @@ export async function uninstallHarnessConfigs(
   removeFile(path.join(codexDir, "AGENTS.md"), "codex");
 
   const configToml = path.join(codexDir, "config.toml");
-  if (restoreUserBackup(configToml)) {
-    restoredFiles.push(configToml);
-    harnessStatus.codex.restored.push(configToml);
-  } else if (fs.existsSync(configToml)) {
+  if (fs.existsSync(configToml)) {
     try {
       const raw = fs.readFileSync(configToml, "utf8");
       const cleaned = removeTomlFence(raw);
+      removeBackupFile(configToml);
       if (cleaned.trim() === "") {
         removeFile(configToml, "codex");
       } else {
         safeWriteText(configToml, cleaned);
+        restoredFiles.push(configToml);
+        harnessStatus.codex.restored.push(configToml);
       }
     } catch {
-      removeFile(configToml, "codex");
+      if (restoreUserBackup(configToml)) {
+        restoredFiles.push(configToml);
+        harnessStatus.codex.restored.push(configToml);
+      } else {
+        removeFile(configToml, "codex");
+      }
     }
+  } else {
+    removeBackupFile(configToml);
   }
 
   // 4. Antigravity
@@ -1245,33 +1278,39 @@ export async function uninstallHarnessConfigs(
   removeDirIfEmpty(path.join(geminiDir, "skills"));
 
   const hooksJson = path.join(geminiDir, "hooks.json");
-  if (restoreUserBackup(hooksJson)) {
-    restoredFiles.push(hooksJson);
-    harnessStatus.antigravity.restored.push(hooksJson);
-  } else if (fs.existsSync(hooksJson)) {
+  if (fs.existsSync(hooksJson)) {
     try {
       const hJson = JSON.parse(fs.readFileSync(hooksJson, "utf8")) as Record<string, unknown>;
       if (Array.isArray(hJson.PreToolUse)) {
         hJson.PreToolUse = hJson.PreToolUse.filter(
           (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
         );
+        if ((hJson.PreToolUse as unknown[]).length === 0) delete hJson.PreToolUse;
       }
       if (Array.isArray(hJson.Stop)) {
         hJson.Stop = hJson.Stop.filter(
           (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
         );
+        if ((hJson.Stop as unknown[]).length === 0) delete hJson.Stop;
       }
-      const hasPre = Array.isArray(hJson.PreToolUse) && hJson.PreToolUse.length > 0;
-      const hasStop = Array.isArray(hJson.Stop) && hJson.Stop.length > 0;
-      const otherKeys = Object.keys(hJson).filter((k) => k !== "PreToolUse" && k !== "Stop");
-      if (!hasPre && !hasStop && otherKeys.length === 0) {
+      removeBackupFile(hooksJson);
+      if (Object.keys(hJson).length === 0) {
         removeFile(hooksJson, "antigravity");
       } else {
         safeWriteJson(hooksJson, hJson);
+        restoredFiles.push(hooksJson);
+        harnessStatus.antigravity.restored.push(hooksJson);
       }
     } catch {
-      removeFile(hooksJson, "antigravity");
+      if (restoreUserBackup(hooksJson)) {
+        restoredFiles.push(hooksJson);
+        harnessStatus.antigravity.restored.push(hooksJson);
+      } else {
+        removeFile(hooksJson, "antigravity");
+      }
     }
+  } else {
+    removeBackupFile(hooksJson);
   }
 
   cleanupJsonMcpFile(path.join(geminiDir, "mcp_config.json"), "antigravity");
