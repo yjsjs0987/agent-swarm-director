@@ -161,7 +161,7 @@ test("Tier 3: builder or worker + registered domain categories (including design
 });
 
 test("Tier 4: builder or worker + general or unknown category -> difficulty tiers", () => {
-  const tiers = ["trivial", "low", "medium", "high", "critical"] as const;
+  const tiers = ["low", "medium", "high"] as const;
 
   for (const diff of tiers) {
     // Explicit 'general' category with difficulty
@@ -180,14 +180,29 @@ test("Tier 4: builder or worker + general or unknown category -> difficulty tier
     assert.equal(route.model, expected.model);
     assert.equal(route.modelFamily, expected.modelFamily);
 
-    // Unknown category with difficulty
+    // Unknown category with difficulty (also testing legacy 'builder' alias -> 'worker')
     const unknownCatRoute = resolveRoute(
-      { role: "builder", category: "custom-domain", difficulty: diff },
+      { role: "builder" as any, category: "custom-domain", difficulty: diff },
       defaultRouting
     );
     assert.equal(unknownCatRoute.tier, 4);
     assert.equal(unknownCatRoute.model, expected.model);
   }
+
+  // Legacy difficulty aliases ('trivial' -> 'low', 'critical' -> 'high')
+  const trivialRoute = resolveRoute(
+    { role: "worker", category: "general", difficulty: "trivial" as any },
+    defaultRouting
+  );
+  assert.equal(trivialRoute.tier, 4);
+  assert.equal(trivialRoute.model, defaultRouting.categories["low"].model);
+
+  const criticalRoute = resolveRoute(
+    { role: "worker", category: "general", difficulty: "critical" as any },
+    defaultRouting
+  );
+  assert.equal(criticalRoute.tier, 4);
+  assert.equal(criticalRoute.model, defaultRouting.categories["high"].model);
 
   // Default difficulty when unspecified is 'medium'
   const defaultDiffRoute = resolveRoute(

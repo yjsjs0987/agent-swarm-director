@@ -129,8 +129,8 @@ describe("Installer & Sync Engine", () => {
       const agentsMd = path.join(opencodeDir, "AGENTS.md");
       assert.ok(fs.existsSync(agentsMd));
       const content = fs.readFileSync(agentsMd, "utf8");
-      assert.ok(content.includes("asd-director"));
-      assert.ok(content.includes("asd-verifier"));
+      assert.ok(content.includes("asd-planner"));
+      assert.ok(content.includes("asd-critic"));
 
       // opencode.json
       const opencodeJson = path.join(opencodeDir, "opencode.json");

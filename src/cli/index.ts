@@ -80,6 +80,7 @@ export interface CliArgs {
     version?: boolean;
     noPath?: boolean;
     fromMarkdown?: boolean;
+    diff?: boolean;
   };
   options: {
     home?: string;
@@ -135,6 +136,8 @@ export function parseCliArgs(args: string[]): CliArgs {
       flags.noPath = true;
     } else if (arg === "--from-markdown" || arg === "--from-md") {
       flags.fromMarkdown = true;
+    } else if (arg === "--diff") {
+      flags.diff = true;
     } else if (arg === "--home" || arg.startsWith("--home=")) {
       options.home = readOptVal(arg, "--home", next);
     } else if (arg === "--harness" || arg.startsWith("--harness=")) {
@@ -570,8 +573,9 @@ Options:
       --topic <text>                 Debate topic for 'asd debate'
       --proposal <text>              Debate proposal text for 'asd debate'
       --proposal-file <path>         Path to proposal markdown/text file for 'asd debate'
+      --diff                         Embed 'git diff HEAD' into 'asd debate' prompt
       --summary <text>               Completion summary for 'asd verify'
-      --files <list>                 Comma-separated changed files for 'asd verify'
+      --files <list>                 Comma-separated files (changed files for verify, or path[:start-end] for debate)
       --cmd <command>                Explicit verification command override for 'asd verify'
       --payload <json|->             Inline JSON payload (or '-' to read JSON from stdin)
       --file <path>                  Path to JSON payload file
@@ -1136,15 +1140,23 @@ export async function main(
             }
             if (!topic || !proposal) {
               throw new Error(
-                "Usage: asd debate --topic \"<topic>\" --proposal \"<proposal>\" [--task <taskId>] [--session <sessionId>]"
+                "Usage: asd debate --topic \"<topic>\" --proposal \"<proposal>\" [--files \"path[:start-end],...\"] [--diff] [--task <taskId>] [--session <sessionId>]"
               );
             }
+            const debateFiles = options.files
+              ? options.files.split(",").map((s) => s.trim()).filter(Boolean)
+              : Array.isArray(jsonPayload.files)
+                ? (jsonPayload.files as string[])
+                : undefined;
+            const includeDiff = Boolean(flags.diff || jsonPayload.includeDiff);
             const res = await server.handleDebate(
               {
                 sessionId: options.session || (jsonPayload.sessionId as string) || "",
                 taskId: options.task || (jsonPayload.taskId as string) || undefined,
                 topic,
                 proposal,
+                ...(debateFiles && debateFiles.length > 0 ? { files: debateFiles } : {}),
+                ...(includeDiff ? { includeDiff: true } : {}),
                 ...(options.harness ? { harness: options.harness as HarnessId } : {}),
               },
               undefined,

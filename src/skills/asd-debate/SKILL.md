@@ -12,7 +12,7 @@ You are the **Debate Broker** coordinating a hostile design review before commit
 Evaluate the topic and proposal to recommend `LIGHT` or `HEAVY` debate mode:
 - **Recommend `LIGHT` (Single-Harness Internal Subagent Debate)** when:
   - Reviewing a feature plan, module refactor, bug-fix strategy, or API design where fast adversarial critique inside the current harness is sufficient.
-  - Uses the current harness's native subagent tool (`asd-critic`, `asd-architect`, `asd-arbiter`), which automatically runs on the highest-priority model configured for the current harness in `routing.jsonc` (e.g., if `critic` is 1st Claude Code, 2nd OpenCode GLM, running `LIGHT` inside OpenCode delegates to `asd-critic` on GLM without spawning an external CLI process).
+  - Uses the current harness's native subagent tool (`asd-critic`, `asd-architect`), which automatically runs on the highest-priority model configured for the current harness in `routing.jsonc` (e.g., if `critic` is 1st Claude Code, 2nd OpenCode GLM, running `LIGHT` inside OpenCode delegates to `asd-critic` on GLM without spawning an external CLI process).
 - **Recommend `HEAVY` (Multi-Harness Cross-CLI Blind Debate)** when:
   - Reviewing high-risk, repo-wide architectural changes, security models, or irreversible schema migrations where true cross-harness diversity (spawning external `claude`, `opencode`, `codex`, or `agy` CLI processes) is required.
 
@@ -29,20 +29,21 @@ Evaluate the topic and proposal to recommend `LIGHT` or `HEAVY` debate mode:
        - **OpenCode**: Call `task(subagent_type="asd-critic", description="Adversarial review", prompt="...")`
        - **Claude Code**: Call `Agent`/`Task` with `subagent_type: "asd-critic"`
        - **Antigravity**: Call `invoke_subagent` with role `Critic`
-     - Instruct the internal `asd-critic` subagent to ruthlessly challenge assumptions, identify security/correctness blind spots, and return a structured JSON verdict block:
+     - Instruct the internal `asd-critic` subagent to ruthlessly challenge assumptions, cross-examine the target code, identify security/correctness blind spots, and return a structured JSON verdict block citing concrete `file:line` evidence:
        ```json
        {
          "verdict": "APPROVE | MINOR_AMEND | REJECT",
          "decisions": ["..."],
          "hard_constraints": ["..."],
-         "risks": ["..."]
+         "risks": ["..."],
+         "reasoning": "Detailed explanation citing file:line evidence"
        }
        ```
-     - If `asd-critic` returns `REJECT` or conflicts with another reviewer, invoke `asd-arbiter` via the internal subagent tool to issue a binding synthesis.
+     - If `asd-critic` returns `REJECT` or conflicts with another reviewer, invoke `asd-architect` via the internal subagent tool to issue a binding synthesis.
    - **If `HEAVY` Mode is Confirmed (Multi-Harness External CLI Debate)**:
-     - Invoke the cross-harness CLI debate broker (which spawns diverse external CLI reviewers and persists the debate to SQLite):
+     - Invoke the cross-harness CLI debate broker, passing `--files "path[:start-end],..."` and/or `--diff` so Node.js embeds ground-truth source slices directly into the reviewer prompts (zero Main Agent token overhead):
        ```bash
-       asd debate --topic "<topic>" --proposal "<proposal>"
+       asd debate --topic "<topic>" --proposal "<proposal>" --files "src/path/file.ts:10-120" --diff
        ```
 
 3. **Step 3: Apply Verdict**

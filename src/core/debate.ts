@@ -26,6 +26,7 @@ import * as path from "node:path";
 import { loadRoutingConfig } from "./config.ts";
 import { openProjectDb } from "./db.ts";
 import type { SqliteDriver, SessionRow, TaskRow } from "./db.ts";
+import { redactSecrets } from "./redact.ts";
 import { renderPlanMd, renderProgressBoard } from "./render.ts";
 import {
   detectAvailableCliHarnesses,
@@ -52,6 +53,7 @@ import type {
   HarnessId,
   RoutingConfig,
 } from "./types.ts";
+import { runGit } from "./workspace.ts";
 
 // ============================================================================
 // Types & Contracts
@@ -129,6 +131,8 @@ export interface RunDebateBrokerOptions {
   taskId?: string | null;
   topic: string;
   proposal: string;
+  files?: string[];
+  includeDiff?: boolean;
   debateId?: string;
   proposerRoute?: ProposalRouteInput;
   routingConfig?: RoutingConfig;
@@ -401,15 +405,98 @@ export function parseReviewerOpening(rawText: string): ParsedOpening | null {
 }
 
 // ============================================================================
-// Prompts for Round 1 & Round 2
+// Prompts & Ground-Truth Code Context Builder (Method 1 + Method 3)
 // ============================================================================
+
+/**
+ * Reads target file slices (`path[:start-end]`) and/or `git diff HEAD` directly
+ * in Node.js (zero Main Agent LLM tokens) and formats numbered source lines
+ * for cross-examination by debate reviewers.
+ */
+export function buildDebateCodeContext(
+  projectRoot: string,
+  files?: string[],
+  includeDiff?: boolean
+): string {
+  const sections: string[] = [];
+  const rootAbs = path.resolve(projectRoot);
+
+  if (files && files.length > 0) {
+    for (const rawSpec of files) {
+      const spec = rawSpec.trim();
+      if (!spec) continue;
+
+      const match = spec.match(/^(.+?)(?::(\d+)(?:-(\d+))?)?$/);
+      const rawFilePath = (match?.[1] ?? spec).trim();
+      const startLine = match?.[2] ? Math.max(1, Number.parseInt(match[2], 10)) : 1;
+      const endLine = match?.[3]
+        ? Math.max(startLine, Number.parseInt(match[3], 10))
+        : match?.[2]
+          ? startLine + 149
+          : 150;
+
+      const absPath = path.resolve(rootAbs, rawFilePath);
+      const relPath = path.relative(rootAbs, absPath).replace(/\\/g, "/");
+
+      // Prevent path traversal outside projectRoot or reading sensitive .env files
+      if (
+        relPath.startsWith("..") ||
+        path.isAbsolute(relPath) ||
+        /(?:^|\/)\.env(?:\.|$)/i.test(relPath)
+      ) {
+        continue;
+      }
+
+      if (!fs.existsSync(absPath)) {
+        sections.push(`### File: ${relPath} (Not found)`);
+        continue;
+      }
+
+      try {
+        const stat = fs.statSync(absPath);
+        if (!stat.isFile()) continue;
+        const content = fs.readFileSync(absPath, "utf8");
+        const allLines = content.split(/\r?\n/);
+        const clampedStart = Math.min(startLine, Math.max(1, allLines.length));
+        const clampedEnd = Math.min(endLine, allLines.length);
+        const sliced = allLines.slice(clampedStart - 1, clampedEnd);
+        const numbered = sliced
+          .map((line, idx) => `${clampedStart + idx}: ${redactSecrets(line)}`)
+          .join("\n");
+
+        sections.push(
+          `### File: ${relPath} (Lines ${clampedStart}-${clampedEnd} of ${allLines.length})\n` +
+            `\`\`\`\n${numbered}\n\`\`\``
+        );
+      } catch {
+        // Ignore unreadable files
+      }
+    }
+  }
+
+  if (includeDiff) {
+    try {
+      const diffRes = runGit(["diff", "HEAD"], { cwd: rootAbs });
+      if (diffRes.exitCode === 0 && diffRes.stdout.trim()) {
+        const diffLines = diffRes.stdout.trim().split(/\r?\n/).slice(0, 200);
+        const redactedDiff = redactSecrets(diffLines.join("\n"));
+        sections.push(`### Git Diff (HEAD)\n\`\`\`diff\n${redactedDiff}\n\`\`\``);
+      }
+    } catch {
+      // Ignore git diff failures
+    }
+  }
+
+  return sections.join("\n\n");
+}
 
 export function buildRound1Prompt(
   topic: string,
   proposal: string,
-  taskId?: string | null
+  taskId?: string | null,
+  codeContext?: string
 ): string {
-  return [
+  const lines: string[] = [
     `# ASD Debate Round 1: Blind Review`,
     `Topic: ${topic}`,
     `Task ID: ${taskId ?? "N/A"}`,
@@ -417,9 +504,18 @@ export function buildRound1Prompt(
     `## Proposal`,
     proposal,
     ``,
+  ];
+
+  if (codeContext && codeContext.trim()) {
+    lines.push(`## Ground-Truth Source Code`, codeContext.trim(), ``);
+  }
+
+  lines.push(
     `## Instructions`,
-    `You are an independent reviewer evaluating this architectural or implementation proposal.`,
-    `Critique the proposal thoroughly, identify failure modes, assess risks, and formulate any necessary hard constraints or decisions.`,
+    `You are an adversarial, independent reviewer evaluating this architectural or implementation proposal.`,
+    `1. Treat the proposal as an UNVERIFIED hypothesis. Do NOT rubber-stamp or agree out of sycophancy.`,
+    `2. Cross-examine every claim in the proposal against the Ground-Truth Source Code (if provided above). If the actual code contradicts the proposal, reveals a false positive, or shows the change is unnecessary/over-engineered, return REJECT or MINOR_AMEND.`,
+    `3. Cite concrete evidence (e.g., \`file:line\` references or specific code behavior) in your \`reasoning\`, \`hard_constraints\`, and \`risks\`.`,
     `IMPORTANT: Do NOT call any tools, do NOT read files, and do NOT execute shell commands. Evaluate the proposal based solely on the context provided above and respond immediately.`,
     ``,
     `You MUST return your judgment strictly as a JSON block with this schema:`,
@@ -429,17 +525,20 @@ export function buildRound1Prompt(
     `  "hard_constraints": ["Constraint 1", "Constraint 2"],`,
     `  "decisions": ["Decision 1", "Decision 2"],`,
     `  "risks": ["Risk 1", "Risk 2"],`,
-    `  "reasoning": "Detailed explanation of your verdict"`,
+    `  "reasoning": "Detailed explanation citing file:line evidence where applicable"`,
     `}`,
-    `\`\`\``,
-  ].join("\n");
+    `\`\`\``
+  );
+
+  return lines.join("\n");
 }
 
 export function buildRound2Prompt(
   topic: string,
   proposal: string,
   round1: Round1Bundle,
-  taskId?: string | null
+  taskId?: string | null,
+  codeContext?: string
 ): string {
   const openingsText = round1.openings
     .map(
@@ -465,7 +564,7 @@ export function buildRound2Prompt(
     )
     .join("\n\n");
 
-  return [
+  const lines: string[] = [
     `# ASD Debate Round 2: Conflict Resolution & Arbiter Judgment`,
     `Topic: ${topic}`,
     `Task ID: ${taskId ?? "N/A"}`,
@@ -473,13 +572,20 @@ export function buildRound2Prompt(
     `## Original Proposal`,
     proposal,
     ``,
+  ];
+
+  if (codeContext && codeContext.trim()) {
+    lines.push(`## Ground-Truth Source Code`, codeContext.trim(), ``);
+  }
+
+  lines.push(
     `## Round 1 Openings & Disagreements`,
     openingsText,
     ``,
     `## Arbiter Instructions`,
     `At least one reviewer rejected the proposal or raised critical conflicts during Round 1.`,
-    `As the final Arbiter, resolve the conflicts between the proposal and reviewer concerns.`,
-    `Produce the definitive binding verdict and list of hard constraints and decisions.`,
+    `As the final Arbiter, cross-examine both the Original Proposal and Round 1 reviewer claims against the Ground-Truth Source Code (if provided) and resolve the conflicts.`,
+    `Produce the definitive binding verdict and list of hard constraints and decisions, citing concrete \`file:line\` evidence where applicable.`,
     `IMPORTANT: Do NOT call any tools, do NOT read files, and do NOT execute shell commands. Evaluate based solely on the context provided above and respond immediately.`,
     ``,
     `You MUST return your final judgment strictly as a JSON block with this schema:`,
@@ -491,8 +597,10 @@ export function buildRound2Prompt(
     `  "risks": ["Risk 1", "Risk 2"],`,
     `  "reasoning": "Synthesis and final resolution"`,
     `}`,
-    `\`\`\``,
-  ].join("\n");
+    `\`\`\``
+  );
+
+  return lines.join("\n");
 }
 
 // ============================================================================
@@ -576,7 +684,7 @@ export async function runDebateBroker(
         modelFamily: "claude",
       };
 
-      const roles = options.reviewerRoles ?? ["critic", "analyst"];
+      const roles = options.reviewerRoles ?? ["critic", "architect"];
 
       // Select Reviewer 1 diverse against proposer
       const role1 = roles[0] ?? "critic";
@@ -599,7 +707,7 @@ export async function runDebateBroker(
 
       // Select Reviewer 2 diverse against Reviewer 1 and proposer
       if (roles.length > 1) {
-        const role2 = roles[1] ?? "analyst";
+        const role2 = roles[1] ?? "architect";
         const sel2 = selectDiverseReviewer(
           {
             harness: sel1.harness,
@@ -638,10 +746,16 @@ export async function runDebateBroker(
     );
 
     // 2. Round 1: Blind Openings in parallel via Promise.allSettled
+    const codeContext = buildDebateCodeContext(
+      options.projectRoot,
+      options.files,
+      options.includeDiff
+    );
     const round1Prompt = buildRound1Prompt(
       options.topic,
       options.proposal,
-      options.taskId
+      options.taskId,
+      codeContext
     );
     const effectiveTimeoutMs = options.timeoutMs ?? DEFAULT_DEBATE_TIMEOUT_MS;
     const effectiveIdleTimeoutMs =
@@ -922,7 +1036,7 @@ export async function runDebateBroker(
       let arbiterSpec: ReviewerSpec;
       if (options.arbiterRoute) {
         arbiterSpec = {
-          role: options.arbiterRoute.role ?? "arbiter",
+          role: options.arbiterRoute.role ?? ("arbiter" as AgentRole),
           harness: options.arbiterRoute.harness,
           model: options.arbiterRoute.model,
           modelFamily:
@@ -941,14 +1055,14 @@ export async function runDebateBroker(
             model: rejectLead.model,
             modelFamily: rejectLead.modelFamily,
           },
-          "arbiter",
+          "arbiter" as AgentRole,
           effectiveRoutingConfig,
           effectiveCapabilities
         );
         if (arbiterSel.diversityDegraded) diversityDegraded = true;
 
         arbiterSpec = {
-          role: "arbiter",
+          role: "arbiter" as AgentRole,
           harness: arbiterSel.harness,
           model: arbiterSel.model,
           modelFamily: arbiterSel.modelFamily,
@@ -961,7 +1075,8 @@ export async function runDebateBroker(
         options.topic,
         options.proposal,
         round1Bundle,
-        options.taskId
+        options.taskId,
+        codeContext
       );
       const r2SubSessionId = `${options.sessionId}-deb-${debateId}-r2-arbiter`;
       const r2CmdInfo = options.commandBuilder
@@ -1134,7 +1249,7 @@ export async function runDebateBroker(
         // Fallback resolution if Arbiter subagent crashes
         arbiterOpening = {
           reviewerId: "r2-arbiter-fallback",
-          role: "arbiter",
+          role: "arbiter" as AgentRole,
           harness: arbiterSpec.harness,
           model: arbiterSpec.model,
           modelFamily: arbiterSpec.modelFamily,

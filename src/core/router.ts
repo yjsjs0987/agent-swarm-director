@@ -34,15 +34,30 @@ export const DIVERSITY_DEGRADED_TAG =
   "[DIVERSITY_DEGRADED: single_model_family]" as const;
 
 export const SPECIALIST_ROLES: readonly AgentRole[] = [
-  "director",
   "planner",
-  "analyst",
-  "critic",
-  "arbiter",
   "architect",
   "scout",
-  "verifier",
+  "critic",
 ] as const;
+
+export function normalizeAgentRole(role?: string | null): AgentRole | undefined {
+  if (!role) return undefined;
+  const r = role.toLowerCase().trim();
+  if (r === "planner" || r === "director" || r === "analyst") return "planner";
+  if (r === "architect" || r === "arbiter") return "architect";
+  if (r === "worker" || r === "builder") return "worker";
+  if (r === "scout" || r === "verifier") return "scout";
+  if (r === "critic") return "critic";
+  return undefined;
+}
+
+export function normalizeDifficultyTier(diff?: string | null): DifficultyTier {
+  if (!diff) return "medium";
+  const d = diff.toLowerCase().trim();
+  if (d === "low" || d === "trivial") return "low";
+  if (d === "high" || d === "critical") return "high";
+  return "medium";
+}
 
 export const REGISTERED_DOMAIN_CATEGORIES: readonly DomainCategory[] = [
   "visual-ui",
@@ -465,11 +480,13 @@ function resolveBaseRoute(
   request: RouteRequest,
   cfg: RoutingConfig
 ): ResolvedRoute {
-  const role = request.role as AgentRole | undefined;
+  const role = normalizeAgentRole(request.role);
 
-  // Tier 2: Specialist role match (director, planner, analyst, critic, arbiter, architect, scout, verifier)
+  // Tier 2: Specialist role match (planner, architect, scout, critic)
   if (role && SPECIALIST_ROLES.includes(role)) {
-    const agentEntry = cfg.agents[role];
+    const agentEntry =
+      (request.role ? (cfg.agents as Record<string, RouteEntry | undefined>)[request.role] : undefined) ??
+      cfg.agents[role];
     if (agentEntry) {
       return {
         harness: agentEntry.harness,
@@ -481,11 +498,10 @@ function resolveBaseRoute(
     }
   }
 
-  // Tier 3: builder or worker + registered domain category (visual-ui, design, research, writing)
-  const isBuilderOrWorker =
-    !role || role === "builder" || role === "worker";
+  // Tier 3: worker + registered domain category (visual-ui, design, research, writing)
+  const isWorker = !role || role === "worker";
 
-  if (isBuilderOrWorker && request.category) {
+  if (isWorker && request.category) {
     const cat = request.category as DomainCategory;
     if (REGISTERED_DOMAIN_CATEGORIES.includes(cat)) {
       const catEntry = cfg.categories[cat];
@@ -501,10 +517,12 @@ function resolveBaseRoute(
     }
   }
 
-  // Tier 4: builder or worker + general (or unknown category) -> difficulty tier (trivial..critical)
-  const diffKey = (request.difficulty ?? "medium") as string;
+  // Tier 4: worker + general (or unknown category) -> difficulty tier (low, medium, high)
+  const rawDiffKey = (request.difficulty ?? "medium") as string;
+  const normDiffKey = normalizeDifficultyTier(rawDiffKey);
   const diffEntry =
-    cfg.categories[diffKey] ??
+    cfg.categories[rawDiffKey] ??
+    cfg.categories[normDiffKey] ??
     cfg.categories["general"] ??
     (role && cfg.agents[role]) ??
     cfg.agents.worker;
@@ -716,11 +734,12 @@ export function escalateTaskRoute(
  */
 export function selectDiverseReviewer(
   proposalRoute: ProposalRouteInput,
-  reviewerRole: AgentRole = "critic",
+  reviewerRole: AgentRole | string = "critic",
   routingConfig?: RoutingConfig,
   runtimeCapabilities?: RuntimeCapabilities
 ): DiverseReviewerSelection {
   const cfg = routingConfig ?? loadRoutingConfig(process.cwd());
+  const normalizedRole = normalizeAgentRole(reviewerRole) ?? "critic";
 
   const propFamily =
     proposalRoute.modelFamily ||
@@ -731,7 +750,9 @@ export function selectDiverseReviewer(
   const propHarness = proposalRoute.harness as HarnessId | undefined;
 
   // 1. Gather all reviewer candidates: primary + fallbacks of reviewerRole
-  const primaryRoleEntry = cfg.agents[reviewerRole];
+  const primaryRoleEntry =
+    (cfg.agents as Record<string, RouteEntry | undefined>)[reviewerRole] ??
+    cfg.agents[normalizedRole];
   const rawCandidates: Array<{
     harness: HarnessId;
     model: string;
@@ -753,11 +774,11 @@ export function selectDiverseReviewer(
     }
   }
 
-  // Also include the other reviewer roles (arbiter / critic / analyst / architect)
+  // Also include the other reviewer/specialist roles (architect / planner / critic)
   const peerRoles: AgentRole[] =
-    reviewerRole === "critic"
-      ? ["arbiter", "analyst", "architect"]
-      : ["critic", "analyst", "architect"];
+    normalizedRole === "critic"
+      ? ["architect", "planner"]
+      : ["critic", "architect", "planner"];
 
   for (const peer of peerRoles) {
     const peerEntry = cfg.agents[peer];

@@ -13,20 +13,15 @@ export const _asdVersion = "2.2.0" as const;
 export const ASD_VERSION = "2.2.0" as const;
 
 // ============================================================================
-// Agent Roles (10 standard roles)
+// Agent Roles (5 standard roles)
 // ============================================================================
 
 export const AGENT_ROLES = [
-  "director",
   "planner",
-  "analyst",
-  "critic",
-  "arbiter",
   "architect",
-  "builder",
   "worker",
   "scout",
-  "verifier",
+  "critic",
 ] as const;
 
 export type AgentRole = (typeof AGENT_ROLES)[number];
@@ -46,15 +41,13 @@ export const DOMAIN_CATEGORIES = [
 export type DomainCategory = (typeof DOMAIN_CATEGORIES)[number];
 
 // ============================================================================
-// Difficulty Tiers (5 tiers)
+// Difficulty Tiers (3 tiers)
 // ============================================================================
 
 export const DIFFICULTY_TIERS = [
-  "trivial",
   "low",
   "medium",
   "high",
-  "critical",
 ] as const;
 
 export type DifficultyTier = (typeof DIFFICULTY_TIERS)[number];
@@ -256,6 +249,8 @@ export interface AsdDebateInput {
   taskId?: string;
   topic: string;
   proposal: string;
+  files?: string[];
+  includeDiff?: boolean;
   harness?: HarnessId;
 }
 

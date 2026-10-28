@@ -22,6 +22,7 @@ import {
   formatDebateAcceptance,
   deduplicateStrings,
   buildDefaultHarnessCommand,
+  buildDebateCodeContext,
 } from "../src/core/debate.ts";
 import { openProjectDb, SqliteDriver } from "../src/core/db.ts";
 import type { CommandRunner, CommandRunnerRunOptions } from "../src/core/spawner.ts";
@@ -716,6 +717,69 @@ Hope this helps!
       assert.equal(parsed.verdict, "MINOR_AMEND");
       assert.deepEqual(parsed.hard_constraints, ["Preserve NDJSON compatibility"]);
       assert.deepEqual(parsed.decisions, ["Unwrap part.text before parsing"]);
+    });
+
+    test("embeds ground-truth source slices (--files) and adversarial evidence instructions into Round 1 prompt", async () => {
+      const projectRoot = makeProjectRoot();
+      const db = openProjectDb(projectRoot);
+      openDrivers.push(db);
+
+      const sampleFile = path.join(projectRoot, "src", "sample.ts");
+      fs.mkdirSync(path.dirname(sampleFile), { recursive: true });
+      fs.writeFileSync(
+        sampleFile,
+        [
+          "export function computeTotal(items: number[]): number {",
+          "  let sum = 0;",
+          "  for (const x of items) sum += x;",
+          "  return sum;",
+          "}",
+        ].join("\n"),
+        "utf8"
+      );
+
+      const ctx = buildDebateCodeContext(projectRoot, ["src/sample.ts:1-4"]);
+      assert.ok(ctx.includes("### File: src/sample.ts (Lines 1-4 of 5)"));
+      assert.ok(ctx.includes("1: export function computeTotal(items: number[]): number {"));
+      assert.ok(ctx.includes("4:   return sum;"));
+      assert.ok(!ctx.includes("5: }"));
+
+      let capturedPrompt = "";
+      const mockRunner: CommandRunner = {
+        async run(cmd, args, opts) {
+          capturedPrompt = args.join(" ");
+          opts.onSpawn?.(9009);
+          opts.onStdout(
+            JSON.stringify({
+              verdict: "MINOR_AMEND",
+              hard_constraints: ["src/sample.ts:3 must guard against NaN"],
+              decisions: ["Add Number.isFinite check at src/sample.ts:3"],
+              risks: ["NaN propagation in src/sample.ts:3"],
+              reasoning: "Verified against src/sample.ts:1-4",
+            })
+          );
+          return { exitCode: 0, pid: 9009 };
+        },
+      };
+
+      const result = await runDebateBroker({
+        projectRoot,
+        sessionId: "sess-code-context",
+        topic: "Audit computeTotal implementation",
+        proposal: "computeTotal has an off-by-one bug",
+        files: ["src/sample.ts:1-4"],
+        reviewerRoutes: [
+          { harness: "opencode", model: "glm-5", role: "critic" },
+        ],
+        commandRunner: mockRunner,
+        db,
+      });
+
+      assert.equal(result.verdict, "MINOR_AMEND");
+      assert.ok(capturedPrompt.includes("## Ground-Truth Source Code"));
+      assert.ok(capturedPrompt.includes("1: export function computeTotal"));
+      assert.ok(capturedPrompt.includes("UNVERIFIED hypothesis"));
+      assert.ok(capturedPrompt.includes("file:line"));
     });
   });
 });

@@ -242,60 +242,56 @@ export function resolveHarnessRoleModel(
   return match?.model;
 }
 
+const LEGACY_REMOVED_ROLES = [
+  "director",
+  "analyst",
+  "arbiter",
+  "builder",
+  "verifier",
+] as const;
+
+function cleanupLegacyAgentFiles(agentDir: string): void {
+  for (const legacyRole of LEGACY_REMOVED_ROLES) {
+    const legacyPath = path.join(agentDir, `asd-${legacyRole}.md`);
+    if (fs.existsSync(legacyPath)) {
+      try {
+        fs.unlinkSync(legacyPath);
+      } catch {
+        // Ignore removal error
+      }
+    }
+  }
+}
+
 export function generateAgentContent(
   role: AgentRole,
   opts?: { harnessId?: HarnessId; model?: string }
 ): string {
   const roleDescriptions: Record<AgentRole, { title: string; desc: string; focus: string }> = {
-    director: {
-      title: "Director",
-      desc: "Top-level orchestrator and supervisor. Plans high-level milestones, delegates tasks, and coordinates multi-agent delivery.",
-      focus: "End-to-end task flow, review gates, and final session summaries.",
-    },
     planner: {
       title: "Planner",
-      desc: "Task decomposition and dependency architect. Analyzes requirements and produces structured .asd/PLAN.md specifications.",
+      desc: "Task decomposition, requirements analysis, and orchestration architect. Produces structured .asd/PLAN.md specifications.",
       focus: "Turn scheduling, dependency graph resolution, allowedFiles boundaries, and verification criteria.",
-    },
-    analyst: {
-      title: "Analyst",
-      desc: "Requirements investigator and feasibility researcher. Dissects ambiguous prompts and identifies hidden risks.",
-      focus: "Context extraction, constraint mapping, and edge case enumeration.",
-    },
-    critic: {
-      title: "Critic",
-      desc: "Hostile adversarial evaluator. Challenges assumptions, surfaces blind spots, and stress-tests designs before implementation.",
-      focus: "Security boundaries, failure modes, over-engineering detection, and anti-pattern identification.",
-    },
-    arbiter: {
-      title: "Arbiter",
-      desc: "Debate judge and consensus synthesizer. Evaluates competing arguments during cross-model debate and issues binding decisions.",
-      focus: "Trade-off analysis, definitive arbitration (APPROVE/MINOR_AMEND/REJECT), and constraint synthesis.",
     },
     architect: {
       title: "Architect",
-      desc: "System designer and contract guardian. Defines interfaces, schemas, and cross-cutting architectural invariants.",
-      focus: "Modular boundaries, core purity, data structures, and architectural elegance.",
-    },
-    builder: {
-      title: "Builder",
-      desc: "Core implementation developer. Scaffolds new modules, authors interfaces, and implements complex multi-file features.",
-      focus: "Idiomatic code, type correctness, maintainable structure, and unit tests.",
+      desc: "System designer, escalation solver, and debate arbiter. Defines interfaces, resolves Round 2 conflicts, and handles complex architectural invariants.",
+      focus: "Modular boundaries, core purity, definitive arbitration (APPROVE/MINOR_AMEND/REJECT), and architectural elegance.",
     },
     worker: {
       title: "Worker",
-      desc: "Focused task executor. Handles scoped file modifications, bug fixes, refactoring, and test assertions.",
-      focus: "Strict allowedFiles compliance, minimal diffs, and rapid test verification.",
+      desc: "Core implementation and task executor. Handles feature implementation, scoped file modifications, bug fixes, refactoring, and unit tests.",
+      focus: "Idiomatic code, strict allowedFiles compliance, minimal diffs, and rapid test verification.",
     },
     scout: {
       title: "Scout",
-      desc: "Read-only codebase explorer. Maps repository layouts, finds symbol declarations, and retrieves existing patterns.",
-      focus: "Zero-mutation discovery, reference gathering, and context provision.",
+      desc: "Read-only codebase explorer and fast inspector. Maps repository layouts, finds symbol declarations, and retrieves existing patterns.",
+      focus: "Zero-mutation discovery, reference gathering, and concise context provision.",
     },
-    verifier: {
-      title: "Verifier",
-      desc: "Quality assurance inspector. Executes regression tests, audits git status boundaries, and validates acceptance criteria.",
-      focus: "Deterministic test execution, clean git diffs, and checkpoint validation.",
+    critic: {
+      title: "Critic",
+      desc: "Hostile adversarial evaluator. Challenges assumptions, cross-examines code evidence, surfaces blind spots, and stress-tests designs.",
+      focus: "Security boundaries, failure modes, over-engineering detection, and code-cited anti-pattern identification.",
     },
   };
 
@@ -867,8 +863,9 @@ export async function syncHarnessConfigs(
     switch (harnessId) {
       case "claude-code": {
         const claudeDir = path.join(homeDir, ".claude");
+        cleanupLegacyAgentFiles(path.join(claudeDir, "agents"));
 
-        // 10 agent files (with highest-priority claude-code model from routing.jsonc)
+        // 5 agent files (with highest-priority claude-code model from routing.jsonc)
         for (const role of AGENT_ROLES) {
           const agentPath = path.join(claudeDir, "agents", `asd-${role}.md`);
           const model = resolveHarnessRoleModel(role, "claude-code", routingConfig);
@@ -922,7 +919,8 @@ export async function syncHarnessConfigs(
           written.push(cmdPath);
         }
 
-        // 10 native OpenCode subagent files (with highest-priority opencode model from routing.jsonc)
+        // 5 native OpenCode subagent files (with highest-priority opencode model from routing.jsonc)
+        cleanupLegacyAgentFiles(path.join(opencodeDir, "agent"));
         for (const role of AGENT_ROLES) {
           const agentPath = path.join(opencodeDir, "agent", `asd-${role}.md`);
           const model = resolveHarnessRoleModel(role, "opencode", routingConfig);
@@ -997,8 +995,9 @@ export async function syncHarnessConfigs(
 
       case "antigravity": {
         const geminiDir = path.join(homeDir, ".gemini");
+        cleanupLegacyAgentFiles(path.join(geminiDir, "agents"));
 
-        // 10 agents (with highest-priority antigravity model from routing.jsonc)
+        // 5 agents (with highest-priority antigravity model from routing.jsonc)
         for (const role of AGENT_ROLES) {
           const agentPath = path.join(geminiDir, "agents", `asd-${role}.md`);
           const model = resolveHarnessRoleModel(role, "antigravity", routingConfig);

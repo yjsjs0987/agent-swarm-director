@@ -1,49 +1,14 @@
 // ASD v2.2 default model routing preset.
 // Bootstrapped to ~/.asd/routing.jsonc on first use; per-project
 // overrides live in <project>/.asd/routing.jsonc (1st priority).
-// Phase 2 refines these mappings with full 4-harness fallback chains.
+// 5 core agent roles (planner, architect, worker, scout, critic) +
+// domain categories & 3 difficulty tiers (low, medium, high).
 {
   "_asdVersion": "2.2.0",
   "agents": {
-    "director": {
-      "harness": "claude-code",
-      "model": "claude-opus-4-6",
-      "modelFamily": "claude",
-      "fallbacks": [
-        { "harness": "codex", "model": "gpt-5-codex", "modelFamily": "gpt" },
-        { "harness": "opencode", "model": "glm-5", "modelFamily": "glm" }
-      ]
-    },
     "planner": {
       "harness": "claude-code",
       "model": "claude-sonnet-4-6",
-      "modelFamily": "claude",
-      "fallbacks": [
-        { "harness": "codex", "model": "gpt-5-codex", "modelFamily": "gpt" },
-        { "harness": "opencode", "model": "glm-5", "modelFamily": "glm" }
-      ]
-    },
-    "analyst": {
-      "harness": "opencode",
-      "model": "glm-5",
-      "modelFamily": "glm",
-      "fallbacks": [
-        { "harness": "codex", "model": "gpt-5-codex", "modelFamily": "gpt" },
-        { "harness": "antigravity", "model": "gemini-3-pro", "modelFamily": "gemini" }
-      ]
-    },
-    "critic": {
-      "harness": "codex",
-      "model": "gpt-5-codex",
-      "modelFamily": "gpt",
-      "fallbacks": [
-        { "harness": "claude-code", "model": "claude-opus-4-6", "modelFamily": "claude" },
-        { "harness": "opencode", "model": "glm-5", "modelFamily": "glm" }
-      ]
-    },
-    "arbiter": {
-      "harness": "claude-code",
-      "model": "claude-opus-4-6",
       "modelFamily": "claude",
       "fallbacks": [
         { "harness": "codex", "model": "gpt-5-codex", "modelFamily": "gpt" },
@@ -57,15 +22,6 @@
       "fallbacks": [
         { "harness": "codex", "model": "gpt-5-codex", "modelFamily": "gpt" },
         { "harness": "opencode", "model": "glm-5", "modelFamily": "glm" }
-      ]
-    },
-    "builder": {
-      "harness": "opencode",
-      "model": "glm-5",
-      "modelFamily": "glm",
-      "fallbacks": [
-        { "harness": "codex", "model": "gpt-5-codex", "modelFamily": "gpt" },
-        { "harness": "antigravity", "model": "gemini-3-pro", "modelFamily": "gemini" }
       ]
     },
     "worker": {
@@ -86,12 +42,12 @@
         { "harness": "opencode", "model": "glm-5", "modelFamily": "glm" }
       ]
     },
-    "verifier": {
+    "critic": {
       "harness": "codex",
       "model": "gpt-5-codex",
       "modelFamily": "gpt",
       "fallbacks": [
-        { "harness": "claude-code", "model": "claude-sonnet-4-6", "modelFamily": "claude" },
+        { "harness": "claude-code", "model": "claude-opus-4-6", "modelFamily": "claude" },
         { "harness": "opencode", "model": "glm-5", "modelFamily": "glm" }
       ]
     }
@@ -142,15 +98,6 @@
         { "harness": "antigravity", "model": "gemini-3-flash", "modelFamily": "gemini" }
       ]
     },
-    "trivial": {
-      "harness": "antigravity",
-      "model": "gemini-3-flash-lite",
-      "modelFamily": "gemini",
-      "fallbacks": [
-        { "harness": "codex", "model": "gpt-5-codex", "modelFamily": "gpt" },
-        { "harness": "opencode", "model": "glm-5", "modelFamily": "glm" }
-      ]
-    },
     "low": {
       "harness": "antigravity",
       "model": "gemini-3-flash",
@@ -172,15 +119,6 @@
     "high": {
       "harness": "claude-code",
       "model": "claude-sonnet-4-6",
-      "modelFamily": "claude",
-      "fallbacks": [
-        { "harness": "codex", "model": "gpt-5-codex", "modelFamily": "gpt" },
-        { "harness": "opencode", "model": "glm-5", "modelFamily": "glm" }
-      ]
-    },
-    "critical": {
-      "harness": "claude-code",
-      "model": "claude-opus-4-6",
       "modelFamily": "claude",
       "fallbacks": [
         { "harness": "codex", "model": "gpt-5-codex", "modelFamily": "gpt" },

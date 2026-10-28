@@ -128,7 +128,7 @@ export const ASD_MCP_TOOLS = [
               category: { type: "string", description: "Domain category" },
               difficulty: {
                 type: "string",
-                enum: ["trivial", "low", "medium", "high", "critical"],
+                enum: ["low", "medium", "high"],
               },
               dependsOn: {
                 type: "array",
@@ -219,6 +219,16 @@ export const ASD_MCP_TOOLS = [
         taskId: { type: "string", description: "Optional associated task ID" },
         topic: { type: "string", description: "Debate topic" },
         proposal: { type: "string", description: "Proposal under critique" },
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional file paths or file:start-end line slices to embed as ground-truth source code.",
+        },
+        includeDiff: {
+          type: "boolean",
+          description: "Optional flag to embed git diff HEAD into the debate prompt.",
+        },
         harness: {
           type: "string",
           enum: ["claude-code", "opencode", "codex", "antigravity"],
@@ -1287,6 +1297,8 @@ export class AsdMcpServer {
       taskId: input.taskId,
       topic: input.topic,
       proposal: input.proposal,
+      files: input.files,
+      includeDiff: input.includeDiff,
       ...(input.harness
         ? { runtimeCapabilities: { availableHarnesses: [input.harness] } }
         : {}),
