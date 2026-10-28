@@ -596,6 +596,17 @@ export class AsdMcpServer {
             };
           })
         );
+        const autoMemo = (
+          (input as { title?: string }).title ||
+          input.tasks[0]?.title ||
+          ""
+        )
+          .trim()
+          .slice(0, 40);
+        if (autoMemo && !sessionRow.memo) {
+          this.db.updateSessionMemo(sessionId, autoMemo);
+          sessionRow = this.db.getSession(sessionId) ?? sessionRow;
+        }
       }
     } else if (action === "sync_from_md") {
       syncPlanFromMd(this.db, sessionId, paths.planMdPath);
@@ -613,6 +624,7 @@ export class AsdMcpServer {
       phase: sessionRow.phase as SessionPhase,
       pid: sessionRow.main_pid ?? process.pid,
       startedAt: new Date(sessionRow.created_at).toISOString(),
+      ...(sessionRow.memo ? { memo: sessionRow.memo } : {}),
     };
     atomicWriteFileSync(
       path.join(sessionDir, "main.json"),

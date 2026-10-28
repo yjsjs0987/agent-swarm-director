@@ -34,6 +34,7 @@ export interface SessionRow {
   base_sha: string | null;
   stashed_work_sha: string | null;
   no_progress_count: number;
+  memo?: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -44,6 +45,7 @@ export interface SessionInput {
   mainHarness: HarnessId;
   mainPid?: number | null;
   baseSha?: string | null;
+  memo?: string | null;
 }
 
 export interface TaskRow {
@@ -140,6 +142,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   base_sha TEXT,                          -- 세션 시작 시점의 Git HEAD SHA
   stashed_work_sha TEXT,                  -- Dirty tree auto-stash 수행 시 보관된 stash SHA
   no_progress_count INTEGER NOT NULL DEFAULT 0, -- Stop 훅 3회 무진전 서킷 브레이커 카운터
+  memo TEXT DEFAULT '',                   -- 세션 한 줄 메모 (.asd 내부 관리용)
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -203,6 +206,16 @@ export class SqliteDriver {
     this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(DDL);
+    try {
+      const cols = this.db
+        .prepare("PRAGMA table_info(sessions)")
+        .all() as Array<{ name?: string }>;
+      if (!cols.some((c) => c.name === "memo")) {
+        this.db.exec("ALTER TABLE sessions ADD COLUMN memo TEXT DEFAULT ''");
+      }
+    } catch {
+      // Ignore migration check error if table already matches
+    }
   }
 
   /**
@@ -250,16 +263,40 @@ export class SqliteDriver {
       .get() as unknown as SessionRow | undefined;
   }
 
+  /** Return all sessions ordered by created_at DESC (newest first). */
+  listSessions(): SessionRow[] {
+    return this.db
+      .prepare("SELECT * FROM sessions ORDER BY created_at DESC")
+      .all() as unknown as SessionRow[];
+  }
+
+  /** Update the short memo attached to a session. */
+  updateSessionMemo(sessionId: string, memo: string): void {
+    this.withImmediateTx(() => {
+      this.db
+        .prepare(
+          "UPDATE sessions SET memo = ?, updated_at = ? WHERE session_id = ?"
+        )
+        .run(memo, Date.now(), sessionId);
+    });
+  }
+
   /** Insert the session if absent; return the stored row either way. */
   createOrGetSession(session: SessionInput): SessionRow {
     return this.withImmediateTx(() => {
       const existing = this.getSession(session.sessionId);
-      if (existing) return existing;
+      if (existing) {
+        if (session.memo !== undefined && session.memo !== null && !existing.memo) {
+          this.updateSessionMemo(session.sessionId, session.memo);
+          return this.getSession(session.sessionId) ?? existing;
+        }
+        return existing;
+      }
       const now = Date.now();
       this.db
         .prepare(
-          `INSERT INTO sessions (session_id, project_root, main_harness, main_pid, phase, state_version, base_sha, no_progress_count, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'planning', 1, ?, 0, ?, ?)`
+          `INSERT INTO sessions (session_id, project_root, main_harness, main_pid, phase, state_version, base_sha, no_progress_count, memo, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'planning', 1, ?, 0, ?, ?, ?)`
         )
         .run(
           session.sessionId,
@@ -267,6 +304,7 @@ export class SqliteDriver {
           session.mainHarness,
           session.mainPid ?? null,
           session.baseSha ?? null,
+          session.memo ?? "",
           now,
           now
         );
@@ -525,6 +563,18 @@ export class SqliteDriver {
     return this.db
       .prepare("SELECT * FROM debates WHERE session_id = ? ORDER BY rowid DESC")
       .all(sessionId) as unknown as DebateRow[];
+  }
+
+  getAllDebates(): DebateRow[] {
+    return this.db
+      .prepare("SELECT * FROM debates ORDER BY rowid DESC")
+      .all() as unknown as DebateRow[];
+  }
+
+  getAllTasks(): TaskRow[] {
+    return this.db
+      .prepare("SELECT * FROM tasks ORDER BY turn, task_id")
+      .all() as unknown as TaskRow[];
   }
 
   createDebate(debate: DebateInput): void {

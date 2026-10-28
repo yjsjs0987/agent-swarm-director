@@ -659,11 +659,51 @@ describe("ASD CLI (src/cli/index.ts)", () => {
           assert.equal(stateRes.status, 200);
           const stateJson = (await stateRes.json()) as {
             session: { session_id: string };
+            sessions: Array<{ session_id: string; memo?: string }>;
             tasks: Array<{ task_id: string; title: string }>;
           };
           assert.equal(stateJson.session.session_id, "sess-ui-1");
+          assert.equal(stateJson.sessions.length, 1);
           assert.equal(stateJson.tasks.length, 1);
           assert.equal(stateJson.tasks[0]?.task_id, "T1.1");
+
+          // Update session memo via POST /api/session-memo and verify persistence in .asd
+          const memoRes = await fetch(`${handle.url}/api/session-memo`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: "sess-ui-1",
+              memo: "P0 보안 감사 토론",
+            }),
+          });
+          assert.equal(memoRes.status, 200);
+          const memoJson = (await memoRes.json()) as {
+            ok: boolean;
+            sessionId: string;
+            memo: string;
+          };
+          assert.equal(memoJson.ok, true);
+          assert.equal(memoJson.memo, "P0 보안 감사 토론");
+
+          const mainJsonFile = path.join(
+            uiProj,
+            ".asd",
+            "sessions",
+            "sess-ui-1",
+            "main.json"
+          );
+          assert.equal(fs.existsSync(mainJsonFile), true);
+          const mainMeta = JSON.parse(fs.readFileSync(mainJsonFile, "utf8")) as {
+            memo?: string;
+          };
+          assert.equal(mainMeta.memo, "P0 보안 감사 토론");
+
+          const stateAfter = (await (
+            await fetch(`${handle.url}/api/state`)
+          ).json()) as {
+            sessions: Array<{ session_id: string; memo?: string }>;
+          };
+          assert.equal(stateAfter.sessions[0]?.memo, "P0 보안 감사 토론");
         } finally {
           await handle.close();
         }

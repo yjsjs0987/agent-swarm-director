@@ -94,6 +94,7 @@ export interface MainSessionMeta {
   phase: SessionPhase;
   pid: number;
   startedAt: string;
+  memo?: string;
 }
 
 export interface SubagentSessionMeta {

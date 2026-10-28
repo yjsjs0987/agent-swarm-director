@@ -631,13 +631,18 @@ export async function runDebateBroker(
 
   try {
     // Ensure parent session row exists to satisfy SQLite foreign keys
-    if (!db.getSession(options.sessionId)) {
+    const defaultMemo = options.topic.trim().slice(0, 40);
+    const existingSession = db.getSession(options.sessionId);
+    if (!existingSession) {
       db.createOrGetSession({
         sessionId: options.sessionId,
         projectRoot: options.projectRoot,
         mainHarness:
           (options.proposerRoute?.harness as HarnessId) ?? "claude-code",
+        memo: defaultMemo,
       });
+    } else if (!existingSession.memo && defaultMemo) {
+      db.updateSessionMemo(options.sessionId, defaultMemo);
     }
 
     // Initialize debate record in SQLite (status = 'round1')
