@@ -255,6 +255,9 @@ export interface SubagentLogRecord {
   harness: string;
   model: string;
   status: string;
+  pid?: number;
+  worktreePath?: string | null;
+  allowedFiles?: string[];
   startedAt: number;
   finishedAt?: number;
   prompt: string;
@@ -303,6 +306,11 @@ export function scanSubagentLogs(projectRoot: string): SubagentLogRecord[] {
             harness: String(meta.harness ?? ""),
             model: String(meta.model ?? ""),
             status: String(meta.status ?? "unknown"),
+            pid: typeof meta.pid === "number" ? meta.pid : undefined,
+            worktreePath: typeof meta.worktreePath === "string" ? meta.worktreePath : null,
+            allowedFiles: Array.isArray(meta.allowedFiles)
+              ? meta.allowedFiles.map((x) => String(x))
+              : [],
             startedAt,
             finishedAt: typeof meta.finishedAt === "number" ? meta.finishedAt : undefined,
             prompt,

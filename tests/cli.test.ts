@@ -641,10 +641,52 @@ describe("ASD CLI (src/cli/index.ts)", () => {
         ]);
         db.close();
 
+        const subSeedDir = path.join(
+          uiProj,
+          ".asd",
+          "sessions",
+          "sess-ui-1",
+          "subagents",
+          "sub-1-T1.1"
+        );
+        fs.mkdirSync(subSeedDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(subSeedDir, "meta.json"),
+          JSON.stringify({
+            subSessionId: "sub-1-T1.1",
+            parentSessionId: "sess-ui-1",
+            roleType: "subagent",
+            role: "critic",
+            harness: "claude-code",
+            model: "claude-opus-4-6",
+            taskId: "T1.1",
+            pid: 0,
+            status: "running",
+            startedAt: Date.now(),
+          }),
+          "utf8"
+        );
+        fs.writeFileSync(path.join(subSeedDir, "prompt.md"), "Audit T1.1\n", "utf8");
+        fs.writeFileSync(path.join(subSeedDir, "output.log"), "Running...\n", "utf8");
+
         const handle = await startDashboardServer({
           port: 0,
           projectRoot: uiProj,
           homeDir: uiHome,
+          commandRunner: {
+            async run(_cmd, _args, opts) {
+              opts.onSpawn?.(4321);
+              opts.onStdout(
+                JSON.stringify({
+                  verdict: "APPROVE",
+                  hard_constraints: [],
+                  decisions: ["Web retry succeeded"],
+                  risks: [],
+                })
+              );
+              return { exitCode: 0, pid: 4321 };
+            },
+          },
         });
         try {
           const htmlRes = await fetch(`${handle.url}/`);
@@ -702,8 +744,97 @@ describe("ASD CLI (src/cli/index.ts)", () => {
             await fetch(`${handle.url}/api/state`)
           ).json()) as {
             sessions: Array<{ session_id: string; memo?: string }>;
+            hasLocalRouting: boolean;
+            routingConfig: Record<string, unknown>;
           };
           assert.equal(stateAfter.sessions[0]?.memo, "P0 보안 감사 토론");
+          assert.equal(stateAfter.hasLocalRouting, false);
+
+          // 2. Test project-scoped routing editor (POST /api/routing save & reset)
+          const customRouting = structuredClone(stateAfter.routingConfig) as {
+            _asdVersion: string;
+            agents: Record<string, { harness: string; model: string; fallbacks: unknown[] }>;
+            categories: Record<string, unknown>;
+          };
+          customRouting.agents.critic = {
+            harness: "codex",
+            model: "gpt-5.4",
+            fallbacks: [{ harness: "opencode", model: "glm-5" }],
+          };
+          const saveRtRes = await fetch(`${handle.url}/api/routing`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "save", routingConfig: customRouting }),
+          });
+          assert.equal(saveRtRes.status, 200);
+          const localRtFile = path.join(uiProj, ".asd", "routing.jsonc");
+          assert.equal(fs.existsSync(localRtFile), true);
+
+          // 3. Test 4 subagent control options (kill, retry, fallback, custom)
+          const killRes = await fetch(`${handle.url}/api/subagent-action`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: "sess-ui-1",
+              subSessionId: "sub-1-T1.1",
+              action: "kill",
+            }),
+          });
+          assert.equal(killRes.status, 200);
+          const killJson = (await killRes.json()) as { status: string };
+          assert.equal(killJson.status, "failed");
+
+          const fbRes = await fetch(`${handle.url}/api/subagent-action`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: "sess-ui-1",
+              subSessionId: "sub-1-T1.1",
+              action: "fallback",
+              waitForCompletion: true,
+            }),
+          });
+          assert.equal(fbRes.status, 200);
+          const fbJson = (await fbRes.json()) as {
+            ok: boolean;
+            harness: string;
+            model: string;
+            newSubSessionId: string;
+          };
+          assert.equal(fbJson.ok, true);
+          assert.equal(fbJson.harness, "codex");
+          assert.equal(fbJson.model, "gpt-5.4");
+          assert.ok(fbJson.newSubSessionId.startsWith("sub-1-T1.1-fb-"));
+
+          const customRunRes = await fetch(`${handle.url}/api/subagent-action`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              sessionId: "sess-ui-1",
+              subSessionId: "sub-1-T1.1",
+              action: "custom",
+              harness: "antigravity",
+              model: "gemini-3.1-pro",
+              waitForCompletion: true,
+            }),
+          });
+          assert.equal(customRunRes.status, 200);
+          const customRunJson = (await customRunRes.json()) as {
+            ok: boolean;
+            harness: string;
+            model: string;
+          };
+          assert.equal(customRunJson.ok, true);
+          assert.equal(customRunJson.harness, "antigravity");
+          assert.equal(customRunJson.model, "gemini-3.1-pro");
+
+          const resetRtRes = await fetch(`${handle.url}/api/routing`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ action: "reset" }),
+          });
+          assert.equal(resetRtRes.status, 200);
+          assert.equal(fs.existsSync(localRtFile), false);
         } finally {
           await handle.close();
         }
