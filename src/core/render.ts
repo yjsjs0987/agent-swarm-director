@@ -12,7 +12,6 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { resolveAsdPaths } from "./config.ts";
 import { redactSecrets } from "./redact.ts";
 import type {
@@ -35,7 +34,7 @@ import type {
 // ============================================================================
 
 export const TASK_LINE_REGEX =
-  /^- \[([ x~])\] \*\*(T(\d+)\.\d+)\*\* \[(?:Turn:\s*(\d+)\s*\|\s*)?Track:\s*(LIGHT|HEAVY)\s*\|\s*Role:\s*([a-z]+)\s*\|\s*Cat:\s*([a-z-]+)\s*\|\s*Diff:\s*([a-z]+)(?:\s*\|\s*Files:\s*([^\]]*))?\]:\s*(.+?)(?:\s*\(Files:\s*([^|)]*?)(?:\s*\|\s*Hint:\s*([^)]*))?\))?$/;
+  /^- \[([ x~])\] \*\*(T(?:-)?(\d+)(?:\.\d+|-\d+)?)\*\* \[(?:Turn:\s*(\d+)\s*\|\s*)?Track:\s*(LIGHT|HEAVY)\s*\|\s*Role:\s*([a-z]+)\s*\|\s*Cat:\s*([a-z-]+)\s*\|\s*Diff:\s*([a-z]+)(?:\s*\|\s*Files:\s*([^\]]*))?\]:\s*(.+?)(?:\s*\(Files:\s*([^|)]*?)(?:\s*\|\s*Hint:\s*([^)]*))?\))?$/;
 
 // ============================================================================
 // Parsed Task Interface
@@ -272,7 +271,9 @@ export function parsePlanMd(markdownText: string): ParsedPlanTask[] {
     if (regexMatch) {
       const marker = regexMatch[1]!;
       const taskId = regexMatch[2]!;
-      const turnFromId = parseInt(regexMatch[3]!, 10);
+      const turnFromId = taskId.includes(".")
+        ? parseInt(regexMatch[3]!, 10)
+        : undefined;
       const turnFromBracket = regexMatch[4]
         ? parseInt(regexMatch[4], 10)
         : undefined;
@@ -515,6 +516,15 @@ export function syncPlanFromMd(
       existingTasks.map((t) => [t.task_id, t])
     );
 
+    if (parsedTasks.length > 0) {
+      const parsedIds = new Set(parsedTasks.map((t) => t.taskId));
+      for (const existing of existingTasks) {
+        if (!parsedIds.has(existing.task_id)) {
+          db.deleteTask(sessionId, existing.task_id);
+        }
+      }
+    }
+
     for (const parsed of parsedTasks) {
       const existing = existingMap.get(parsed.taskId);
       const taskInput: TaskInput = {
@@ -529,6 +539,7 @@ export function syncPlanFromMd(
         targetFiles: parsed.targetFiles,
         contextHint: parsed.contextHint,
         acceptance: parsed.acceptance ?? existing?.acceptance ?? null,
+        verifyCmd: existing?.verify_cmd ?? null,
       };
 
       db.upsertTasks(sessionId, [taskInput]);
@@ -558,12 +569,7 @@ export function syncPlanFromMd(
     }
 
     // Increment sessions.state_version
-    const rawDb = (db as unknown as { db: DatabaseSync }).db;
-    rawDb
-      .prepare(
-        "UPDATE sessions SET state_version = state_version + 1, updated_at = ? WHERE session_id = ?"
-      )
-      .run(Date.now(), sessionId);
+    db.incrementStateVersion(sessionId);
   });
 
   return parsedTasks;

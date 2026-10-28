@@ -25,8 +25,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { parseJsonc, removeTomlFence } from "../core/jsonc.ts";
+import { parseJsonc } from "../core/jsonc.ts";
 import { evaluatePreToolUse } from "../core/policy.ts";
+import { resolveBinaryOnPath } from "../core/router.ts";
 import {
   AGENT_ROLES,
   ASD_VERSION,
@@ -50,6 +51,7 @@ import {
   CodexAdapter,
   codexAdapter,
   mergeCodexConfigToml,
+  removeCodexConfigToml,
 } from "./codex.ts";
 import {
   OpencodeAdapter,
@@ -204,10 +206,15 @@ function restoreUserBackup(filePath: string): boolean {
 // ============================================================================
 
 export function getSkillTemplate(skillName: string): string {
-  const skillsDir = path.join(getAsdRoot(), "src", "skills", skillName, "SKILL.md");
+  const canonicalName = skillName === "asd-handoff" ? "handoff" : skillName;
+  const skillsDir = path.join(getAsdRoot(), "src", "skills", canonicalName, "SKILL.md");
   try {
     if (fs.existsSync(skillsDir)) {
-      return fs.readFileSync(skillsDir, "utf8");
+      const content = fs.readFileSync(skillsDir, "utf8");
+      if (skillName === "asd-handoff") {
+        return content.replace(/^name:\s*handoff$/m, "name: asd-handoff");
+      }
+      return content;
     }
   } catch {
     // Ignore unreadable file
@@ -975,7 +982,7 @@ export async function syncHarnessConfigs(
             existingToml = "";
           }
         }
-        const unmanagedToml = removeTomlFence(existingToml);
+        const unmanagedToml = removeCodexConfigToml(existingToml);
         const managedTomlBlock = buildCodexManagedTomlBlock({
           unmanagedToml,
           catalog: catalogMcpServers,
@@ -1323,7 +1330,7 @@ export async function uninstallHarnessConfigs(
   if (fs.existsSync(configToml)) {
     try {
       const raw = fs.readFileSync(configToml, "utf8");
-      const cleaned = removeTomlFence(raw);
+      const cleaned = removeCodexConfigToml(raw);
       removeBackupFile(configToml);
       if (cleaned.trim() === "") {
         removeFile(configToml, "codex");
@@ -1423,26 +1430,6 @@ export const runAsdUninstall = uninstallHarnessConfigs;
 // ============================================================================
 // Doctor Probe: Fast <100ms Zero-Token Diagnostic
 // ============================================================================
-
-function resolveBinaryOnPath(binaryName: string): string | null {
-  const pathEnv = process.env.PATH || process.env.Path || "";
-  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
-  const extensions = process.platform === "win32" ? [".exe", ".cmd", ".bat", ".ps1", ""] : [""];
-
-  for (const dir of dirs) {
-    for (const ext of extensions) {
-      const fullPath = path.join(dir, binaryName + ext);
-      try {
-        if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
-          return fullPath;
-        }
-      } catch {
-        // Ignore permission or file system errors during probe
-      }
-    }
-  }
-  return null;
-}
 
 export async function doctorProbe(
   options?: DoctorProbeOptions

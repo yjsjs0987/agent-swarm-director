@@ -178,6 +178,33 @@ export function normalizeAntigravityModel(
 }
 
 /**
+ * Resolves the absolute path of a binary on PATH across POSIX and Windows.
+ */
+export function resolveBinaryOnPath(
+  binaryName: string,
+  env: Record<string, string | undefined> = process.env
+): string | null {
+  const pathEnv = env.PATH || env.Path || process.env.PATH || process.env.Path || "";
+  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
+  const extensions =
+    process.platform === "win32" ? [".exe", ".cmd", ".bat", ".ps1", ""] : [""];
+
+  for (const dir of dirs) {
+    for (const ext of extensions) {
+      const fullPath = path.join(dir, binaryName + ext);
+      try {
+        if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
+          return fullPath;
+        }
+      } catch {
+        // Ignore permission or file system errors during probe
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Detects which CLI harnesses (`claude-code`, `opencode`, `codex`) are installed
  * on the current system PATH. Used during live subagent routing and debates so
  * uninstalled harnesses are skipped automatically.
@@ -185,8 +212,6 @@ export function normalizeAntigravityModel(
 export function detectAvailableCliHarnesses(
   env: Record<string, string | undefined> = process.env
 ): HarnessId[] {
-  const pathEnv = env.PATH || env.Path || process.env.PATH || process.env.Path || "";
-  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
   const candidates: Array<{ harness: HarnessId; bin: string }> = [
     { harness: "claude-code", bin: "claude" },
     { harness: "opencode", bin: "opencode" },
@@ -195,24 +220,7 @@ export function detectAvailableCliHarnesses(
 
   const found: HarnessId[] = [];
   for (const { harness, bin } of candidates) {
-    let exists = false;
-    for (const dir of dirs) {
-      if (process.platform === "win32") {
-        if (
-          fs.existsSync(path.join(dir, `${bin}.cmd`)) ||
-          fs.existsSync(path.join(dir, `${bin}.exe`)) ||
-          fs.existsSync(path.join(dir, `${bin}.bat`)) ||
-          fs.existsSync(path.join(dir, bin))
-        ) {
-          exists = true;
-          break;
-        }
-      } else if (fs.existsSync(path.join(dir, bin))) {
-        exists = true;
-        break;
-      }
-    }
-    if (exists) {
+    if (resolveBinaryOnPath(bin, env)) {
       found.push(harness);
     }
   }
@@ -288,12 +296,24 @@ export function inferModelFamily(model: string, harness?: HarnessId): string {
  * with `claim_only` mode). If headless CLI spawn is unavailable, automatically falls back
  * to the first available CLI harness (`@cc`, `@oc`, `@cx`) in `fallbacks`.
  */
+function allConfigEntries(cfg: RoutingConfig): RouteEntry[] {
+  return [...Object.values(cfg.agents), ...Object.values(cfg.categories)];
+}
+
+function inferHarnessFromFamily(family: string): HarnessId {
+  if (family === "claude") return "claude-code";
+  if (family === "gpt") return "codex";
+  if (family === "gemini") return "antigravity";
+  return "opencode";
+}
+
 export function resolveRoute(
   request: RouteRequest,
   routingConfig?: RoutingConfig,
   runtimeCapabilities?: RuntimeCapabilities
 ): ResolvedRoute {
   const cfg = routingConfig ?? loadRoutingConfig(process.cwd());
+  const entries = allConfigEntries(cfg);
   let resolved: ResolvedRoute;
 
   // --------------------------------------------------------------------------
@@ -303,75 +323,26 @@ export function resolveRoute(
     if (request.harness && request.model) {
       const h = request.harness as HarnessId;
       const m = request.model;
-      // Search config to inherit known fallbacks or modelFamily if present
-      let matchedFamily: string | undefined;
-      let matchedFallbacks: Array<{
-        harness: HarnessId;
-        model: string;
-        modelFamily: string;
-      }> = [];
-
-      for (const entry of [
-        ...Object.values(cfg.agents),
-        ...Object.values(cfg.categories),
-      ]) {
-        if (entry.harness === h && entry.model === m) {
-          matchedFamily = entry.modelFamily;
-          matchedFallbacks = [...entry.fallbacks];
-          break;
-        }
-      }
-
+      const match = entries.find((e) => e.harness === h && e.model === m);
       resolved = {
         harness: h,
         model: m,
-        modelFamily: matchedFamily ?? inferModelFamily(m, h),
-        fallbacks: matchedFallbacks,
+        modelFamily: match?.modelFamily ?? inferModelFamily(m, h),
+        fallbacks: match ? [...match.fallbacks] : [],
         tier: 1,
       };
     } else if (request.model && !request.harness) {
-      // Model given, harness omitted: find matching entry in config or infer
       const m = request.model;
-      let matchedHarness: HarnessId | undefined;
-      let matchedFamily: string | undefined;
-      let matchedFallbacks: Array<{
-        harness: HarnessId;
-        model: string;
-        modelFamily: string;
-      }> = [];
-
-      for (const entry of [
-        ...Object.values(cfg.agents),
-        ...Object.values(cfg.categories),
-      ]) {
-        if (entry.model === m) {
-          matchedHarness = entry.harness;
-          matchedFamily = entry.modelFamily;
-          matchedFallbacks = [...entry.fallbacks];
-          break;
-        }
-      }
-
-      const inferredFamily = matchedFamily ?? inferModelFamily(m);
-      const h: HarnessId =
-        matchedHarness ??
-        (inferredFamily === "claude"
-          ? "claude-code"
-          : inferredFamily === "gpt"
-            ? "codex"
-            : inferredFamily === "gemini"
-              ? "antigravity"
-              : "opencode");
-
+      const match = entries.find((e) => e.model === m);
+      const inferredFamily = match?.modelFamily ?? inferModelFamily(m);
       resolved = {
-        harness: h,
+        harness: match?.harness ?? inferHarnessFromFamily(inferredFamily),
         model: m,
         modelFamily: inferredFamily,
-        fallbacks: matchedFallbacks,
+        fallbacks: match ? [...match.fallbacks] : [],
         tier: 1,
       };
     } else {
-      // Harness given, model omitted: resolve base route from Tier 2-4 and adapt
       const h = request.harness as HarnessId;
       const base = resolveBaseRoute(
         { ...request, harness: undefined, model: undefined },
@@ -383,40 +354,30 @@ export function resolveRoute(
       } else {
         const matchingFallback = base.fallbacks.find((fb) => fb.harness === h);
         if (matchingFallback) {
-          const remainingFallbacks = base.fallbacks.filter(
-            (fb) => fb !== matchingFallback
-          );
           resolved = {
             harness: matchingFallback.harness,
             model: matchingFallback.model,
             modelFamily: matchingFallback.modelFamily,
-            fallbacks: remainingFallbacks,
+            fallbacks: base.fallbacks.filter((fb) => fb !== matchingFallback),
             tier: 1,
           };
         } else {
-          // Find any route with this harness in config
-          const matchInConfig = [
-            ...Object.values(cfg.agents),
-            ...Object.values(cfg.categories),
-          ].find((e) => e.harness === h);
-
-          if (matchInConfig) {
-            resolved = {
-              harness: h,
-              model: matchInConfig.model,
-              modelFamily: matchInConfig.modelFamily,
-              fallbacks: [...matchInConfig.fallbacks],
-              tier: 1,
-            };
-          } else {
-            resolved = {
-              harness: h,
-              model: base.model,
-              modelFamily: inferModelFamily(base.model, h),
-              fallbacks: base.fallbacks,
-              tier: 1,
-            };
-          }
+          const matchInConfig = entries.find((e) => e.harness === h);
+          resolved = matchInConfig
+            ? {
+                harness: h,
+                model: matchInConfig.model,
+                modelFamily: matchInConfig.modelFamily,
+                fallbacks: [...matchInConfig.fallbacks],
+                tier: 1,
+              }
+            : {
+                harness: h,
+                model: base.model,
+                modelFamily: inferModelFamily(base.model, h),
+                fallbacks: base.fallbacks,
+                tier: 1,
+              };
         }
       }
     }
@@ -428,12 +389,7 @@ export function resolveRoute(
   }
 
   // --------------------------------------------------------------------------
-  // @ag Headless Spawn Asymmetry & Uninstalled CLI Harness Fallback:
-  // 1. When spawning a subagent (isSubagentSpawn: true) and selected harness is
-  //    "antigravity", check if headless CLI spawn is available.
-  // 2. When spawning a CLI subagent (mode !== "claim_only") and
-  //    runtimeCapabilities.availableHarnesses is provided, if resolved.harness
-  //    is not installed, automatically fall back to the first available harness.
+  // @ag Headless Spawn Asymmetry & Uninstalled CLI Harness Fallback
   // --------------------------------------------------------------------------
   if (request.isSubagentSpawn) {
     const headlessSupported = Boolean(
@@ -452,32 +408,26 @@ export function resolveRoute(
       !avail.includes(resolved.harness);
 
     if (needsAgFallback || needsCliAvailabilityFallback) {
-      const fallback = resolved.fallbacks.find((fb) => {
-        if (!CLI_HARNESSES.includes(fb.harness)) return false;
-        if (avail && avail.length > 0 && !avail.includes(fb.harness)) {
-          return false;
-        }
-        return true;
-      });
+      const fallback = resolved.fallbacks.find(
+        (fb) =>
+          CLI_HARNESSES.includes(fb.harness) &&
+          (!avail || avail.length === 0 || avail.includes(fb.harness))
+      );
 
       if (fallback) {
-        const remainingFallbacks = resolved.fallbacks.filter(
-          (fb) => fb !== fallback && fb.harness !== "antigravity"
-        );
         resolved = {
           harness: fallback.harness,
           model: fallback.model,
           modelFamily: fallback.modelFamily,
-          fallbacks: remainingFallbacks,
+          fallbacks: resolved.fallbacks.filter(
+            (fb) => fb !== fallback && fb.harness !== "antigravity"
+          ),
           tier: resolved.tier,
           fallbackApplied: true,
         };
       } else if (avail && avail.length > 0) {
         const targetHarness = avail[0]!;
-        const matchInConfig = [
-          ...Object.values(cfg.agents),
-          ...Object.values(cfg.categories),
-        ].find((e) => e.harness === targetHarness);
+        const matchInConfig = entries.find((e) => e.harness === targetHarness);
         resolved = {
           harness: targetHarness,
           model: matchInConfig?.model ?? "default",
@@ -488,9 +438,7 @@ export function resolveRoute(
           fallbackApplied: true,
         };
       } else {
-        // Fallback to standard CLI medium category / worker route
-        const defaultCli =
-          cfg.categories["medium"] ?? cfg.agents.worker;
+        const defaultCli = cfg.categories["medium"] ?? cfg.agents.worker;
         if (defaultCli && defaultCli.harness !== "antigravity") {
           resolved = {
             harness: defaultCli.harness,

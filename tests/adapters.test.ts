@@ -305,7 +305,7 @@ describe("Harness Adapters", () => {
       assert.ok(targets.includes(path.join(mockHome, ".claude", ".mcp.json")));
     });
 
-    test("opencode targets include opencode.json, 5 commands, and AGENTS.md", () => {
+    test("opencode targets include opencode.json, 5 commands, 10 roles, and AGENTS.md", () => {
       const adapter = new OpencodeAdapter();
       const targets = adapter.globalConfigTargets(mockHome);
 
@@ -313,6 +313,10 @@ describe("Harness Adapters", () => {
       for (const skill of ASD_SKILLS) {
         const expected = path.join(mockHome, ".config", "opencode", "command", `${skill}.md`);
         assert.ok(targets.includes(expected), `Missing command target: ${expected}`);
+      }
+      for (const role of AGENT_ROLES) {
+        const expected = path.join(mockHome, ".config", "opencode", "agent", `asd-${role}.md`);
+        assert.ok(targets.includes(expected), `Missing agent target: ${expected}`);
       }
       assert.ok(targets.includes(path.join(mockHome, ".config", "opencode", "AGENTS.md")));
     });
@@ -329,7 +333,7 @@ describe("Harness Adapters", () => {
       assert.ok(targets.includes(path.join(mockHome, ".codex", "AGENTS.md")));
     });
 
-    test("antigravity targets include 10 roles, 5 skills, hooks.json, and mcp_config.json", () => {
+    test("antigravity targets include 10 roles, 5 skills, hooks.json, and both mcp_config.json paths", () => {
       const adapter = new AntigravityAdapter({ supportsHeadlessSpawn: false });
       const targets = adapter.globalConfigTargets(mockHome);
 
@@ -343,6 +347,7 @@ describe("Harness Adapters", () => {
       }
       assert.ok(targets.includes(path.join(mockHome, ".gemini", "hooks.json")));
       assert.ok(targets.includes(path.join(mockHome, ".gemini", "mcp_config.json")));
+      assert.ok(targets.includes(path.join(mockHome, ".gemini", "config", "mcp_config.json")));
     });
   });
 

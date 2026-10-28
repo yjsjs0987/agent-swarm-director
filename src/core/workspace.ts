@@ -25,11 +25,13 @@
 import * as child_process from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { ensureProjectInitialized } from "./config.ts";
+import { ensureGitExclude, ensureProjectInitialized, getGitExcludePath } from "./config.ts";
 import type { SqliteDriver } from "./db.ts";
 import { verifyChangedFilesBoundary } from "./policy.ts";
-import { redactSecrets } from "./redact.ts";
+import { hasLeakedSecrets } from "./redact.ts";
 import type { TaskStatus } from "./types.ts";
+
+export { ensureGitExclude, getGitExcludePath };
 
 // ============================================================================
 // Types & Interfaces
@@ -174,52 +176,6 @@ export function ensureGitUserIdentity(cwd: string): void {
   const emailRes = runGit(["config", "user.email"], { cwd });
   if (!emailRes.stdout.trim()) {
     runGit(["config", "user.email", "asd@local"], { cwd });
-  }
-}
-
-/**
- * Resolves the path to git exclude file for both normal repositories (.git/info/exclude)
- * and worktrees (.git/worktrees/<wt>/info/exclude or linked gitdir).
- */
-export function getGitExcludePath(dir: string): string | null {
-  const gitPath = path.join(dir, ".git");
-  if (!fs.existsSync(gitPath)) return null;
-
-  try {
-    const stat = fs.statSync(gitPath);
-    let gitDir = gitPath;
-    if (stat.isFile()) {
-      const content = fs.readFileSync(gitPath, "utf8");
-      const match = content.match(/^gitdir:\s*(.+)$/m);
-      if (match && match[1]) {
-        gitDir = path.resolve(dir, match[1].trim());
-      }
-    }
-    return path.join(gitDir, "info", "exclude");
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Ensures a specific pattern is added to git exclude if not already present.
- */
-export function ensureGitExclude(dir: string, pattern: string): void {
-  const excludePath = getGitExcludePath(dir);
-  if (!excludePath) return;
-
-  try {
-    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-    let content = "";
-    if (fs.existsSync(excludePath)) {
-      content = fs.readFileSync(excludePath, "utf8");
-      const lines = content.split(/\r?\n/).map((l) => l.trim());
-      if (lines.includes(pattern.trim())) return;
-    }
-    const sep = content === "" || content.endsWith("\n") ? "" : "\n";
-    fs.writeFileSync(excludePath, `${content}${sep}${pattern.trim()}\n`, "utf8");
-  } catch {
-    // best-effort
   }
 }
 
@@ -385,8 +341,7 @@ export function checkChangedFilesAndSecrets(
     try {
       if (fs.existsSync(absPath) && fs.statSync(absPath).isFile()) {
         const content = fs.readFileSync(absPath, "utf8");
-        const redacted = redactSecrets(content);
-        if (redacted !== content) {
+        if (hasLeakedSecrets(content)) {
           violations.push(
             `File '${relFile}' contains leaked secrets or credentials matching redact patterns`
           );

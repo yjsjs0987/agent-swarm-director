@@ -604,3 +604,43 @@ describe("HEAVY Track Worktree Lifecycle", () => {
     assert.ok(!fs.existsSync(path.join(root, "good.txt")));
   });
 });
+
+
+describe("Secret Scan False-Positive Guard (P0 Issue 6a)", () => {
+  test("does NOT falsely flag TypeScript type annotations or property accesses as leaked secrets", () => {
+    const root = makeTmpDir("asd-no-fp-secret-");
+    initGitRepo(root);
+    prepareBaseline(root);
+
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, "src", "auth.ts"),
+      [
+        "export interface AuthHeader {",
+        "  token: string;",
+        "  password: boolean;",
+        "  secret: number;",
+        "  api_key: string;",
+        "}",
+        "export function extractAuth(req: { token: string; password: string }) {",
+        "  const token = req.token;",
+        "  const password = req.password;",
+        "  return { token, password };",
+        "}",
+      ].join("\n"),
+      "utf8"
+    );
+
+    const res = verifyAndCommitLightTask({
+      projectRoot: root,
+      taskId: "T1.9",
+      title: "auth types without false-positive rollback",
+      allowedFiles: ["src/auth.ts"],
+      verifyCmd: null,
+    });
+
+    assert.equal(res.verified, true, `Should pass without false-positive secret rollback: ${res.error}`);
+    assert.equal(res.rollbackPerformed, false);
+    assert.ok(fs.existsSync(path.join(root, "src", "auth.ts")));
+  });
+});

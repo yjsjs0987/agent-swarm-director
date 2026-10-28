@@ -479,7 +479,7 @@ export function evaluatePreToolUse(
     if (
       cmdLower.includes(".git/") ||
       cmdLower.includes(".git\\") ||
-      /\b\.git\b/.test(cmdLower)
+      /(?:^|[\s"'`/\\])\.git(?:[/\\]|[\s"'`]|$)/.test(cmdLower)
     ) {
       return {
         allowed: false,
@@ -491,7 +491,7 @@ export function evaluatePreToolUse(
       if (
         cmdLower.includes(".asd/") ||
         cmdLower.includes(".asd\\") ||
-        /\b\.asd\b/.test(cmdLower)
+        /(?:^|[\s"'`/\\])\.asd(?:[/\\]|[\s"'`]|$)/.test(cmdLower)
       ) {
         return {
           allowed: false,

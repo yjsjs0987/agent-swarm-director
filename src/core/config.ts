@@ -138,6 +138,52 @@ export function loadRoutingConfig(
 }
 
 /**
+ * Resolves the path to git exclude file for both normal repositories (.git/info/exclude)
+ * and worktrees (.git/worktrees/<wt>/info/exclude or linked gitdir).
+ */
+export function getGitExcludePath(dir: string): string | null {
+  const gitPath = path.join(dir, ".git");
+  if (!fs.existsSync(gitPath)) return null;
+
+  try {
+    const stat = fs.statSync(gitPath);
+    let gitDir = gitPath;
+    if (stat.isFile()) {
+      const content = fs.readFileSync(gitPath, "utf8");
+      const match = content.match(/^gitdir:\s*(.+)$/m);
+      if (match && match[1]) {
+        gitDir = path.resolve(dir, match[1].trim());
+      }
+    }
+    return path.join(gitDir, "info", "exclude");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ensures a specific pattern is added to git exclude if not already present.
+ */
+export function ensureGitExclude(dir: string, pattern: string): void {
+  const excludePath = getGitExcludePath(dir);
+  if (!excludePath) return;
+
+  try {
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    let content = "";
+    if (fs.existsSync(excludePath)) {
+      content = fs.readFileSync(excludePath, "utf8");
+      const lines = content.split(/\r?\n/).map((l) => l.trim());
+      if (lines.includes(pattern.trim())) return;
+    }
+    const sep = content === "" || content.endsWith("\n") ? "" : "\n";
+    fs.writeFileSync(excludePath, `${content}${sep}${pattern.trim()}\n`, "utf8");
+  } catch {
+    // best-effort
+  }
+}
+
+/**
  * Lazy Project Auto-Init: create <project>/.asd/{wt,sessions} and
  * <home>/.asd/state/<hash>/, and register `.asd/` in .git/info/exclude
  * when the project is a git repo. Idempotent.
@@ -150,15 +196,5 @@ export function ensureProjectInitialized(
   fs.mkdirSync(paths.worktreesDir, { recursive: true });
   fs.mkdirSync(paths.sessionsDir, { recursive: true });
   fs.mkdirSync(path.dirname(paths.dbPath), { recursive: true });
-
-  const gitInfoDir = path.join(projectRoot, ".git", "info");
-  if (!fs.existsSync(gitInfoDir)) return;
-  const excludePath = path.join(gitInfoDir, "exclude");
-  let content = "";
-  if (fs.existsSync(excludePath)) {
-    content = fs.readFileSync(excludePath, "utf8");
-    if (content.split(/\r?\n/).some((l) => l.trim() === ".asd/")) return;
-  }
-  const sep = content === "" || content.endsWith("\n") ? "" : "\n";
-  fs.writeFileSync(excludePath, `${content}${sep}.asd/\n`);
+  ensureGitExclude(projectRoot, ".asd/");
 }

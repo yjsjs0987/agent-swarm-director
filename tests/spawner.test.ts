@@ -184,6 +184,33 @@ describe("spawner.ts", () => {
     await waitForExit(pid);
   });
 
+  test("idleTimeoutMs resets while tokens stream and aborts when output stalls", async () => {
+    const projectRoot = makeProjectRoot();
+    const result = await spawnSubagent({
+      projectRoot,
+      mainSessionId: "main-idle",
+      subSessionId: "sub-idle",
+      role: "worker",
+      harness: "opencode",
+      model: "glm-5",
+      taskId: "T-IDLE",
+      prompt: "emit once then stall",
+      allowedFiles: [],
+      command: process.execPath,
+      args: ["-e", "console.log('token-1'); setTimeout(()=>{}, 10000)"],
+      timeoutMs: 5000,
+      idleTimeoutMs: 250,
+    });
+
+    assert.equal(result.timedOut, true);
+    assert.equal(result.exitCode, -1);
+    const meta = readMeta(result.metaPath);
+    assert.equal(meta.status, "failed");
+    if (meta.pid > 0) {
+      livePids.push(meta.pid);
+    }
+  });
+
   test("mock runner: env injection recorded, meta transitions running→done", async () => {
     const projectRoot = makeProjectRoot();
     let capturedCmd = "";

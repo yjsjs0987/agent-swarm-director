@@ -79,6 +79,7 @@ export interface CliArgs {
     help?: boolean;
     version?: boolean;
     noPath?: boolean;
+    fromMarkdown?: boolean;
   };
   options: {
     home?: string;
@@ -92,6 +93,8 @@ export interface CliArgs {
     turn?: number;
     mode?: string;
     action?: string;
+    title?: string;
+    tasks?: string;
     topic?: string;
     proposal?: string;
     proposalFile?: string;
@@ -130,6 +133,8 @@ export function parseCliArgs(args: string[]): CliArgs {
       flags.all = true;
     } else if (arg === "--no-path" || arg === "--noPath") {
       flags.noPath = true;
+    } else if (arg === "--from-markdown" || arg === "--from-md") {
+      flags.fromMarkdown = true;
     } else if (arg === "--home" || arg.startsWith("--home=")) {
       options.home = readOptVal(arg, "--home", next);
     } else if (arg === "--harness" || arg.startsWith("--harness=")) {
@@ -149,6 +154,10 @@ export function parseCliArgs(args: string[]): CliArgs {
       options.mode = readOptVal(arg, "--mode", next);
     } else if (arg === "--action" || arg.startsWith("--action=")) {
       options.action = readOptVal(arg, "--action", next);
+    } else if (arg === "--title" || arg.startsWith("--title=")) {
+      options.title = readOptVal(arg, "--title", next);
+    } else if (arg === "--tasks" || arg.startsWith("--tasks=")) {
+      options.tasks = readOptVal(arg, "--tasks", next);
     } else if (arg === "--topic" || arg.startsWith("--topic=")) {
       options.topic = readOptVal(arg, "--topic", next);
     } else if (arg === "--proposal" || arg.startsWith("--proposal=")) {
@@ -982,22 +991,6 @@ export async function main(
 
         try {
           let jsonPayload: Record<string, unknown> = {};
-          const hasCliFlags = Boolean(
-            subcommand ||
-              parsed.rest.length > 0 ||
-              options.action ||
-              options.session ||
-              options.task ||
-              options.turn !== undefined ||
-              options.mode ||
-              options.harness ||
-              options.topic ||
-              options.proposal ||
-              options.proposalFile ||
-              options.summary ||
-              options.files ||
-              options.cmd
-          );
           const explicitStdin = options.payload === "-";
           const rawJsonInput =
             (options.payload && !explicitStdin ? options.payload : "") ||
@@ -1016,13 +1009,30 @@ export async function main(
               );
             }
           }
-          void hasCliFlags;
 
           if (command === "plan") {
+            let parsedTasks: unknown[] | undefined = Array.isArray(jsonPayload.tasks)
+              ? jsonPayload.tasks
+              : undefined;
+            if (options.tasks) {
+              try {
+                const rawTasks = JSON.parse(options.tasks.trim());
+                if (Array.isArray(rawTasks)) {
+                  parsedTasks = rawTasks;
+                }
+              } catch (e) {
+                throw new Error(
+                  `Invalid JSON array passed to --tasks: ${
+                    e instanceof Error ? e.message : String(e)
+                  }`
+                );
+              }
+            }
             const action = (options.action ||
+              (flags.fromMarkdown ? "sync_from_md" : undefined) ||
               subcommand ||
               jsonPayload.action ||
-              (Array.isArray(jsonPayload.tasks) ? "create" : "get")) as
+              (Array.isArray(parsedTasks) ? "create" : "get")) as
               | "create"
               | "get"
               | "update"
@@ -1030,15 +1040,12 @@ export async function main(
             const input = {
               ...jsonPayload,
               action,
+              ...(options.title ? { title: options.title } : {}),
+              ...(parsedTasks ? { tasks: parsedTasks } : {}),
               ...(options.session ? { sessionId: options.session } : {}),
               ...(options.harness ? { mainHarness: options.harness } : {}),
             };
-            const res = (await server.handleRequest("asd_plan", input)) as {
-              sessionId: string;
-              phase: string;
-              planMdPath: string;
-              progressBoard: string;
-            };
+            const res = await server.handlePlan(input as Parameters<typeof server.handlePlan>[0]);
             if (flags.json) {
               console.log(JSON.stringify(res, null, 2));
             } else {
@@ -1060,12 +1067,7 @@ export async function main(
               ...(options.harness ? { harness: options.harness } : {}),
               ...(taskIdsFromOpt ? { taskIds: taskIdsFromOpt } : {}),
             };
-            const res = (await server.handleRequest("asd_dispatch", input)) as {
-              sessionId: string;
-              turn: number;
-              results: Array<{ taskId: string; status: string; harness: string; model: string; error?: string }>;
-              progressBoard: string;
-            };
+            const res = await server.handleDispatch(input as Parameters<typeof server.handleDispatch>[0]);
             if (flags.json) {
               console.log(JSON.stringify(res, null, 2));
             } else {
@@ -1101,14 +1103,7 @@ export async function main(
               ...(options.cmd ? { verifyCmd: options.cmd } : {}),
               ...jsonPayload,
             };
-            const res = (await server.handleRequest("asd_verify", input)) as {
-              verified: boolean;
-              taskId: string;
-              status: string;
-              commitSha?: string;
-              error?: string;
-              progressBoard: string;
-            };
+            const res = await server.handleVerify(input as Parameters<typeof server.handleVerify>[0]);
             if (flags.json) {
               console.log(JSON.stringify(res, null, 2));
             } else {

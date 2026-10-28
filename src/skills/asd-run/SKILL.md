@@ -21,8 +21,9 @@ Inspect `.asd/PLAN.md` and evaluate the pending waves:
 1. **Step 1: Synchronize `.asd/PLAN.md` & Assess Mode**
    - Read `.asd/PLAN.md` and sync any manual user edits into SQLite:
      ```bash
-     asd plan --from-markdown
+     asd plan sync_from_md
      ```
+     *(Alias `asd plan --from-markdown` is also supported.)*
    - Inspect the `progressBoard` and identify the next pending `turn`.
 
 2. **Step 2: Mandatory User Confirmation Gate (With AI Recommendation)**

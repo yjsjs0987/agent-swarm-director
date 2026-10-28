@@ -98,6 +98,7 @@ export class AntigravityAdapter implements HarnessAdapter {
     }
     targets.push(path.join(geminiDir, "hooks.json"));
     targets.push(path.join(geminiDir, "mcp_config.json"));
+    targets.push(path.join(geminiDir, "config", "mcp_config.json"));
 
     return targets;
   }

@@ -326,6 +326,16 @@ export class SqliteDriver {
     });
   }
 
+  incrementStateVersion(sessionId: string): void {
+    this.withImmediateTx(() => {
+      this.db
+        .prepare(
+          "UPDATE sessions SET state_version = state_version + 1, updated_at = ? WHERE session_id = ?"
+        )
+        .run(Date.now(), sessionId);
+    });
+  }
+
   // --------------------------------------------------------------------------
   // tasks
   // --------------------------------------------------------------------------
@@ -340,6 +350,14 @@ export class SqliteDriver {
     return this.db
       .prepare("SELECT * FROM tasks WHERE session_id = ? ORDER BY turn, task_id")
       .all(sessionId) as unknown as TaskRow[];
+  }
+
+  deleteTask(sessionId: string, taskId: string): void {
+    this.withImmediateTx(() => {
+      this.db
+        .prepare("DELETE FROM tasks WHERE session_id = ? AND task_id = ?")
+        .run(sessionId, taskId);
+    });
   }
 
   /** Insert or refresh task definitions; runtime fields (status/attempts/...) are preserved. */

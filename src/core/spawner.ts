@@ -64,9 +64,21 @@ export interface SpawnSubagentOptions {
   args: string[];
   signal?: AbortSignal;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
   cwd?: string;
   commandRunner?: CommandRunner;
 }
+
+export const DEFAULT_DISPATCH_TIMEOUT_MS =
+  Number.parseInt(process.env.ASD_SPAWN_TIMEOUT_MS || "", 10) || 60 * 60_000;
+export const DEFAULT_DEBATE_TIMEOUT_MS =
+  Number.parseInt(
+    process.env.ASD_DEBATE_TIMEOUT_MS || process.env.ASD_SPAWN_TIMEOUT_MS || "",
+    10
+  ) || 15 * 60_000;
+export const DEFAULT_IDLE_TIMEOUT_MS =
+  Number.parseInt(process.env.ASD_SPAWN_IDLE_TIMEOUT_MS || "", 10) ||
+  10 * 60_000;
 
 export interface SpawnSubagentResult {
   exitCode: number;
@@ -298,11 +310,13 @@ export function spawnSubagent(
     let killRequested = false;
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
 
     const finish = (exitCode: number, status: "done" | "failed"): void => {
       if (settled) return;
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
       if (options.signal) options.signal.removeEventListener("abort", onAbort);
       const finishedAt = Date.now();
       meta = {
@@ -335,6 +349,13 @@ export function spawnSubagent(
       onAbort();
     };
 
+    const resetIdleTimer = (): void => {
+      if (options.idleTimeoutMs === undefined || settled) return;
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = setTimeout(onTimeout, options.idleTimeoutMs);
+      idleTimer.unref?.();
+    };
+
     if (options.signal) {
       options.signal.addEventListener("abort", onAbort, { once: true });
       // Insurance: an already-aborted signal must not skip the kill path.
@@ -344,6 +365,7 @@ export function spawnSubagent(
       timer = setTimeout(onTimeout, options.timeoutMs);
       timer.unref?.();
     }
+    resetIdleTimer();
 
     void runner
       .run(options.command, options.args, {
@@ -351,10 +373,16 @@ export function spawnSubagent(
         env,
         signal: options.signal,
         onStdout: (chunk) => {
-          if (!settled) logStream.write(redactSecrets(chunk));
+          if (!settled) {
+            if (chunk && chunk.length > 0) resetIdleTimer();
+            logStream.write(redactSecrets(chunk));
+          }
         },
         onStderr: (chunk) => {
-          if (!settled) logStream.write(redactSecrets(chunk));
+          if (!settled) {
+            if (chunk && chunk.length > 0) resetIdleTimer();
+            logStream.write(redactSecrets(chunk));
+          }
         },
         onSpawn: (p) => {
           pid = p;

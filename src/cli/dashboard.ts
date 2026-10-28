@@ -41,14 +41,7 @@ export interface DashboardSnapshot {
   >;
 }
 
-const DOCTOR_CACHE_TTL_MS = 30_000;
-const doctorCache = new Map<
-  string,
-  {
-    expiresAt: number;
-    harnesses: DashboardSnapshot["harnesses"];
-  }
->();
+const doctorCache = new Map<string, DashboardSnapshot["harnesses"]>();
 
 function detectSystemLocale(): string {
   try {
@@ -90,18 +83,11 @@ export async function collectDashboardSnapshot(options?: {
 
   const subagentLogs = scanSubagentLogs(projectRoot);
   const cacheKey = `${projectRoot}::${homeDir ?? ""}`;
-  const now = Date.now();
-  const cached = doctorCache.get(cacheKey);
-  let harnesses: DashboardSnapshot["harnesses"];
-  if (cached && cached.expiresAt > now) {
-    harnesses = cached.harnesses;
-  } else {
+  let harnesses = doctorCache.get(cacheKey);
+  if (!harnesses) {
     const doctor = await runAsdDoctor({ projectRoot, homeDir });
     harnesses = doctor.harnesses;
-    doctorCache.set(cacheKey, {
-      expiresAt: now + DOCTOR_CACHE_TTL_MS,
-      harnesses,
-    });
+    doctorCache.set(cacheKey, harnesses);
   }
 
   return {
@@ -487,8 +473,9 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
           const risksHtml = iv && Array.isArray(iv.risks) && iv.risks.length
             ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Risks:</strong><ul style="margin:4px 0 0 18px;padding:0;">\${iv.risks.map(x => \`<li>\${esc(x)}</li>\`).join("")}</ul></div>\`
             : "";
+          const targetLogKey = d.task_id || d.debate_id;
           return \`
-            <div style="border-bottom:1px solid var(--border); padding:10px 0;">
+            <div style="border-bottom:1px solid var(--border); padding:10px 0; cursor:pointer;" onclick="selectTask('\${esc(targetLogKey)}')">
               <div>
                 <strong>\${esc(d.debate_id)}</strong> — \${esc(d.topic)}
                 <span class="badge st-\${d.status === 'done' ? 'done' : 'running'}">\${esc(d.status)}</span>

@@ -106,14 +106,14 @@ describe("Installer & Sync Engine", () => {
       assert.ok(fs.existsSync(claudeJson));
       const parsedClaudeJson = JSON.parse(fs.readFileSync(claudeJson, "utf8"));
       assert.equal(parsedClaudeJson.mcpServers["asd-core"], undefined);
-      assert.ok(parsedClaudeJson.mcpServers["lsp"]);
-      assert.equal(parsedClaudeJson.mcpServers["lsp"]._asdManaged, true);
+      assert.ok(parsedClaudeJson.mcpServers["context7"]);
+      assert.equal(parsedClaudeJson.mcpServers["context7"]._asdManaged, true);
 
       const dotMcpJson = path.join(claudeDir, ".mcp.json");
       assert.ok(fs.existsSync(dotMcpJson));
       const parsedDotMcp = JSON.parse(fs.readFileSync(dotMcpJson, "utf8"));
       assert.equal(parsedDotMcp.mcpServers["asd-core"], undefined);
-      assert.ok(parsedDotMcp.mcpServers["lsp"]);
+      assert.ok(parsedDotMcp.mcpServers["context7"]);
     });
 
     test("OpenCode targets exist and contain commands, AGENTS.md, and MCP config", () => {
@@ -161,7 +161,7 @@ describe("Installer & Sync Engine", () => {
       const toml = fs.readFileSync(configToml, "utf8");
       assert.ok(toml.includes("# >>> BEGIN MANAGED BY ASD-V2"));
       assert.ok(!toml.includes("[mcp_servers.asd-core]"));
-      assert.ok(toml.includes("[mcp_servers.lsp]"));
+      assert.ok(toml.includes("[mcp_servers.context7]"));
       assert.ok(toml.includes("# <<< END MANAGED BY ASD-V2 <<<"));
     });
 
@@ -193,8 +193,8 @@ describe("Installer & Sync Engine", () => {
       assert.ok(fs.existsSync(mcpConfig));
       const parsed = JSON.parse(fs.readFileSync(mcpConfig, "utf8"));
       assert.equal(parsed.mcpServers["asd-core"], undefined);
-      assert.ok(parsed.mcpServers["lsp"]);
-      assert.equal(parsed.mcpServers["lsp"]._asdManaged, true);
+      assert.ok(parsed.mcpServers["context7"]);
+      assert.equal(parsed.mcpServers["context7"]._asdManaged, true);
     });
 
     test("project directory is NEVER touched or polluted during sync", () => {

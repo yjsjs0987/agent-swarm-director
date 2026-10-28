@@ -54,7 +54,12 @@ import {
   resolveRoute,
   type ResolvedRoute,
 } from "../core/router.ts";
-import { spawnSubagent, type CommandRunner } from "../core/spawner.ts";
+import {
+  DEFAULT_DISPATCH_TIMEOUT_MS,
+  DEFAULT_IDLE_TIMEOUT_MS,
+  spawnSubagent,
+  type CommandRunner,
+} from "../core/spawner.ts";
 import type {
   AgentRole,
   AsdDebateInput,
@@ -168,6 +173,11 @@ export const ASD_MCP_TOOLS = [
           enum: ["parallel_spawn", "claim_only"],
           description: "Execution mode: 'parallel_spawn' (default) or 'claim_only'.",
         },
+        harness: {
+          type: "string",
+          enum: ["claude-code", "opencode", "codex", "antigravity"],
+          description: "Optional harness override for task dispatch.",
+        },
       },
       required: ["sessionId"],
     },
@@ -209,6 +219,11 @@ export const ASD_MCP_TOOLS = [
         taskId: { type: "string", description: "Optional associated task ID" },
         topic: { type: "string", description: "Debate topic" },
         proposal: { type: "string", description: "Proposal under critique" },
+        harness: {
+          type: "string",
+          enum: ["claude-code", "opencode", "codex", "antigravity"],
+          description: "Optional proposer harness hint.",
+        },
       },
       required: ["sessionId", "topic", "proposal"],
     },
@@ -349,11 +364,11 @@ export class AsdMcpServer {
 
     // Subagent Isolation Guard:
     // When "subagent": NEVER run autoSync on startup.
-    // When "main" (or undefined): trigger autoSyncIfNeeded (or injected onMainServerStart).
+    // When "main": run injected onMainServerStart or explicit opt-in autoSync.
     if (this.sessionRole !== "subagent") {
       if (options?.onMainServerStart) {
         void Promise.resolve(options.onMainServerStart()).catch(() => {});
-      } else if (options?.autoSync !== false) {
+      } else if (options?.autoSync === true) {
         void autoSyncIfNeeded({ homeDir: this.homeDir, projectRoot: this.projectRoot }).catch(() => {});
       }
     }
@@ -537,20 +552,39 @@ export class AsdMcpServer {
       if (input.tasks && input.tasks.length > 0) {
         this.db.upsertTasks(
           sessionId,
-          input.tasks.map((t) => ({
-            taskId: t.taskId,
-            turn: t.turn,
-            title: t.title,
-            track: t.track,
-            role: t.role,
-            category: t.category,
-            difficulty: t.difficulty,
-            dependsOn: t.dependsOn,
-            targetFiles: t.targetFiles,
-            contextHint: t.contextHint,
-            acceptance: t.acceptance,
-            verifyCmd: t.verifyCmd,
-          }))
+          input.tasks.map((rawTask, idx) => {
+            const t = rawTask as typeof rawTask & {
+              id?: string;
+              agent?: AgentRole;
+              allowedFiles?: string[];
+              verificationCmd?: string;
+            };
+            const turn =
+              typeof t.turn === "number" && Number.isFinite(t.turn) && t.turn >= 1
+                ? t.turn
+                : 1;
+            let taskId = String(t.taskId || t.id || `T${turn}.${idx + 1}`).trim();
+            const dashMatch = taskId.match(/^T-(\d+)$/i);
+            if (dashMatch) {
+              taskId = `T${turn}.${dashMatch[1]}`;
+            } else if (!/^T(?:-)?\d+(?:\.\d+|-\d+)?$/i.test(taskId)) {
+              taskId = `T${turn}.${idx + 1}`;
+            }
+            return {
+              taskId,
+              turn,
+              title: t.title,
+              track: t.track,
+              role: (t.role || t.agent) as AgentRole | undefined,
+              category: t.category,
+              difficulty: t.difficulty,
+              dependsOn: t.dependsOn,
+              targetFiles: t.targetFiles || t.allowedFiles,
+              contextHint: t.contextHint,
+              acceptance: t.acceptance,
+              verifyCmd: t.verifyCmd ?? t.verificationCmd,
+            };
+          })
         );
       }
     } else if (action === "sync_from_md") {
@@ -906,6 +940,8 @@ export class AsdMcpServer {
           command: cmdInfo.command,
           args: cmdInfo.args,
           commandRunner: this.commandRunner,
+          timeoutMs: DEFAULT_DISPATCH_TIMEOUT_MS,
+          idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
           signal,
         });
 
@@ -963,6 +999,8 @@ export class AsdMcpServer {
             command: fbCmdInfo.command,
             args: fbCmdInfo.args,
             commandRunner: this.commandRunner,
+            timeoutMs: DEFAULT_DISPATCH_TIMEOUT_MS,
+            idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
             signal,
           });
           spawnResult = fbResult;
@@ -991,6 +1029,8 @@ export class AsdMcpServer {
             command: defaultCmdInfo.command,
             args: defaultCmdInfo.args,
             commandRunner: this.commandRunner,
+            timeoutMs: DEFAULT_DISPATCH_TIMEOUT_MS,
+            idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
             signal,
           });
           if (retryResult.exitCode === 0) {
@@ -1090,11 +1130,17 @@ export class AsdMcpServer {
     if (allDone) {
       this.db.updateSessionPhase(sessionId, "done");
       session = this.db.getSession(sessionId) ?? session;
-      renderSessionSummaryMd(session, finalSessionTasks, undefined, path.join(this.projectRoot, ".asd", "summary.md"));
+      const sessionDebates = this.db.getSessionDebates(sessionId);
       renderSessionSummaryMd(
         session,
         finalSessionTasks,
-        undefined,
+        sessionDebates,
+        path.join(this.projectRoot, ".asd", "summary.md")
+      );
+      renderSessionSummaryMd(
+        session,
+        finalSessionTasks,
+        sessionDebates,
         path.join(this.projectRoot, ".asd", "sessions", sessionId, "summary.md")
       );
     }
@@ -1185,11 +1231,17 @@ export class AsdMcpServer {
     if (allDone) {
       this.db.updateSessionPhase(sessionId, "done");
       session = this.db.getSession(sessionId) ?? session;
-      renderSessionSummaryMd(session, allTasks, undefined, path.join(this.projectRoot, ".asd", "summary.md"));
+      const sessionDebates = this.db.getSessionDebates(sessionId);
       renderSessionSummaryMd(
         session,
         allTasks,
-        undefined,
+        sessionDebates,
+        path.join(this.projectRoot, ".asd", "summary.md")
+      );
+      renderSessionSummaryMd(
+        session,
+        allTasks,
+        sessionDebates,
         path.join(this.projectRoot, ".asd", "sessions", sessionId, "summary.md")
       );
     }

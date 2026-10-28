@@ -40,7 +40,11 @@ import type {
   ResolvedRoute,
   RuntimeCapabilities,
 } from "./router.ts";
-import { spawnSubagent } from "./spawner.ts";
+import {
+  DEFAULT_DEBATE_TIMEOUT_MS,
+  DEFAULT_IDLE_TIMEOUT_MS,
+  spawnSubagent,
+} from "./spawner.ts";
 import type { CommandRunner } from "./spawner.ts";
 import type {
   AgentRole,
@@ -639,6 +643,10 @@ export async function runDebateBroker(
       options.proposal,
       options.taskId
     );
+    const effectiveTimeoutMs = options.timeoutMs ?? DEFAULT_DEBATE_TIMEOUT_MS;
+    const effectiveIdleTimeoutMs =
+      options.timeoutMs !== undefined ? undefined : DEFAULT_IDLE_TIMEOUT_MS;
+    const logTaskId = options.taskId || debateId;
 
     const round1Promises = reviewers.map(async (reviewer, index) => {
       const subSessionId = `${options.sessionId}-deb-${debateId}-r1-${index + 1}`;
@@ -658,14 +666,15 @@ export async function runDebateBroker(
         role: reviewer.role,
         harness: reviewer.harness,
         model: reviewer.model,
-        taskId: options.taskId ?? "",
+        taskId: logTaskId,
         prompt: round1Prompt,
         allowedFiles: [],
         command: cmdInfo.command,
         args: cmdInfo.args,
         commandRunner: options.commandRunner,
         signal: options.signal,
-        timeoutMs: options.timeoutMs,
+        timeoutMs: effectiveTimeoutMs,
+        idleTimeoutMs: effectiveIdleTimeoutMs,
       });
 
       // Step through configured fallbacks (same harness different model, or cross-harness)
@@ -721,14 +730,15 @@ export async function runDebateBroker(
           role: reviewer.role,
           harness: activeHarness,
           model: activeModel,
-          taskId: options.taskId ?? "",
+          taskId: logTaskId,
           prompt: round1Prompt,
           allowedFiles: [],
           command: fbCmdInfo.command,
           args: fbCmdInfo.args,
           commandRunner: options.commandRunner,
           signal: options.signal,
-          timeoutMs: options.timeoutMs,
+          timeoutMs: effectiveTimeoutMs,
+          idleTimeoutMs: effectiveIdleTimeoutMs,
         });
         spawnResult = fbResult;
       }
@@ -752,14 +762,15 @@ export async function runDebateBroker(
           role: reviewer.role,
           harness: activeHarness,
           model: "default",
-          taskId: options.taskId ?? "",
+          taskId: logTaskId,
           prompt: round1Prompt,
           allowedFiles: [],
           command: defaultCmdInfo.command,
           args: defaultCmdInfo.args,
           commandRunner: options.commandRunner,
           signal: options.signal,
-          timeoutMs: options.timeoutMs,
+          timeoutMs: effectiveTimeoutMs,
+          idleTimeoutMs: effectiveIdleTimeoutMs,
         });
         if (retryResult.exitCode === 0) {
           spawnResult = retryResult;
@@ -971,14 +982,15 @@ export async function runDebateBroker(
           role: arbiterSpec.role,
           harness: arbiterSpec.harness,
           model: arbiterSpec.model,
-          taskId: options.taskId ?? "",
+          taskId: logTaskId,
           prompt: r2Prompt,
           allowedFiles: [],
           command: r2CmdInfo.command,
           args: r2CmdInfo.args,
           commandRunner: options.commandRunner,
           signal: options.signal,
-          timeoutMs: options.timeoutMs,
+          timeoutMs: effectiveTimeoutMs,
+          idleTimeoutMs: effectiveIdleTimeoutMs,
         });
 
         let activeArbHarness = arbiterSpec.harness;
@@ -1032,14 +1044,15 @@ export async function runDebateBroker(
             role: arbiterSpec.role,
             harness: activeArbHarness,
             model: activeArbModel,
-            taskId: options.taskId ?? "",
+            taskId: logTaskId,
             prompt: r2Prompt,
             allowedFiles: [],
             command: fbR2Cmd.command,
             args: fbR2Cmd.args,
             commandRunner: options.commandRunner,
             signal: options.signal,
-            timeoutMs: options.timeoutMs,
+            timeoutMs: effectiveTimeoutMs,
+            idleTimeoutMs: effectiveIdleTimeoutMs,
           });
           arbResult = fbArbResult;
         }
@@ -1062,14 +1075,15 @@ export async function runDebateBroker(
             role: arbiterSpec.role,
             harness: activeArbHarness,
             model: "default",
-            taskId: options.taskId ?? "",
+            taskId: logTaskId,
             prompt: r2Prompt,
             allowedFiles: [],
             command: defaultR2Cmd.command,
             args: defaultR2Cmd.args,
             commandRunner: options.commandRunner,
             signal: options.signal,
-            timeoutMs: options.timeoutMs,
+            timeoutMs: effectiveTimeoutMs,
+            idleTimeoutMs: effectiveIdleTimeoutMs,
           });
           if (retryArb.exitCode === 0) {
             arbResult = retryArb;

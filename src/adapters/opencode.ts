@@ -9,7 +9,7 @@
  */
 
 import * as path from "node:path";
-import { _asdVersion, type HarnessAdapter, type HarnessId } from "../core/types.ts";
+import { AGENT_ROLES, _asdVersion, type HarnessAdapter, type HarnessId } from "../core/types.ts";
 import { ASD_SKILLS } from "./claude-code.ts";
 
 /**
@@ -70,6 +70,9 @@ export class OpencodeAdapter implements HarnessAdapter {
     const baseDir = path.join(homeDir, ".config", "opencode");
 
     targets.push(path.join(baseDir, "opencode.json"));
+    for (const role of AGENT_ROLES) {
+      targets.push(path.join(baseDir, "agent", `asd-${role}.md`));
+    }
     for (const skill of ASD_SKILLS) {
       targets.push(path.join(baseDir, "command", `${skill}.md`));
     }

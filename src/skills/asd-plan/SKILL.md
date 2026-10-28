@@ -27,11 +27,12 @@ Evaluate the planned tasks to recommend the optimal execution mode:
    - If critical requirements are underspecified, ask concise questions before generating the plan.
 
 3. **Step 3: Author `.asd/PLAN.md` via `asd plan`**
-   - Define tasks with clear `id`, `title`, `agent`, `turn`, `track` (`"LIGHT"` or `"HEAVY"` matching your recommendation), `dependsOn`, `allowedFiles`, and `verificationCmd`.
+   - Define tasks with clear `taskId` (e.g., `T1.1`, `T1.2`), `title`, `role`, `turn`, `track` (`"LIGHT"` or `"HEAVY"` matching your recommendation), `dependsOn`, `targetFiles`, and `verifyCmd`.
    - Persist and render the plan:
      ```bash
-     asd plan --title "<Project/Feature Title>" --tasks '<JSON_ARRAY>'
+     asd plan create --payload '{"tasks":[{"taskId":"T1.1","turn":1,"title":"<Task>","track":"LIGHT","role":"worker","targetFiles":["src/..."],"verifyCmd":"npm test"}]}'
      ```
+     *(Or via CLI flags: `asd plan --title "<Project/Feature Title>" --tasks '<JSON_ARRAY>'`)*
 
 4. **Step 4: Present Plan, AI Mode Recommendation & Ask for Confirmation**
    - Display the generated `progressBoard` and task breakdown.

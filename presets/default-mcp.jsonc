@@ -5,10 +5,6 @@
 {
   "_asdVersion": "2.2.0",
   "mcpServers": {
-    "lsp": {
-      "command": "node",
-      "args": ["--no-warnings", "<ASD_ROOT>/src/mcp/lsp-server.ts"]
-    },
     "context7": {
       "url": "https://mcp.context7.com/mcp"
     },

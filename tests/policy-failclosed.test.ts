@@ -640,3 +640,47 @@ describe("verifyChangedFilesBoundary", () => {
     assert.ok(res.violations.some((v) => v.includes("outside allowedFiles")));
   });
 });
+
+
+describe("Bash .git and .asd boundary regex (P0 Issue 6b)", () => {
+  test("blocks bare 'rm -rf .git' and 'rm -rf .asd' while allowing 'git clone https://.../repo.git'", () => {
+    const rootDir = makeTmpDir();
+    const metaPath = path.join(rootDir, "meta.json");
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({
+        roleType: "subagent",
+        allowedFiles: ["src/"],
+        worktreePath: rootDir,
+      })
+    );
+    const env = {
+      ASD_SESSION_ROLE: "subagent",
+      ASD_SUBAGENT_META: metaPath,
+      ASD_PROJECT_ROOT: rootDir,
+    };
+
+    const bareGit = evaluatePreToolUse(
+      { tool: "bash", command: "ls .git" },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(bareGit.allowed, false);
+    assert.match(bareGit.reason ?? "", /protected \.git/i);
+
+    const bareAsd = evaluatePreToolUse(
+      { tool: "bash", command: "ls .asd" },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(bareAsd.allowed, false);
+    assert.match(bareAsd.reason ?? "", /protected \.asd/i);
+
+    const gitCloneUrl = evaluatePreToolUse(
+      { tool: "bash", command: "git clone https://github.com/example/repo.git" },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      {}
+    );
+    assert.equal(gitCloneUrl.allowed, true);
+  });
+});

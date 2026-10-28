@@ -591,3 +591,46 @@ test("renderSessionSummaryMd: writes summary with secret redaction", () => {
   assert.ok(output.includes("### T1.1: AWS S3 클라이언트 구현"));
   assert.ok(output.includes("### Debate D1:"));
 });
+
+
+test("syncPlanFromMd: deletes tasks removed from PLAN.md so they do not resurrect (P0 Issue 3)", () => {
+  const dir = tempDir("asd-sync-delete-");
+  const dbPath = path.join(dir, "core.db");
+  const planPath = path.join(dir, "PLAN.md");
+  const db = new SqliteDriver(dbPath);
+
+  try {
+    const sessionId = "sess-del-1";
+    db.createOrGetSession({
+      sessionId,
+      projectRoot: dir,
+      mainHarness: "opencode",
+    });
+
+    db.upsertTasks(sessionId, [
+      { taskId: "T1.1", turn: 1, title: "Keep me", track: "LIGHT", role: "worker" },
+      { taskId: "T1.2", turn: 1, title: "Delete me", track: "LIGHT", role: "worker" },
+    ]);
+
+    const session = db.getSession(sessionId)!;
+    renderPlanMd(session, db.getSessionTasks(sessionId), planPath);
+
+    // User manually removes T1.2 from PLAN.md
+    const mdContent = fs.readFileSync(planPath, "utf8");
+    const editedMd = mdContent
+      .split("\n")
+      .filter((l) => !l.includes("**T1.2**"))
+      .join("\n");
+    fs.writeFileSync(planPath, editedMd, "utf8");
+
+    const synced = syncPlanFromMd(db, sessionId, planPath);
+    assert.equal(synced.length, 1);
+    assert.equal(synced[0]!.taskId, "T1.1");
+
+    const remainingInDb = db.getSessionTasks(sessionId);
+    assert.equal(remainingInDb.length, 1);
+    assert.equal(remainingInDb[0]!.task_id, "T1.1");
+  } finally {
+    db.close();
+  }
+});

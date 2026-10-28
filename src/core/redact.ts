@@ -5,8 +5,34 @@
 
 const REDACTED = "[REDACTED]";
 
+const TS_TYPES_OR_KEYWORDS = new Set([
+  "string",
+  "number",
+  "boolean",
+  "any",
+  "unknown",
+  "never",
+  "void",
+  "null",
+  "undefined",
+  "true",
+  "false",
+  "object",
+  "symbol",
+  "bigint",
+]);
+
+function isLikelyCodeIdentifierOrType(val: string): boolean {
+  const clean = val.replace(/[;,)\]]+$/, "").trim();
+  if (!clean || clean === REDACTED) return true;
+  if (TS_TYPES_OR_KEYWORDS.has(clean.toLowerCase())) return true;
+  // Property chains or function calls like req.headers.token, user.password, getToken()
+  if (/[.()[\]{}]/.test(clean)) return true;
+  return false;
+}
+
 /**
- * Redact secrets from input text.
+ * Redact secrets from input text (used for logs and session summaries).
  * Patterns covered:
  * - AWS keys: AKIA[0-9A-Z]{16} and ASIA[0-9A-Z]{16}
  * - JWT tokens: eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+
@@ -58,18 +84,36 @@ export function redactSecrets(input: string): string {
   }
 
   const unquotedPatterns = [
-    /(\bpassword\s*[:=]\s*)([^"'\s,}]+)/gi,
-    /(\bsecret\s*[:=]\s*)([^"'\s,}]+)/gi,
-    /(\btoken\s*[:=]\s*)([^"'\s,}]+)/gi,
-    /(\bapi[_-]?key\s*[:=]\s*)([^"'\s,}]+)/gi,
+    /(\bpassword\s*[:=]\s*)([^"'\s,};)]+)/gi,
+    /(\bsecret\s*[:=]\s*)([^"'\s,};)]+)/gi,
+    /(\btoken\s*[:=]\s*)([^"'\s,};)]+)/gi,
+    /(\bapi[_-]?key\s*[:=]\s*)([^"'\s,};)]+)/gi,
   ];
 
   for (const pattern of unquotedPatterns) {
     result = result.replace(pattern, (match, prefix, value) => {
-      if (value === REDACTED) return match;
+      if (isLikelyCodeIdentifierOrType(value)) return match;
       return `${prefix}${REDACTED}`;
     });
   }
 
   return result;
+}
+
+/**
+ * High-confidence secret detector for source code files during workspace verification.
+ * Avoids false-positive rollbacks on normal TypeScript/JavaScript code (e.g. `token: string`,
+ * `const token = req.token`, or short test placeholders).
+ */
+export function hasLeakedSecrets(content: string): boolean {
+  if (/\b(AKIA|ASIA)[0-9A-Z]{16}\b/.test(content)) return true;
+  if (/\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/.test(content)) {
+    return true;
+  }
+  if (/-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(content)) return true;
+  if (/\bsk-[A-Za-z0-9_-]{16,}\b/.test(content)) return true;
+  if (/\bghp_[A-Za-z0-9]{20,}\b/.test(content)) return true;
+  if (/\bAIza[0-9A-Za-z_-]{35}\b/.test(content)) return true;
+
+  return false;
 }

@@ -791,6 +791,40 @@ describe("ASD CLI (src/cli/index.ts)", () => {
         });
         assert.equal(openPipeCheck.exitCode, 0);
         assert.ok(openPipeCheck.stdout.includes("sess-cli-orch-1"));
+
+        // 6. asd plan --title --tasks with alias fields (id: "T-2", agent, allowedFiles, verificationCmd)
+        //    and asd plan --from-markdown preserving verify_cmd
+        const aliasTasks = JSON.stringify([
+          {
+            id: "T-2",
+            title: "Alias Schema Task",
+            agent: "builder",
+            turn: 2,
+            track: "LIGHT",
+            allowedFiles: ["alias.txt"],
+            verificationCmd: "npm test",
+          },
+        ]);
+        const aliasPlanRes = runCli(
+          ["plan", "--title", "Alias Goal", "--tasks", aliasTasks, "--home", orchHome],
+          { cwd: orchProj }
+        );
+        assert.equal(aliasPlanRes.exitCode, 0, `aliasPlan stderr: ${aliasPlanRes.stderr}`);
+        assert.ok(aliasPlanRes.stdout.includes("T2.2"));
+
+        const syncMdRes = runCli(
+          ["plan", "--from-markdown", "--json", "--home", orchHome],
+          { cwd: orchProj }
+        );
+        assert.equal(syncMdRes.exitCode, 0, `syncMd stderr: ${syncMdRes.stderr}`);
+        const syncMdJson = JSON.parse(syncMdRes.stdout) as {
+          tasks: Array<{ taskId: string; role: string; verifyCmd?: string; targetFiles: string[] }>;
+        };
+        const t2 = syncMdJson.tasks.find((t) => t.taskId === "T2.2");
+        assert.ok(t2, "T2.2 should exist after --from-markdown sync");
+        assert.equal(t2.role, "builder");
+        assert.equal(t2.verifyCmd, "npm test", "verifyCmd must be preserved across syncPlanFromMd");
+        assert.deepEqual(t2.targetFiles, ["alias.txt"]);
       } finally {
         removeTempDir(orchHome);
         removeTempDir(orchProj);

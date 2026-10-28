@@ -29,15 +29,16 @@ Before execution or debate, evaluate the task complexity and classify it into `L
 
 2. **Step 2: Generate Plan (`asd plan`) & Recommend Mode**
    - Decompose the goal into discrete tasks with:
-     - `id` (e.g., `T-1`, `T-2`)
-     - `title`, `agent` (`architect`, `builder`, `worker`, `scout`, `verifier`), `turn` (wave number >= 1)
+     - `taskId` (e.g., `T1.1`, `T1.2`; `id: "T-1"` is also accepted)
+     - `title`, `role` (`architect`, `builder`, `worker`, `scout`, `verifier`), `turn` (wave number >= 1)
      - `track` (`"LIGHT"` or `"HEAVY"` matching the recommended mode)
-     - `allowedFiles` (strict glob/path boundaries)
-     - `verificationCmd` (automated test command)
+     - `targetFiles` (strict glob/path boundaries; `allowedFiles` is also accepted)
+     - `verifyCmd` (automated test command; `verificationCmd` is also accepted)
    - Synchronize the plan into SQLite and `.asd/PLAN.md`:
      ```bash
-     asd plan --title "<Goal>" --tasks '<JSON_ARRAY>'
+     asd plan create --payload '{"tasks":[{"taskId":"T1.1","turn":1,"title":"<Task>","track":"LIGHT","role":"worker","targetFiles":["src/..."],"verifyCmd":"npm test"}]}'
      ```
+     *(Or via CLI flags: `asd plan --title "<Goal>" --tasks '<JSON_ARRAY>'`)*
    - Render the initial `progressBoard` from the output.
 
 3. **Step 3: User Confirmation Gate (Mandatory Mode Selection & AI Recommendation)**
