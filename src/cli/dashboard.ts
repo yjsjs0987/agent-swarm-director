@@ -80,6 +80,7 @@ export interface DashboardSnapshot {
   hasLocalRouting: boolean;
   localRoutingPath: string;
   availableModels: HarnessModelCatalog;
+  worktreeStatuses?: Record<string, string[]>;
   harnesses: Record<
     string,
     { installed: boolean; headlessSupported: boolean; binary?: string; resolvedPath?: string | null }
@@ -977,6 +978,28 @@ export async function collectDashboardSnapshot(options?: {
     skipCliSpawn: false,
   });
 
+  const worktreeStatuses: Record<string, string[]> = {};
+  for (const t of allTasks) {
+    if (t.worktree_path && fs.existsSync(t.worktree_path)) {
+      try {
+        const res = child_process.spawnSync("git", ["status", "--short"], {
+          cwd: t.worktree_path,
+          encoding: "utf8",
+          timeout: 1500,
+          windowsHide: true,
+        });
+        if (res.status === 0 && res.stdout) {
+          worktreeStatuses[`${t.session_id}::${t.task_id}`] = res.stdout
+            .split(/\r?\n/)
+            .map((l) => l.trimEnd())
+            .filter((l) => l.length > 0 && !l.includes("node_modules"));
+        }
+      } catch {
+        // ignore worktree status errors
+      }
+    }
+  }
+
   return {
     version: ASD_VERSION,
     projectRoot,
@@ -993,6 +1016,7 @@ export async function collectDashboardSnapshot(options?: {
     hasLocalRouting,
     localRoutingPath: paths.localRoutingPath,
     availableModels,
+    worktreeStatuses,
     harnesses,
   };
 }
@@ -1660,12 +1684,23 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
     let selectedSessionId = null;
     let selectedTaskId = null;
     let selectedSubSessionId = null;
+    let editingMemoSessionId = null;
+    let editingMemoDraft = "";
     let routingEditorOpen = false;
     let modelsModalOpen = false;
     let customHarnessPick = "opencode";
     let customModelPick = "";
     let actionStatusMsg = "";
     let latestState = null;
+    let prevHtmlCache = {};
+
+    function setHtmlIfChanged(elId, nextHtml) {
+      const el = document.getElementById(elId);
+      if (!el) return;
+      if (prevHtmlCache[elId] === nextHtml) return;
+      prevHtmlCache[elId] = nextHtml;
+      el.innerHTML = nextHtml;
+    }
 
     function getModelsForHarness(harness) {
       return Array.isArray(availableModelsByHarness[harness])
@@ -2116,21 +2151,103 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       render(latestState);
     }
 
-    async function editSessionMemo(ev, sessionId, currentMemo) {
+    function editSessionMemo(ev, sessionId, currentMemo) {
       ev.stopPropagation();
-      const t = I18N[currentLang];
-      const nextMemo = window.prompt(t.editMemoPrompt, currentMemo || "");
-      if (nextMemo === null) return;
+      editingMemoSessionId = sessionId;
+      editingMemoDraft = currentMemo || "";
+      render(latestState);
+      setTimeout(() => {
+        const inp = document.getElementById("inlineMemoInput");
+        if (inp) {
+          inp.focus();
+          inp.select();
+        }
+      }, 15);
+    }
+
+    function cancelInlineMemo(ev) {
+      if (ev) ev.stopPropagation();
+      editingMemoSessionId = null;
+      editingMemoDraft = "";
+      render(latestState);
+    }
+
+    async function saveInlineMemo(ev, sessionId) {
+      if (ev) ev.stopPropagation();
+      const inp = document.getElementById("inlineMemoInput");
+      const nextMemo = inp ? inp.value.trim() : editingMemoDraft.trim();
+      editingMemoSessionId = null;
+      editingMemoDraft = "";
       try {
         const res = await fetch("/api/session-memo", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId, memo: nextMemo.trim() })
+          body: JSON.stringify({ sessionId, memo: nextMemo })
         });
         if (res.ok) {
           await poll();
         }
       } catch {}
+    }
+
+    function onInlineMemoKeyDown(ev, sessionId) {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        saveInlineMemo(ev, sessionId);
+      } else if (ev.key === "Escape") {
+        ev.preventDefault();
+        cancelInlineMemo(ev);
+      }
+    }
+
+    function renderSelectedItemMetaCard(activeSess, tasks, debates, worktreeStatuses, t) {
+      if (!selectedTaskId || selectedTaskId === "__ALL__") return "";
+      const task = tasks.find(x => x.task_id === selectedTaskId);
+      if (task) {
+        let targetFiles = [];
+        try { targetFiles = JSON.parse(task.target_files_json || "[]"); } catch {}
+        let doneClaim = null;
+        try { if (task.done_claim_json) doneClaim = JSON.parse(task.done_claim_json); } catch {}
+        const wtKey = (activeSess ? activeSess.session_id : task.session_id) + "::" + task.task_id;
+        const wtFiles = (worktreeStatuses && worktreeStatuses[wtKey]) || [];
+        const statusText = t.statusMap[task.status] || task.status;
+        const targetBadges = targetFiles.length
+          ? targetFiles.map(f => \`<span class="badge st-pending" style="font-family:monospace;">\${esc(f)}</span>\`).join(" ")
+          : "-";
+        const wtSection = wtFiles.length
+          ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Worktree Git Status:</strong><pre style="max-height:90px;margin-top:4px;">\${esc(wtFiles.join("\\n"))}</pre></div>\`
+          : "";
+        const claimSummary = doneClaim && doneClaim.summary
+          ? \`<div class="meta-bar" style="margin-top:4px;"><strong>Done Summary:</strong> \${esc(doneClaim.summary)}</div>\`
+          : "";
+        return \`
+          <div class="control-box" style="margin-bottom:10px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;">
+              <div><strong>\${esc(task.task_id)}</strong> — \${esc(task.title)}</div>
+              <span class="badge st-\${esc(task.status)}">\${esc(statusText)}</span>
+            </div>
+            <div class="meta-bar" style="margin-top:4px;">
+              Turn \${task.turn} | Track: <strong>\${esc(task.track)}</strong> | Role: <strong>\${esc(task.role)}</strong> | Harness: <strong>\${esc((task.assigned_harness || "-") + "/" + (task.assigned_model || "pending"))}</strong>
+              \${task.commit_sha ? ' | Commit: <code>' + esc(task.commit_sha.slice(0, 8)) + '</code>' : ''}
+            </div>
+            <div class="meta-bar" style="margin-top:4px;"><strong>Target Files:</strong> \${targetBadges}</div>
+            \${task.context_hint ? '<div class="meta-bar" style="margin-top:4px;"><strong>Context Hint:</strong> ' + esc(task.context_hint) + '</div>' : ''}
+            \${task.verify_cmd ? '<div class="meta-bar" style="margin-top:4px;"><strong>Verify Cmd:</strong> <code>' + esc(task.verify_cmd) + '</code></div>' : ''}
+            \${task.worktree_path ? '<div class="meta-bar" style="margin-top:4px;"><strong>Worktree:</strong> <code>' + esc(task.worktree_path) + '</code></div>' : ''}
+            \${claimSummary}
+            \${wtSection}
+          </div>
+        \`;
+      }
+      const debate = debates.find(d => d.debate_id === selectedTaskId || d.task_id === selectedTaskId);
+      if (debate) {
+        return \`
+          <div class="control-box" style="margin-bottom:10px;">
+            <div><strong>\${esc(debate.debate_id)}</strong> — \${esc(debate.topic)} <span class="badge st-\${debate.status === 'done' ? 'done' : 'running'}">\${esc(debate.status)}</span></div>
+          </div>
+        \`;
+      }
+      return "";
     }
 
     function formatCreatedTime(ms) {
@@ -2168,30 +2285,43 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       }
 
       // 1. Render Left Session List
-      if (!sessions.length) {
-        document.getElementById("sessionList").innerHTML =
-          \`<div class="meta-bar">\${t.noSessions}</div>\`;
-      } else {
-        document.getElementById("sessionList").innerHTML = sessions.map(s => {
-          const isSel = activeSess && s.session_id === activeSess.session_id;
-          const displayId = s.session_id.includes("::")
-            ? s.session_id.split("::")[1]
-            : s.session_id;
-          const createdStr = formatCreatedTime(s.created_at);
-          const memoStr = (s.memo && s.memo.trim()) ? s.memo.trim() : "";
-          return \`
-            <div class="session-item \${isSel ? 'active' : ''}" onclick="selectSession('\${esc(s.session_id)}')">
-              <div class="session-item-header">
-                <span>\${esc(displayId)}</span>
-              </div>
-              <div class="meta-bar">\${esc(createdStr)}</div>
-              <div class="session-memo-row">
-                <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">\${memoStr ? esc(memoStr) : '<span class="meta-bar">' + esc(t.memoPlaceholder) + '</span>'}</span>
-                <button type="button" class="memo-edit-btn" onclick="editSessionMemo(event, '\${esc(s.session_id)}', '\${esc(memoStr)}')">\${esc(t.editMemoBtn)}</button>
-              </div>
-            </div>
-          \`;
-        }).join("");
+      const activeEl = document.activeElement;
+      if (!(activeEl && activeEl.id === "inlineMemoInput")) {
+        const sessHtml = !sessions.length
+          ? \`<div class="meta-bar">\${t.noSessions}</div>\`
+          : sessions.map(s => {
+              const isSel = activeSess && s.session_id === activeSess.session_id;
+              const displayId = s.session_id.includes("::")
+                ? s.session_id.split("::")[1]
+                : s.session_id;
+              const createdStr = formatCreatedTime(s.created_at);
+              const memoStr = (s.memo && s.memo.trim()) ? s.memo.trim() : "";
+              const isEditing = editingMemoSessionId === s.session_id;
+              const memoRowContent = isEditing
+                ? \`
+                  <div style="display:flex;gap:4px;width:100%;margin-top:2px;" onclick="event.stopPropagation()">
+                    <input id="inlineMemoInput" type="text" value="\${esc(editingMemoDraft)}" style="flex:1;min-width:0;background:var(--bg);color:var(--text);border:1px solid var(--accent);border-radius:4px;padding:2px 6px;font-size:11px;" onkeydown="onInlineMemoKeyDown(event, '\${esc(s.session_id)}')" oninput="editingMemoDraft = this.value" />
+                    <button type="button" class="memo-edit-btn" style="color:var(--ok);border-color:var(--ok);" onclick="saveInlineMemo(event, '\${esc(s.session_id)}')">✓</button>
+                    <button type="button" class="memo-edit-btn" onclick="cancelInlineMemo(event)">✕</button>
+                  </div>
+                \`
+                : \`
+                  <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">\${memoStr ? esc(memoStr) : '<span class="meta-bar">' + esc(t.memoPlaceholder) + '</span>'}</span>
+                  <button type="button" class="memo-edit-btn" onclick="editSessionMemo(event, '\${esc(s.session_id)}', '\${esc(memoStr)}')">\${esc(t.editMemoBtn)}</button>
+                \`;
+              return \`
+                <div class="session-item \${isSel ? 'active' : ''}" onclick="selectSession('\${esc(s.session_id)}')">
+                  <div class="session-item-header">
+                    <span>\${esc(displayId)}</span>
+                  </div>
+                  <div class="meta-bar">\${esc(createdStr)}</div>
+                  <div class="session-memo-row">
+                    \${memoRowContent}
+                  </div>
+                </div>
+              \`;
+            }).join("");
+        setHtmlIfChanged("sessionList", sessHtml);
       }
 
       const allTasks = data.allTasks || data.tasks || [];
@@ -2220,7 +2350,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         ? (activeSess.session_id.includes("::") ? activeSess.session_id.split("::")[1] : activeSess.session_id)
         : t.noSession;
 
-      document.getElementById("kpiGrid").innerHTML = \`
+      setHtmlIfChanged("kpiGrid", \`
         <div class="card">
           <div class="card-title">\${t.activeSession}</div>
           <div class="card-value">\${esc(activeDisplayId)}</div>
@@ -2235,75 +2365,71 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
           <div class="card-title">\${t.harnesses}</div>
           <div class="harness-list">\${harnessBadges}</div>
         </div>
-      \`;
+      \`);
 
       // 2. Render Debates in Selected Session
-      if (!debates.length) {
-        document.getElementById("debateList").innerHTML =
-          \`<div class="meta-bar">\${t.noDebates}</div>\`;
-      } else {
-        document.getElementById("debateList").innerHTML = debates.map(d => {
-          let iv = null;
-          try {
-            if (d.insight_verdict_json) iv = JSON.parse(d.insight_verdict_json);
-          } catch {}
-          const verdictBadge = iv && iv.verdict
-            ? \`<span class="badge \${iv.verdict === 'APPROVE' ? 'st-done' : iv.verdict === 'MINOR_AMEND' ? 'st-running' : 'st-failed'}">\${esc(iv.verdict)}</span>\`
-            : "";
-          const decisionsHtml = iv && Array.isArray(iv.decisions) && iv.decisions.length
-            ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Decisions:</strong><ul style="margin:4px 0 0 18px;padding:0;">\${iv.decisions.map(x => \`<li>\${esc(x)}</li>\`).join("")}</ul></div>\`
-            : "";
-          const constraintsHtml = iv && Array.isArray(iv.hard_constraints) && iv.hard_constraints.length
-            ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Hard Constraints:</strong><ul style="margin:4px 0 0 18px;padding:0;">\${iv.hard_constraints.map(x => \`<li>\${esc(x)}</li>\`).join("")}</ul></div>\`
-            : "";
-          const risksHtml = iv && Array.isArray(iv.risks) && iv.risks.length
-            ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Risks:</strong><ul style="margin:4px 0 0 18px;padding:0;">\${iv.risks.map(x => \`<li>\${esc(x)}</li>\`).join("")}</ul></div>\`
-            : "";
-          const targetLogKey = d.task_id || d.debate_id;
-          const isSel = selectedTaskId === targetLogKey || selectedTaskId === d.debate_id;
-          return \`
-            <div class="debate-row \${isSel ? 'active' : ''}" onclick="selectTask('\${esc(d.debate_id)}')">
-              <div>
-                <strong>\${esc(d.debate_id)}</strong> — \${esc(d.topic)}
-                <span class="badge st-\${d.status === 'done' ? 'done' : 'running'}">\${esc(d.status)}</span>
-                \${verdictBadge}
+      const debatesHtml = !debates.length
+        ? \`<div class="meta-bar">\${t.noDebates}</div>\`
+        : debates.map(d => {
+            let iv = null;
+            try {
+              if (d.insight_verdict_json) iv = JSON.parse(d.insight_verdict_json);
+            } catch {}
+            const verdictBadge = iv && iv.verdict
+              ? \`<span class="badge \${iv.verdict === 'APPROVE' ? 'st-done' : iv.verdict === 'MINOR_AMEND' ? 'st-running' : 'st-failed'}">\${esc(iv.verdict)}</span>\`
+              : "";
+            const decisionsHtml = iv && Array.isArray(iv.decisions) && iv.decisions.length
+              ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Decisions:</strong><ul style="margin:4px 0 0 18px;padding:0;">\${iv.decisions.map(x => \`<li>\${esc(x)}</li>\`).join("")}</ul></div>\`
+              : "";
+            const constraintsHtml = iv && Array.isArray(iv.hard_constraints) && iv.hard_constraints.length
+              ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Hard Constraints:</strong><ul style="margin:4px 0 0 18px;padding:0;">\${iv.hard_constraints.map(x => \`<li>\${esc(x)}</li>\`).join("")}</ul></div>\`
+              : "";
+            const risksHtml = iv && Array.isArray(iv.risks) && iv.risks.length
+              ? \`<div class="meta-bar" style="margin-top:6px;"><strong>Risks:</strong><ul style="margin:4px 0 0 18px;padding:0;">\${iv.risks.map(x => \`<li>\${esc(x)}</li>\`).join("")}</ul></div>\`
+              : "";
+            const targetLogKey = d.task_id || d.debate_id;
+            const isSel = selectedTaskId === targetLogKey || selectedTaskId === d.debate_id;
+            return \`
+              <div class="debate-row \${isSel ? 'active' : ''}" onclick="selectTask('\${esc(d.debate_id)}')">
+                <div>
+                  <strong>\${esc(d.debate_id)}</strong> — \${esc(d.topic)}
+                  <span class="badge st-\${d.status === 'done' ? 'done' : 'running'}">\${esc(d.status)}</span>
+                  \${verdictBadge}
+                </div>
+                \${decisionsHtml}
+                \${constraintsHtml}
+                \${risksHtml}
               </div>
-              \${decisionsHtml}
-              \${constraintsHtml}
-              \${risksHtml}
-            </div>
-          \`;
-        }).join("");
-      }
+            \`;
+          }).join("");
+      setHtmlIfChanged("debateList", debatesHtml);
 
       // 3. Render Tasks in Selected Session
-      if (!tasks.length) {
-        document.getElementById("taskList").innerHTML =
-          \`<div class="meta-bar">\${t.noTasks}</div>\`;
-      } else {
-        document.getElementById("taskList").innerHTML = tasks.map(item => {
-          const isSel = selectedTaskId === item.task_id;
-          const modelTag = (item.assigned_harness || "-") + "/" + (item.assigned_model || "pending");
-          const dur = item.duration_ms ? (item.duration_ms / 1000).toFixed(1) + "s" : "";
-          const statusText = t.statusMap[item.status] || item.status;
-          return \`
-            <div class="task-row \${isSel ? 'active' : ''}" onclick="selectTask('\${esc(item.task_id)}')">
-              <div>
-                <span class="badge st-\${esc(item.status)}">\${esc(statusText)}</span>
-                <strong>\${esc(item.task_id)}</strong>
-                <span class="meta-bar">[Turn \${item.turn} | \${esc(item.track)} | \${esc(item.role)}]</span>
-                <div>\${esc(item.title)}</div>
+      const tasksHtml = !tasks.length
+        ? \`<div class="meta-bar">\${t.noTasks}</div>\`
+        : tasks.map(item => {
+            const isSel = selectedTaskId === item.task_id;
+            const modelTag = (item.assigned_harness || "-") + "/" + (item.assigned_model || "pending");
+            const dur = item.duration_ms ? (item.duration_ms / 1000).toFixed(1) + "s" : "";
+            const statusText = t.statusMap[item.status] || item.status;
+            return \`
+              <div class="task-row \${isSel ? 'active' : ''}" onclick="selectTask('\${esc(item.task_id)}')">
+                <div>
+                  <span class="badge st-\${esc(item.status)}">\${esc(statusText)}</span>
+                  <strong>\${esc(item.task_id)}</strong>
+                  <span class="meta-bar">[Turn \${item.turn} | \${esc(item.track)} | \${esc(item.role)}]</span>
+                  <div>\${esc(item.title)}</div>
+                </div>
+                <div style="text-align:right" class="meta-bar">
+                  <div>\${esc(modelTag)}</div>
+                  <div>\${esc(dur)} \${item.commit_sha ? '(' + esc(item.commit_sha.slice(0,7)) + ')' : ''}</div>
+                </div>
               </div>
-              <div style="text-align:right" class="meta-bar">
-                <div>\${esc(modelTag)}</div>
-                <div>\${esc(dur)} \${item.commit_sha ? '(' + esc(item.commit_sha.slice(0,7)) + ')' : ''}</div>
-              </div>
-            </div>
-          \`;
-        }).join("");
-      }
+            \`;
+          }).join("");
+      setHtmlIfChanged("taskList", tasksHtml);
 
-      // 4. Render Subagents in Selected Session + 4 Runtime Controls
+      // 4. Render Subagents in Selected Session + 4 Runtime Controls + Task Metadata Card
       const allLogs = data.subagentLogs || [];
       const sessionLogs = activeSess
         ? allLogs.filter(l => l.sessionId === activeSess.session_id)
@@ -2323,7 +2449,6 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         : effectiveLogs[0];
 
       // Preserve user focus if interacting with custom selects or open model picker
-      const activeEl = document.activeElement;
       if (
         (activeEl && (activeEl.id === "customModelSelect" || activeEl.id === "customHarnessSelect" || activeEl.classList.contains("mp-search"))) ||
         document.querySelector("#inspector .model-picker-wrap.open")
@@ -2331,14 +2456,20 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         return;
       }
 
+      const itemMetaCardHtml = renderSelectedItemMetaCard(activeSess, tasks, debates, data.worktreeStatuses, t);
+      const resetFilterBtn = (selectedTaskId && selectedTaskId !== "__ALL__" && sessionLogs.length > effectiveLogs.length)
+        ? \`<div style="margin-bottom:6px;"><button type="button" class="memo-edit-btn" onclick="selectTask('__ALL__')">\${esc(t.showAllSessionLogs)} (\${sessionLogs.length})</button></div>\`
+        : "";
+
       if (!activeLog) {
-        document.getElementById("inspector").innerHTML =
-          \`<div class="meta-bar">\${t.noLogs}\${selectedTaskId && selectedTaskId !== '__ALL__' ? t.forTask + esc(selectedTaskId) : ''}.</div>\`;
+        const emptyInspectorHtml = \`
+          \${resetFilterBtn}
+          \${itemMetaCardHtml}
+          <div class="meta-bar">\${t.noLogs}\${selectedTaskId && selectedTaskId !== '__ALL__' ? t.forTask + esc(selectedTaskId) : ''}.</div>
+        \`;
+        setHtmlIfChanged("inspector", emptyInspectorHtml);
       } else {
         const statusText = t.statusMap[activeLog.status] || activeLog.status;
-        const resetFilterBtn = (selectedTaskId && selectedTaskId !== "__ALL__" && sessionLogs.length > effectiveLogs.length)
-          ? \`<div style="margin-bottom:6px;"><button type="button" class="memo-edit-btn" onclick="selectTask('__ALL__')">\${esc(t.showAllSessionLogs)} (\${sessionLogs.length})</button></div>\`
-          : "";
         const logPills = effectiveLogs.map(l => {
           const isCur = l.subSessionId === activeLog.subSessionId;
           const realSessPrefix = l.sessionId.includes("::") ? l.sessionId.split("::")[0] : l.sessionId;
@@ -2360,29 +2491,70 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
           ? \`<div class="meta-bar" style="color:var(--ok);margin-top:4px;">\${esc(actionStatusMsg)}</div>\`
           : "";
 
-        document.getElementById("inspector").innerHTML = \`
-          \${resetFilterBtn}
-          <div class="pill-scroll">\${logPills}</div>
-          <div><strong>\${esc(activeLog.taskId || activeLog.role || activeLog.subSessionId)}</strong> — \${esc(activeLog.harness)} (\${esc(activeLog.model)}) | <span class="meta-bar">Role: \${esc(activeLog.role)}</span></div>
-          <div class="meta-bar">\${t.subSession}: \${esc(activeLog.subSessionId)} | \${t.statusLabel}: \${esc(statusText)}\${activeLog.pid ? ' | PID: ' + esc(activeLog.pid) : ''}</div>
-          <div class="control-box">
-            <div class="control-actions">
-              <button type="button" class="btn btn-danger" onclick="triggerSubagentAction('kill', '\${esc(activeLog.sessionId)}', '\${esc(activeLog.subSessionId)}')">\${esc(t.btnKill)}</button>
-              <button type="button" class="btn" onclick="triggerSubagentAction('retry', '\${esc(activeLog.sessionId)}', '\${esc(activeLog.subSessionId)}')">\${esc(t.btnRetry)}</button>
-              <button type="button" class="btn btn-warn" onclick="triggerSubagentAction('fallback', '\${esc(activeLog.sessionId)}', '\${esc(activeLog.subSessionId)}')">\${esc(t.btnFallback)}</button>
+        const headerKey = [
+          selectedTaskId || "",
+          activeLog.subSessionId,
+          activeLog.status,
+          activeLog.pid || "",
+          customHarnessPick,
+          customModelPick,
+          actionStatusMsg,
+          logPills,
+          itemMetaCardHtml
+        ].join("||");
+
+        const outPre = document.getElementById("outputLogPre");
+        const prmPre = document.getElementById("promptPre");
+        const nextOutText = activeLog.outputLog || t.emptyText;
+        const nextPrmText = activeLog.prompt || t.emptyText;
+
+        if (outPre && prmPre && prevHtmlCache["inspectorHeaderKey"] === headerKey) {
+          // Incremental text update: preserve scrollTop and user text selection!
+          if (outPre.textContent !== nextOutText) {
+            const wasAtBottom = (outPre.scrollHeight - outPre.scrollTop - outPre.clientHeight) < 24;
+            const prevScroll = outPre.scrollTop;
+            outPre.textContent = nextOutText;
+            outPre.scrollTop = wasAtBottom ? outPre.scrollHeight : prevScroll;
+          }
+          if (prmPre.textContent !== nextPrmText) {
+            const prevPrmScroll = prmPre.scrollTop;
+            prmPre.textContent = nextPrmText;
+            prmPre.scrollTop = prevPrmScroll;
+          }
+        } else {
+          const prevOutScroll = outPre ? outPre.scrollTop : 0;
+          const prevPrmScroll = prmPre ? prmPre.scrollTop : 0;
+          prevHtmlCache["inspectorHeaderKey"] = headerKey;
+          prevHtmlCache["inspector"] = "";
+          document.getElementById("inspector").innerHTML = \`
+            \${resetFilterBtn}
+            \${itemMetaCardHtml}
+            <div class="pill-scroll">\${logPills}</div>
+            <div><strong>\${esc(activeLog.taskId || activeLog.role || activeLog.subSessionId)}</strong> — \${esc(activeLog.harness)} (\${esc(activeLog.model)}) | <span class="meta-bar">Role: \${esc(activeLog.role)}</span></div>
+            <div class="meta-bar">\${t.subSession}: \${esc(activeLog.subSessionId)} | \${t.statusLabel}: \${esc(statusText)}\${activeLog.pid ? ' | PID: ' + esc(activeLog.pid) : ''}</div>
+            <div class="control-box">
+              <div class="control-actions">
+                <button type="button" class="btn btn-danger" onclick="triggerSubagentAction('kill', '\${esc(activeLog.sessionId)}', '\${esc(activeLog.subSessionId)}')">\${esc(t.btnKill)}</button>
+                <button type="button" class="btn" onclick="triggerSubagentAction('retry', '\${esc(activeLog.sessionId)}', '\${esc(activeLog.subSessionId)}')">\${esc(t.btnRetry)}</button>
+                <button type="button" class="btn btn-warn" onclick="triggerSubagentAction('fallback', '\${esc(activeLog.sessionId)}', '\${esc(activeLog.subSessionId)}')">\${esc(t.btnFallback)}</button>
+              </div>
+              <div class="custom-run-row">
+                <select id="customHarnessSelect" onchange="onCustomHarnessChange(this)">\${hOpts}</select>
+                \${mPicker}
+                <button type="button" class="btn btn-primary" onclick="triggerSubagentAction('custom', '\${esc(activeLog.sessionId)}', '\${esc(activeLog.subSessionId)}')">\${esc(t.btnCustomRun)}</button>
+              </div>
+              \${statusBanner}
             </div>
-            <div class="custom-run-row">
-              <select id="customHarnessSelect" onchange="onCustomHarnessChange(this)">\${hOpts}</select>
-              \${mPicker}
-              <button type="button" class="btn btn-primary" onclick="triggerSubagentAction('custom', '\${esc(activeLog.sessionId)}', '\${esc(activeLog.subSessionId)}')">\${esc(t.btnCustomRun)}</button>
-            </div>
-            \${statusBanner}
-          </div>
-          <div class="card-title" style="margin-top:10px;">\${t.outputLog}</div>
-          <pre>\${esc(activeLog.outputLog || t.emptyText)}</pre>
-          <div class="card-title" style="margin-top:10px;">\${t.promptLabel}</div>
-          <pre>\${esc(activeLog.prompt || t.emptyText)}</pre>
-        \`;
+            <div class="card-title" style="margin-top:10px;">\${t.outputLog}</div>
+            <pre id="outputLogPre">\${esc(nextOutText)}</pre>
+            <div class="card-title" style="margin-top:10px;">\${t.promptLabel}</div>
+            <pre id="promptPre">\${esc(nextPrmText)}</pre>
+          \`;
+          const newOutPre = document.getElementById("outputLogPre");
+          const newPrmPre = document.getElementById("promptPre");
+          if (newOutPre && prevOutScroll > 0) newOutPre.scrollTop = prevOutScroll;
+          if (newPrmPre && prevPrmScroll > 0) newPrmPre.scrollTop = prevPrmScroll;
+        }
       }
     }
 
