@@ -176,24 +176,85 @@ export function resolveSpawnCommand(
 // Default runner: real child_process.spawn
 // ============================================================================
 
+function ensureClaudeRuntimeEnv(
+  baseEnv: Record<string, string | undefined>
+): Record<string, string | undefined> {
+  const merged: Record<string, string | undefined> = { ...baseEnv };
+  try {
+    const homeDir =
+      baseEnv.HOME || baseEnv.USERPROFILE || process.env.HOME || process.env.USERPROFILE || "";
+    if (!homeDir) return merged;
+    const settingsPath = path.join(homeDir, ".claude", "settings.json");
+    if (fs.existsSync(settingsPath)) {
+      const cfg = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
+        env?: Record<string, unknown>;
+      };
+      if (cfg.env && typeof cfg.env === "object") {
+        for (const [k, v] of Object.entries(cfg.env)) {
+          if (v !== undefined && v !== null && !merged[k]) {
+            merged[k] = String(v);
+          }
+        }
+      }
+    }
+    const baseUrl = merged.ANTHROPIC_BASE_URL || "";
+    if (baseUrl.includes("127.0.0.1:4000") || baseUrl.includes("localhost:4000")) {
+      const proxyScript = path.join(homeDir, ".claude", "nim-proxy.mjs");
+      if (fs.existsSync(proxyScript)) {
+        try {
+          const p = child_process.spawn(process.execPath, [proxyScript], {
+            detached: true,
+            stdio: "ignore",
+            windowsHide: true,
+          });
+          p.unref();
+        } catch {
+          // ignore if already running
+        }
+      }
+    }
+  } catch {
+    // ignore settings parse errors
+  }
+  return merged;
+}
+
 const defaultCommandRunner: CommandRunner = {
   run(cmd, args, opts) {
     return new Promise((resolve) => {
-      const resolved = resolveSpawnCommand(cmd, args, opts.env);
-      const finalArgs =
-        cmd === "claude" && !resolved.args.includes("--dangerously-skip-permissions")
-          ? [...resolved.args, "--dangerously-skip-permissions"]
-          : resolved.args;
+      const effectiveEnv = cmd === "claude" ? ensureClaudeRuntimeEnv(opts.env) : opts.env;
+      const resolved = resolveSpawnCommand(cmd, args, effectiveEnv);
+      let finalArgs = resolved.args;
+      let stdinPayload: string | undefined;
+      if (cmd === "claude") {
+        // When prompt is very long (>1500 chars) on Windows, pass via stdin to avoid arg truncation or 3s stdin warning
+        const pIdx = finalArgs.indexOf("-p");
+        if (pIdx !== -1 && typeof finalArgs[pIdx + 1] === "string" && finalArgs[pIdx + 1]!.length > 1500) {
+          stdinPayload = finalArgs[pIdx + 1];
+          finalArgs = [...finalArgs.slice(0, pIdx + 1), ...finalArgs.slice(pIdx + 2)];
+        }
+        if (!finalArgs.includes("--dangerously-skip-permissions")) {
+          finalArgs = [...finalArgs, "--dangerously-skip-permissions"];
+        }
+      }
       const child = child_process.spawn(resolved.command, finalArgs, {
         cwd: opts.cwd,
-        env: opts.env,
-        stdio: ["ignore", "pipe", "pipe"],
+        env: effectiveEnv,
+        stdio: [stdinPayload !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
         windowsHide: true,
         shell: resolved.shell,
         // POSIX: own process group so process.kill(-pid) reaps the tree.
         // Windows: do NOT detach — taskkill /T handles the tree.
         detached: process.platform !== "win32",
       });
+      if (stdinPayload !== undefined && child.stdin) {
+        try {
+          child.stdin.write(stdinPayload, "utf8");
+          child.stdin.end();
+        } catch {
+          // ignore broken pipe
+        }
+      }
       opts.onSpawn?.(child.pid ?? 0);
       child.stdout?.setEncoding("utf8");
       child.stderr?.setEncoding("utf8");
