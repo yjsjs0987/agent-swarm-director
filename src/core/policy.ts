@@ -1,5 +1,5 @@
 /**
- * ASD v2.2 Security Policy Engine (src/core/policy.ts)
+ * ASD v2.3 Security Policy Engine (src/core/policy.ts)
  *
  * Implements:
  * 1. Ancestor-safe path resolution (`resolveSafeTargetPath`) using
@@ -43,7 +43,7 @@ export interface HarnessToolManifest {
 }
 
 export const DEFAULT_HARNESS_TOOL_MANIFEST: HarnessToolManifest = {
-  _asdVersion: "2.2.0",
+  _asdVersion: "2.3.0",
   harnesses: {
     "claude-code": {
       WriteTools: ["Write", "Edit", "MultiEdit", "NotebookEdit"],
@@ -69,6 +69,27 @@ export const DEFAULT_HARNESS_TOOL_MANIFEST: HarnessToolManifest = {
       WriteTools: ["write_file", "edit_file"],
       BashTools: ["run_command"],
       FilePathKeys: ["Path", "TargetFile", "path", "file_path"],
+    },
+    cursor: {
+      WriteTools: [
+        "Write",
+        "Edit",
+        "StrReplace",
+        "MultiEdit",
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "Delete",
+      ],
+      BashTools: ["Shell", "Bash", "run_terminal_cmd", "shell"],
+      FilePathKeys: [
+        "tool_input.file_path",
+        "tool_input.path",
+        "file_path",
+        "path",
+        "target_file",
+        "filePath",
+      ],
     },
   },
 };

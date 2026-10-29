@@ -1,5 +1,5 @@
 /**
- * ASD v2.2 Core Types
+ * ASD v2.3 Core Types
  * Single module exporting all type unions, constants, and interfaces.
  * Uses ONLY erasable TypeScript syntax: type unions and as const arrays.
  * No enum, no parameter properties, no namespace.
@@ -9,8 +9,8 @@
 // Version Constants
 // ============================================================================
 
-export const _asdVersion = "2.2.0" as const;
-export const ASD_VERSION = "2.2.0" as const;
+export const _asdVersion = "2.3.0" as const;
+export const ASD_VERSION = "2.3.0" as const;
 
 // ============================================================================
 // Agent Roles (5 standard roles)
@@ -56,7 +56,12 @@ export type DifficultyTier = (typeof DIFFICULTY_TIERS)[number];
 // Harness & Track Types
 // ============================================================================
 
-export type HarnessId = "claude-code" | "opencode" | "codex" | "antigravity";
+export type HarnessId =
+  | "claude-code"
+  | "opencode"
+  | "codex"
+  | "antigravity"
+  | "cursor";
 
 export type TaskTrack = "LIGHT" | "HEAVY";
 
