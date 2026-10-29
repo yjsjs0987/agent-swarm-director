@@ -208,6 +208,11 @@ export function buildDefaultHarnessCommand(
       if (thinkingEffort) args.push("--effort", thinkingEffort);
       return { command: "agy", args };
     }
+    case "cursor": {
+      const args = ["-p", prompt, "--force", "--output-format", "json"];
+      if (model) args.push("--model", model);
+      return { command: "agent", args };
+    }
     default: {
       return {
         command: "node",

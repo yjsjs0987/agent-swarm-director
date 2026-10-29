@@ -55,6 +55,12 @@ import {
   removeCodexConfigToml,
 } from "./codex.ts";
 import {
+  CursorAdapter,
+  cursorAdapter,
+  probeCursorHeadless,
+  resolveCursorBinaryName,
+} from "./cursor.ts";
+import {
   OpencodeAdapter,
   opencodeAdapter,
 } from "./opencode.ts";
@@ -157,6 +163,7 @@ const DEFAULT_HARNESS_IDS: readonly HarnessId[] = [
   "opencode",
   "codex",
   "antigravity",
+  "cursor",
 ];
 
 function getAsdRoot(): string {
@@ -464,6 +471,7 @@ export function loadHarnessNativeCapabilities(): Record<HarnessId, Set<string>> 
     opencode: new Set(["lsp"]),
     codex: new Set(["websearch"]),
     antigravity: new Set(["websearch"]),
+    cursor: new Set(["websearch"]),
   };
 
   const manifestPath = path.join(getAsdRoot(), "src", "adapters", "adapter-manifest.json");
@@ -550,7 +558,7 @@ export function loadCatalogMcpServers(
 }
 
 function mergeJsonMcpServersForHarness(options: {
-  harnessId: "claude-code" | "opencode" | "antigravity";
+  harnessId: "claude-code" | "opencode" | "antigravity" | "cursor";
   existingMcpServers: Record<string, unknown>;
   catalog: Record<string, CatalogMcpEntry>;
   nativeCapabilities: Set<string>;
@@ -625,7 +633,7 @@ function mergeJsonMcpServersForHarness(options: {
 
 function syncJsonMcpConfigFile(options: {
   filePath: string;
-  harnessId: "claude-code" | "opencode" | "antigravity";
+  harnessId: "claude-code" | "opencode" | "antigravity" | "cursor";
   catalog: Record<string, CatalogMcpEntry>;
   nativeCapabilities: Set<string>;
   externalExistingKeys?: Set<string>;
@@ -823,6 +831,7 @@ export async function syncHarnessConfigs(
     opencode: { harness: "opencode", status: "skipped", skipped: true, filesWritten: [] },
     codex: { harness: "codex", status: "skipped", skipped: true, filesWritten: [] },
     antigravity: { harness: "antigravity", status: "skipped", skipped: true, filesWritten: [] },
+    cursor: { harness: "cursor", status: "skipped", skipped: true, filesWritten: [] },
   };
 
   const adapters: Record<HarnessId, HarnessAdapter> = {
@@ -830,6 +839,7 @@ export async function syncHarnessConfigs(
     opencode: opencodeAdapter,
     codex: codexAdapter,
     antigravity: antigravityAdapter,
+    cursor: cursorAdapter,
   };
 
   let anyUpdated = false;
@@ -1087,6 +1097,82 @@ export async function syncHarnessConfigs(
 
         break;
       }
+
+      case "cursor": {
+        const cursorDir = path.join(homeDir, ".cursor");
+        cleanupLegacyAgentFiles(path.join(cursorDir, "agents"));
+
+        for (const role of AGENT_ROLES) {
+          const agentPath = path.join(cursorDir, "agents", `asd-${role}.md`);
+          const model = resolveHarnessRoleModel(role, "cursor", routingConfig);
+          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "cursor", model }));
+          written.push(agentPath);
+        }
+
+        for (const skill of ASD_SKILLS) {
+          const skillPath = path.join(cursorDir, "skills", skill, "SKILL.md");
+          safeWriteText(skillPath, getSkillTemplate(skill));
+          written.push(skillPath);
+        }
+
+        const hooksJsonPath = path.join(cursorDir, "hooks.json");
+        let existingHooks: Record<string, unknown> = {};
+        if (fs.existsSync(hooksJsonPath)) {
+          backupUserFile(hooksJsonPath);
+          try {
+            existingHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            existingHooks = {};
+          }
+        }
+        const preHooks = Array.isArray(existingHooks.PreToolUse)
+          ? existingHooks.PreToolUse.filter(
+              (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+            )
+          : [];
+        preHooks.push({
+          command: `node --no-warnings "${asdCliPath}" hook pre-tool-use --harness cursor`,
+          _asdManaged: true,
+        });
+        const stopHooks = Array.isArray(existingHooks.Stop)
+          ? existingHooks.Stop.filter(
+              (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+            )
+          : [];
+        stopHooks.push({
+          command: `node --no-warnings "${asdCliPath}" hook stop --harness cursor`,
+          _asdManaged: true,
+        });
+        existingHooks.PreToolUse = preHooks;
+        existingHooks.Stop = stopHooks;
+        safeWriteJson(hooksJsonPath, existingHooks);
+        written.push(hooksJsonPath);
+
+        const mcpJsonPath = path.join(cursorDir, "mcp.json");
+        syncJsonMcpConfigFile({
+          filePath: mcpJsonPath,
+          harnessId: "cursor",
+          catalog: catalogMcpServers,
+          nativeCapabilities: nativeCaps,
+        });
+        written.push(mcpJsonPath);
+
+        const cliConfigPath = path.join(cursorDir, "cli-config.json");
+        let cliCfg: Record<string, unknown> = {};
+        if (fs.existsSync(cliConfigPath)) {
+          backupUserFile(cliConfigPath);
+          try {
+            cliCfg = JSON.parse(fs.readFileSync(cliConfigPath, "utf8")) as Record<string, unknown>;
+          } catch {
+            cliCfg = {};
+          }
+        }
+        cliCfg._asdVersion = ASD_VERSION;
+        safeWriteJson(cliConfigPath, cliCfg);
+        written.push(cliConfigPath);
+
+        break;
+      }
     }
 
     harnessResults[harnessId] = {
@@ -1108,6 +1194,7 @@ export async function syncHarnessConfigs(
       opencode: { hash: configHash, syncedAt: new Date().toISOString() },
       codex: { hash: configHash, syncedAt: new Date().toISOString() },
       antigravity: { hash: configHash, syncedAt: new Date().toISOString() },
+      cursor: { hash: configHash, syncedAt: new Date().toISOString() },
     },
   };
   saveLastSync(homeDir, updatedLastSync);
@@ -1166,6 +1253,7 @@ export async function uninstallHarnessConfigs(
     opencode: { removed: [], restored: [] },
     codex: { removed: [], restored: [] },
     antigravity: { removed: [], restored: [] },
+    cursor: { removed: [], restored: [] },
   };
 
   const removeFile = (filePath: string, harness: HarnessId) => {
@@ -1404,6 +1492,81 @@ export async function uninstallHarnessConfigs(
   cleanupJsonMcpFile(path.join(geminiDir, "config", "mcp_config.json"), "antigravity");
   removeDirIfEmpty(path.join(geminiDir, "config"));
 
+  // 5. Cursor
+  const cursorDir = path.join(homeDir, ".cursor");
+  for (const role of AGENT_ROLES) {
+    removeFile(path.join(cursorDir, "agents", `asd-${role}.md`), "cursor");
+  }
+  removeDirIfEmpty(path.join(cursorDir, "agents"));
+  for (const skill of ASD_SKILLS) {
+    removeFile(path.join(cursorDir, "skills", skill, "SKILL.md"), "cursor");
+    removeDirIfEmpty(path.join(cursorDir, "skills", skill));
+  }
+  removeDirIfEmpty(path.join(cursorDir, "skills"));
+
+  const cursorHooksJson = path.join(cursorDir, "hooks.json");
+  if (fs.existsSync(cursorHooksJson)) {
+    try {
+      const hJson = JSON.parse(fs.readFileSync(cursorHooksJson, "utf8")) as Record<string, unknown>;
+      if (Array.isArray(hJson.PreToolUse)) {
+        hJson.PreToolUse = hJson.PreToolUse.filter(
+          (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+        );
+        if ((hJson.PreToolUse as unknown[]).length === 0) delete hJson.PreToolUse;
+      }
+      if (Array.isArray(hJson.Stop)) {
+        hJson.Stop = hJson.Stop.filter(
+          (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+        );
+        if ((hJson.Stop as unknown[]).length === 0) delete hJson.Stop;
+      }
+      removeBackupFile(cursorHooksJson);
+      if (Object.keys(hJson).length === 0) {
+        removeFile(cursorHooksJson, "cursor");
+      } else {
+        safeWriteJson(cursorHooksJson, hJson);
+        restoredFiles.push(cursorHooksJson);
+        harnessStatus.cursor.restored.push(cursorHooksJson);
+      }
+    } catch {
+      if (restoreUserBackup(cursorHooksJson)) {
+        restoredFiles.push(cursorHooksJson);
+        harnessStatus.cursor.restored.push(cursorHooksJson);
+      } else {
+        removeFile(cursorHooksJson, "cursor");
+      }
+    }
+  } else {
+    removeBackupFile(cursorHooksJson);
+  }
+
+  cleanupJsonMcpFile(path.join(cursorDir, "mcp.json"), "cursor");
+  const cursorCliCfg = path.join(cursorDir, "cli-config.json");
+  if (fs.existsSync(cursorCliCfg)) {
+    try {
+      const cJson = JSON.parse(fs.readFileSync(cursorCliCfg, "utf8")) as Record<string, unknown>;
+      delete cJson._asdVersion;
+      removeBackupFile(cursorCliCfg);
+      if (Object.keys(cJson).length === 0) {
+        removeFile(cursorCliCfg, "cursor");
+      } else {
+        safeWriteJson(cursorCliCfg, cJson);
+        restoredFiles.push(cursorCliCfg);
+        harnessStatus.cursor.restored.push(cursorCliCfg);
+      }
+    } catch {
+      if (restoreUserBackup(cursorCliCfg)) {
+        restoredFiles.push(cursorCliCfg);
+        harnessStatus.cursor.restored.push(cursorCliCfg);
+      } else {
+        removeFile(cursorCliCfg, "cursor");
+      }
+    }
+  } else {
+    removeBackupFile(cursorCliCfg);
+  }
+  removeDirIfEmpty(cursorDir);
+
   // Remove ASD-managed PATH CLI shims
   removeCliPathShims(homeDir, removedFiles);
 
@@ -1490,6 +1653,8 @@ export async function doctorProbe(
   const opencodePath = resolveBinaryOnPath("opencode");
   const codexPath = resolveBinaryOnPath("codex");
   const agyPath = resolveBinaryOnPath("agy");
+  const cursorBin = resolveCursorBinaryName();
+  const cursorPath = resolveBinaryOnPath(cursorBin);
   const harnesses: DoctorProbeResult["harnesses"] = {
     "claude-code": {
       installed: Boolean(claudePath),
@@ -1514,6 +1679,12 @@ export async function doctorProbe(
       headlessSupported: Boolean(agyPath) && antigravityAdapter.supportsHeadlessSpawn,
       binary: "agy",
       resolvedPath: agyPath,
+    },
+    cursor: {
+      installed: Boolean(cursorPath),
+      headlessSupported: Boolean(cursorPath) && cursorAdapter.supportsHeadlessSpawn,
+      binary: cursorBin,
+      resolvedPath: cursorPath,
     },
   };
   checks.push({
