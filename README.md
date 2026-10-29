@@ -1,6 +1,6 @@
 # Agent Swarm Director (`agent-swarm-director` / ASD v2.2)
 
-**English** | [한국어](./README_ko.md)
+**English** | [한국어](./README_ko.md) | [📋 Patch Notes](./PATCH_NOTES.md) | [📋 패치 노트 (KR)](./PATCH_NOTES_ko.md)
 
 > **Zero-dependency universal multi-agent orchestration harness across Claude Code, OpenCode, Codex CLI, and Antigravity.**
 
@@ -140,6 +140,13 @@ Automatically provided to harnesses without native CLI LSP (skipped on OpenCode,
 - `context7` (`https://mcp.context7.com/mcp`): Up-to-date official library and framework documentation lookup.
 - `grep_app` (`https://mcp.grep.app/mcp`): Fast regex and code search across public GitHub repositories.
 - `websearch` (`https://mcp.exa.ai/mcp`): Real-time Exa web search (automatically skipped on harnesses with native web search such as Claude Code, Codex, and Antigravity).
+
+---
+
+## Patch Notes & Changelog
+
+- 📋 **[Patch Notes (English)](./PATCH_NOTES.md)** — Full chronological history of all features, dashboard upgrades, cross-scope task scheduling, and bug fixes.
+- 📋 **[패치 노트 (한국어)](./PATCH_NOTES_ko.md)** — 초기 버전부터 최신 업데이트까지의 전체 패치 내역 정리.
 
 ---
 

@@ -1,6 +1,6 @@
 # Agent Swarm Director (`agent-swarm-director` / ASD v2.2)
 
-[English](./README.md) | **한국어**
+[English](./README.md) | **한국어** | [📋 패치 노트](./PATCH_NOTES_ko.md) | [📋 Patch Notes (EN)](./PATCH_NOTES.md)
 
 > **외부 의존성 0개(Zero-Dependency)로 Claude Code, OpenCode, Codex CLI, Antigravity 4개 AI 코딩 하네스를 통합 제어하는 범용 멀티 에이전트 오케스트레이션 하네스**
 
@@ -144,6 +144,13 @@ node --no-warnings src/cli/index.ts ui
 - `context7` (`https://mcp.context7.com/mcp`): 외부 라이브러리 및 프레임워크의 최신 공식 문서/코드 예제 조회
 - `grep_app` (`https://mcp.grep.app/mcp`): GitHub 공개 오픈소스 저장소 대상 초고속 정규식/코드 검색
 - `websearch` (`https://mcp.exa.ai/mcp`): Exa 기반 실시간 웹 검색 (Claude Code, Codex, Antigravity처럼 자체 웹 검색이 내장된 하네스에서는 중복 등록 생략)
+
+---
+
+## 패치 노트 (Patch Notes)
+
+- 📋 **[패치 노트 (한국어)](./PATCH_NOTES_ko.md)** — ASD v2.2 초기 구축부터 최신 기능(Cross-Scope 자동 후속 태스크, 실제 모델 전체 탐색 및 검색창, 런타임 제어 등)까지의 전체 패치 내역
+- 📋 **[Patch Notes (English)](./PATCH_NOTES.md)** — Full chronological patch history in English
 
 ---
 
