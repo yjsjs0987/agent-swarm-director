@@ -1,23 +1,24 @@
-# Agent Swarm Director (`agent-swarm-director` / ASD v2.2)
+# Agent Swarm Director (`agent-swarm-director` / ASD v2.3)
 
 **English** | [한국어](./README_ko.md) | [📋 Patch Notes](./PATCH_NOTES.md) | [📋 패치 노트 (KR)](./PATCH_NOTES_ko.md)
 
-> **Zero-dependency universal multi-agent orchestration harness across Claude Code, OpenCode, Codex CLI, and Antigravity.**
+> **Zero-dependency universal multi-agent orchestration harness across Claude Code, OpenCode, Codex CLI, Antigravity, and Cursor CLI.**
 
-Agent Swarm Director (**ASD v2.2**) is the universal multi-harness successor to `agy-agent-swarm-director`. Built purely on native Node.js (`>=22.13.0`) TypeScript execution and `node:sqlite` (WAL mode) with **zero external npm runtime dependencies**, ASD coordinates heterogeneous AI coding harnesses under a single deterministic control plane.
+Agent Swarm Director (**ASD v2.3**) is the universal multi-harness successor to `agy-agent-swarm-director`. Built purely on native Node.js (`>=22.13.0`) TypeScript execution and `node:sqlite` (WAL mode) with **zero external npm runtime dependencies**, ASD coordinates heterogeneous AI coding harnesses under a single deterministic control plane.
 
 ---
 
 ## Key Features
 
 - **Zero External Dependencies (`dependencies: {}`)**: Runs directly on Node.js `>=22.13.0` native TypeScript strip-types, `node:sqlite`, and standard library modules.
-- **4-Harness Universal Control Plane**:
+- **5-Harness Universal Control Plane**:
   - **Claude Code** (`claude`)
   - **OpenCode** (`opencode`)
   - **Codex CLI** (`codex`)
   - **Antigravity** (`agy`)
+  - **Cursor CLI** (`agent` / `cursor-agent`, `@cr`)
 - **Capability-Aware Gap-Filling MCP Sync (`asd sync`)**:
-  - Automatically installs global skills (`/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`, `/handoff` / `/asd-handoff`), 10 specialist agent personas, safety hooks (`PreToolUse`, `Stop`), and MCP servers into global user directories without polluting project repositories.
+  - Automatically installs global skills (`/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`, `/handoff` / `/asd-handoff`), 5 core specialist agent personas (`planner`, `architect`, `worker`, `scout`, `critic`), safety hooks (`PreToolUse`, `Stop`), and MCP servers into global user directories without polluting project repositories.
   - **Smart Deduplication**: Skips injecting MCP tools where a harness already has native built-in support (e.g., skips `lsp` on OpenCode; skips `websearch` on Claude Code, Codex, and Antigravity) or where the user already configured the MCP server.
 - **Dual-Track Execution (`LIGHT` Single-Harness vs `HEAVY` Multi-Harness)**:
   - **LIGHT Track (Current Harness Mode)**: Small tasks are handled directly by the main AI in-place; multi-agent subtasks use internal subagents within the current harness (`claim_only`), followed by automatic git checkpoint commits and instant rollback on test or boundary failure.

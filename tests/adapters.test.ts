@@ -38,6 +38,11 @@ import {
   opencodeAdapter,
   createOpencodeConfig,
 } from "../src/adapters/opencode.ts";
+import {
+  CursorAdapter,
+  cursorAdapter,
+  probeCursorHeadless,
+} from "../src/adapters/cursor.ts";
 import { AGENT_ROLES, type HarnessAdapter } from "../src/core/types.ts";
 
 describe("Harness Adapters", () => {
@@ -79,6 +84,7 @@ describe("Harness Adapters", () => {
       assert.equal(opencodeAdapter.harnessId, "opencode");
       assert.equal(codexAdapter.harnessId, "codex");
       assert.equal(antigravityAdapter.harnessId, "antigravity");
+      assert.equal(cursorAdapter.harnessId, "cursor");
     });
 
     test("headless spawn capability is accurately reported", () => {
@@ -188,6 +194,25 @@ describe("Harness Adapters", () => {
         "--model",
         "gemini-3-pro",
       ]);
+    });
+
+    test("cursor: builds `agent -p <prompt> --force --output-format json --model <model>`", () => {
+      const adapter = new CursorAdapter({ binaryName: "agent" });
+      const res = adapter.buildHeadlessCommand("Fix bug", "claude-3.7-sonnet");
+
+      assert.equal(res.cmd, "agent");
+      assert.deepEqual(res.args, [
+        "-p",
+        "Fix bug",
+        "--force",
+        "--output-format",
+        "json",
+        "--model",
+        "claude-3.7-sonnet",
+      ]);
+
+      const resNoModel = adapter.buildHeadlessCommand("Fix bug", "");
+      assert.deepEqual(resNoModel.args, ["-p", "Fix bug", "--force", "--output-format", "json"]);
     });
   });
 
@@ -349,11 +374,33 @@ describe("Harness Adapters", () => {
       assert.ok(targets.includes(path.join(mockHome, ".gemini", "mcp_config.json")));
       assert.ok(targets.includes(path.join(mockHome, ".gemini", "config", "mcp_config.json")));
     });
+
+    test("cursor targets include agents, skills, hooks.json, mcp.json, and cli-config.json", () => {
+      const adapter = new CursorAdapter();
+      const targets = adapter.globalConfigTargets(mockHome);
+
+      for (const role of AGENT_ROLES) {
+        const expected = path.join(mockHome, ".cursor", "agents", `asd-${role}.md`);
+        assert.ok(targets.includes(expected), `Missing agent target: ${expected}`);
+      }
+      for (const skill of ASD_SKILLS) {
+        const expected = path.join(mockHome, ".cursor", "skills", skill, "SKILL.md");
+        assert.ok(targets.includes(expected), `Missing skill target: ${expected}`);
+      }
+      assert.ok(targets.includes(path.join(mockHome, ".cursor", "hooks.json")));
+      assert.ok(targets.includes(path.join(mockHome, ".cursor", "mcp.json")));
+      assert.ok(targets.includes(path.join(mockHome, ".cursor", "cli-config.json")));
+    });
   });
 
-  describe("5. Antigravity Headless CLI Detection & Failure Handling", () => {
+  describe("5. Antigravity & Cursor Headless CLI Detection & Failure Handling", () => {
     test("probeAntigravityHeadless returns false cleanly for non-existent binary without throwing", () => {
       const result = probeAntigravityHeadless("definitely-non-existent-binary-12345");
+      assert.equal(result, false);
+    });
+
+    test("probeCursorHeadless returns false cleanly for non-existent binary without throwing", () => {
+      const result = probeCursorHeadless("definitely-non-existent-cursor-binary-12345");
       assert.equal(result, false);
     });
 
@@ -419,7 +466,7 @@ describe("Harness Adapters", () => {
         { director: { harness: "claude-code", model: "claude-opus-4-6" } }
       );
 
-      assert.equal(cfg._asdVersion, "2.2.0");
+      assert.equal(cfg._asdVersion, "2.3.0");
       assert.ok(cfg.mcpServers);
       assert.ok(cfg.agentRouting);
     });

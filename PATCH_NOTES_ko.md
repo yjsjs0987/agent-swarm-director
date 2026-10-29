@@ -1,12 +1,24 @@
-# 패치 노트 (`agent-swarm-director` / ASD v2.2)
+# 패치 노트 (`agent-swarm-director` / ASD v2.3)
 
 [English](./PATCH_NOTES.md) | **한국어** | [📖 README로 돌아가기](./README_ko.md)
 
-**Agent Swarm Director (ASD v2.2)**의 초기 아키텍처 구축부터 최신 기능 업데이트까지의 전체 패치 내역을 최신순으로 정리한 문서입니다.
+**Agent Swarm Director (ASD v2.3)**의 초기 아키텍처 구축부터 최신 기능 업데이트까지의 전체 패치 내역을 최신순으로 정리한 문서입니다.
 
 ---
 
-## 1. 최신 주요 패치 (오케스트레이션, 웹 대시보드 & 하네스 호환성)
+## 1. 최신 주요 패치 (오케스트레이션, 웹 대시보드 & 하네스 호환성 — v2.3.0)
+
+### `v2.3.0` — 5번째 하네스(`Cursor CLI` / `@cr`) 통합, 6대 스킬 전면 개편, 테스트 파일 수정 허용 규약 및 `asd ui` 개선
+- **5번째 AI 코딩 하네스 `Cursor CLI` (`@cr`) 공식 지원**:
+  - [`src/adapters/cursor.ts`](./src/adapters/cursor.ts)를 추가하여 헤드리스 CLI 실행(`agent -p <prompt> --force --output-format json --model <model>`), `PreToolUse` / `Stop` 보안 훅, `~/.cursor/` 글로벌 설정(`agents/`, `skills/`, `hooks.json`, `mcp.json`, `cli-config.json`) 동기화를 지원합니다.
+  - 라우터(`router.ts`), 토론 브로커(`debate.ts`), 인스톨러/닥터(`installer.ts`), 정책 가드(`policy.ts`), MCP 서버(`server.ts`), CLI 및 웹 대시보드(`dashboard.ts`) 전반에 5대 하네스 체계를 적용했습니다.
+- **6대 스킬(`src/skills/*/SKILL.md`) v2.3 전면 차별화 및 최신화**:
+  - `/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`, `/handoff` (`/asd-handoff`) 스킬에서 폐기된 구 역할명(`builder`, `analyst`, `verifier`)을 제거하고 5대 핵심 역할(`planner`, `architect`, `worker`, `scout`, `critic`)과 Cross-Scope `autoCreatedTasks`(최대 2개) / `deferredCrossScopeRequests` 프로토콜을 반영했습니다.
+- **테스트 파일 수정 기본 허용 & `claim_only` 모드 서브에이전트 로그 자동 생성**:
+  - [`src/mcp/server.ts`](./src/mcp/server.ts)에서 태스크의 `allowedFiles`가 지정된 경우에도 `tests/**`, `**/*.test.ts`, `**/*.spec.ts` 테스트 파일 생성/수정을 기본 허용하여 버전·인터페이스 변경 시 검증 게이트(`asd verify`)를 스스로 통과할 수 있도록 개선했습니다.
+  - `claim_only` 모드 디스패치 시에도 `.asd/sessions/<sessionId>/subagents/<subSessionId>/{meta.json,prompt.md,output.log}` 로그를 생성하고 `asd verify` 완료 시 상태를 갱신합니다.
+- **`asd ui` 태스크 로그 선택 폴백 버그 수정**:
+  - 웹 대시보드에서 로그가 0개인 태스크를 클릭했을 때 전체 세션 로그(`sessionLogs`)가 대신 표시되던 문제를 수정했습니다.
 
 ### `523c3cb` — Cross-Scope(타 하네스 담당 파일) 수정 요청 자동 스케줄링 및 호출자 파일 묶음 기능
 - **서브에이전트 위임 프롬프트 규약 주입 (`asd-report`)**:

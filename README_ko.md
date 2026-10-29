@@ -1,10 +1,10 @@
-# Agent Swarm Director (`agent-swarm-director` / ASD v2.2)
+# Agent Swarm Director (`agent-swarm-director` / ASD v2.3)
 
 [English](./README.md) | **한국어** | [📋 패치 노트](./PATCH_NOTES_ko.md) | [📋 Patch Notes (EN)](./PATCH_NOTES.md)
 
-> **외부 의존성 0개(Zero-Dependency)로 Claude Code, OpenCode, Codex CLI, Antigravity 4개 AI 코딩 하네스를 통합 제어하는 범용 멀티 에이전트 오케스트레이션 하네스**
+> **외부 의존성 0개(Zero-Dependency)로 Claude Code, OpenCode, Codex CLI, Antigravity, Cursor CLI 5개 AI 코딩 하네스를 통합 제어하는 범용 멀티 에이전트 오케스트레이션 하네스**
 
-**Agent Swarm Director (ASD v2.2)**는 기존 Antigravity 전용이었던 `agy-agent-swarm-director`를 4대 AI 코딩 하네스 전체에서 동작하도록 확장한 범용 멀티 에이전트 컨트롤 플레인입니다. 외부 npm 런타임 패키지를 단 하나도 사용하지 않고(`dependencies: {}`), 순수 Node.js(`>=22.13.0`) 네이티브 TypeScript 실행과 내장 `node:sqlite`(WAL 모드)만으로 동작합니다.
+**Agent Swarm Director (ASD v2.3)**는 기존 Antigravity 전용이었던 `agy-agent-swarm-director`를 5대 AI 코딩 하네스 전체에서 동작하도록 확장한 범용 멀티 에이전트 컨트롤 플레인입니다. 외부 npm 런타임 패키지를 단 하나도 사용하지 않고(`dependencies: {}`), 순수 Node.js(`>=22.13.0`) 네이티브 TypeScript 실행과 내장 `node:sqlite`(WAL 모드)만으로 동작합니다.
 
 ---
 
@@ -12,13 +12,14 @@
 
 - **외부 런타임 의존성 0개 (`dependencies: {}`)**
   - 무거운 서드파티 패키지나 빌드 과정 없이 Node.js `>=22.13.0`의 네이티브 TypeScript 실행(`--no-warnings`)과 표준 라이브러리(`node:sqlite` 등)만으로 즉시 구동됩니다.
-- **4대 AI 하네스 통합 컨트롤 플레인**
+- **5대 AI 하네스 통합 컨트롤 플레인**
   - **Claude Code** (`claude`)
   - **OpenCode** (`opencode`)
   - **Codex CLI** (`codex`)
   - **Antigravity** (`agy`)
+  - **Cursor CLI** (`agent` / `cursor-agent`, `@cr`)
 - **빈자리만 채우는 지능형 MCP 및 스킬 동기화 (`asd sync`)**
-  - 프로젝트 폴더를 오염시키지 않고 글로벌 사용자 홈 디렉토리(`~/.claude`, `~/.config/opencode`, `~/.codex`, `~/.gemini`)에만 핵심 스킬(`/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`, `/handoff` / `/asd-handoff`), 10개 전문 에이전트 페르소나, 보안 훅(`PreToolUse`, `Stop`), MCP 서버를 자동 설치합니다.
+  - 프로젝트 폴더를 오염시키지 않고 글로벌 사용자 홈 디렉토리(`~/.claude`, `~/.config/opencode`, `~/.codex`, `~/.gemini`, `~/.cursor`)에만 핵심 스킬(`/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`, `/handoff` / `/asd-handoff`), 5개 핵심 에이전트 페르소나(`planner`, `architect`, `worker`, `scout`, `critic`), 보안 훅(`PreToolUse`, `Stop`), MCP 서버를 자동 설치합니다.
   - **중복 방지(Gap-Filling) 주입**: 각 하네스가 기본 내장한 기능(예: OpenCode의 내장 `lsp`, Claude Code·Codex·Antigravity의 내장 `websearch`)이나 사용자가 이미 등록해 둔 MCP는 건너뛰고, **해당 하네스에 없는 도구만 자동으로 채워 넣습니다.**
 - **이중 트랙(Dual-Track) 실행 (`LIGHT` 현재 하네스 모드 vs `HEAVY` 다중 하네스 모드)**
   - **LIGHT 트랙 (현재 하네스 전용)**: 소규모 작업은 현재 메인 AI가 직접 인플레이스(In-place)로 처리하고, 다중 작업은 **현재 하네스 내부의 자체 서브에이전트**로 처리(`claim_only`)하며 외부 하네스 CLI를 띄우지 않습니다. 완료 시 자동 체크포인트 커밋을 생성하고 실패 시 즉시 롤백합니다.

@@ -286,5 +286,5 @@ MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD...
 });
 
 // Import the fence constants for testing
-const BEGIN_FENCE = `# >>> BEGIN MANAGED BY ASD-V2 (v2.2.0) >>>`;
+const BEGIN_FENCE = `# >>> BEGIN MANAGED BY ASD-V2 (v2.3.0) >>>`;
 const END_FENCE = `# <<< END MANAGED BY ASD-V2 <<<`;
