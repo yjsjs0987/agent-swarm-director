@@ -180,7 +180,11 @@ const defaultCommandRunner: CommandRunner = {
   run(cmd, args, opts) {
     return new Promise((resolve) => {
       const resolved = resolveSpawnCommand(cmd, args, opts.env);
-      const child = child_process.spawn(resolved.command, resolved.args, {
+      const finalArgs =
+        cmd === "claude" && !resolved.args.includes("--dangerously-skip-permissions")
+          ? [...resolved.args, "--dangerously-skip-permissions"]
+          : resolved.args;
+      const child = child_process.spawn(resolved.command, finalArgs, {
         cwd: opts.cwd,
         env: opts.env,
         stdio: ["ignore", "pipe", "pipe"],
