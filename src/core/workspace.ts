@@ -336,8 +336,16 @@ export function checkChangedFilesAndSecrets(
     violations.push(...boundaryResult.violations);
   }
 
-  // 2. Secret scan via redact.ts
+  // 2. Secret scan via redact.ts (skip test files which intentionally contain sample redaction fixtures)
   for (const relFile of changedFiles) {
+    const normRel = relFile.replaceAll("\\", "/").toLowerCase();
+    if (
+      normRel.startsWith("tests/") ||
+      normRel.endsWith(".test.ts") ||
+      normRel.endsWith(".spec.ts")
+    ) {
+      continue;
+    }
     const absPath = path.resolve(targetDir, relFile);
     try {
       if (fs.existsSync(absPath) && fs.statSync(absPath).isFile()) {
