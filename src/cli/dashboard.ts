@@ -110,15 +110,18 @@ function readMainJsonMeta(projectRoot: string, sessionId: string): Record<string
 }
 
 /**
- * Dynamically discovers available models for Antigravity, Claude Code, Codex, and OpenCode
- * by querying local CLI caches/configs and `opencode models`.
+ * Dynamically discovers ALL real available models for Antigravity, Claude Code, Codex, and OpenCode
+ * by querying each harness's live CLI (`agy models`, `opencode models`), local model caches
+ * (`~/.codex/models_cache.json`, `~/.claude/settings.json`, `~/.claude/litellm_config.yaml`),
+ * and any configured remote OpenAI-compatible gateway (`integrate.api.nvidia.com/v1/models`, etc.).
+ * Does NOT inject hardcoded fake/default models.
  */
-export function discoverHarnessModels(options?: {
+export async function discoverHarnessModels(options?: {
   projectRoot?: string;
   homeDir?: string;
   forceRefresh?: boolean;
   skipCliSpawn?: boolean;
-}): HarnessModelCatalog {
+}): Promise<HarnessModelCatalog> {
   const projectRoot = path.resolve(options?.projectRoot || process.cwd());
   const homeDir = options?.homeDir || os.homedir();
   const cacheKey = `${projectRoot}::${homeDir}`;
@@ -128,56 +131,63 @@ export function discoverHarnessModels(options?: {
   }
 
   const sets: Record<HarnessId, Set<string>> = {
-    antigravity: new Set<string>([
-      "gemini-3.1-pro",
-      "gemini-3-flash",
-      "gemini-3-flash-lite",
-      "claude-opus-4-6",
-      "claude-sonnet-4-6",
-      "gpt-oss-120b",
-    ]),
-    "claude-code": new Set<string>([
-      "claude-opus-4-6",
-      "claude-sonnet-4-6",
-      "claude-haiku-4-5",
-      "opus",
-      "sonnet",
-      "haiku",
-    ]),
-    codex: new Set<string>([
-      "gpt-5.4",
-      "gpt-5.3-codex",
-      "gpt-5-codex",
-    ]),
-    opencode: new Set<string>([
-      "minimax-m2.5-free",
-      "glm-5",
-      "deepseek-r1",
-    ]),
+    antigravity: new Set<string>(),
+    "claude-code": new Set<string>(),
+    codex: new Set<string>(),
+    opencode: new Set<string>(),
   };
 
-  // 1. Collect any models referenced in project/global routing.jsonc
+  // 1. Antigravity: query `agy models` CLI and `~/.gemini/antigravity-cli/settings.json`
   try {
-    const cfg = loadRoutingConfig(projectRoot, options?.homeDir);
-    for (const entry of [
-      ...Object.values(cfg.agents ?? {}),
-      ...Object.values(cfg.categories ?? {}),
-    ]) {
-      if (entry?.harness && entry?.model && sets[entry.harness]) {
-        sets[entry.harness].add(entry.model);
+    const agySettingsPath = path.join(homeDir, ".gemini", "antigravity-cli", "settings.json");
+    if (fs.existsSync(agySettingsPath)) {
+      const agySettings = JSON.parse(fs.readFileSync(agySettingsPath, "utf8")) as {
+        model?: string;
+      };
+      if (typeof agySettings.model === "string" && agySettings.model.trim()) {
+        sets.antigravity.add(agySettings.model.trim());
       }
-      for (const fb of entry?.fallbacks ?? []) {
-        if (fb?.harness && fb?.model && sets[fb.harness]) {
-          sets[fb.harness].add(fb.model);
+    }
+    if (!options?.skipCliSpawn) {
+      const resolved = resolveSpawnCommand("agy", ["models"]);
+      const res = child_process.spawnSync(resolved.command, resolved.args, {
+        encoding: "utf8",
+        timeout: 4000,
+        windowsHide: true,
+        shell: resolved.shell,
+      });
+      if (res.stdout) {
+        const lines = res.stdout.split(/\r?\n/);
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line || line.startsWith("Fetching")) continue;
+          // `agy models` outputs `<model-id>\t<Display Name>`
+          const firstCol = line.split("\t")[0]?.trim();
+          if (firstCol && !firstCol.includes(" ")) {
+            sets.antigravity.add(firstCol);
+          }
         }
       }
     }
   } catch {
-    // Ignore routing parse error
+    // Ignore antigravity scan errors
   }
 
-  // 2. Scan Codex ~/.codex/config.toml and ~/.codex/models_cache.json
+  // 2. Codex: scan `~/.codex/models_cache.json` and `~/.codex/config.toml`
   try {
+    const codexCachePath = path.join(homeDir, ".codex", "models_cache.json");
+    if (fs.existsSync(codexCachePath)) {
+      const cacheObj = JSON.parse(fs.readFileSync(codexCachePath, "utf8")) as {
+        models?: Array<{ slug?: string }>;
+      };
+      if (Array.isArray(cacheObj.models)) {
+        for (const item of cacheObj.models) {
+          if (item?.slug && typeof item.slug === "string" && item.slug.trim()) {
+            sets.codex.add(item.slug.trim());
+          }
+        }
+      }
+    }
     const codexTomlPath = path.join(homeDir, ".codex", "config.toml");
     if (fs.existsSync(codexTomlPath)) {
       const tomlText = fs.readFileSync(codexTomlPath, "utf8");
@@ -186,46 +196,96 @@ export function discoverHarnessModels(options?: {
         if (m[1]?.trim()) sets.codex.add(m[1].trim());
       }
     }
-    const codexCachePath = path.join(homeDir, ".codex", "models_cache.json");
-    if (fs.existsSync(codexCachePath)) {
-      const cacheObj = JSON.parse(fs.readFileSync(codexCachePath, "utf8")) as {
-        models?: Array<{ slug?: string }>;
-      };
-      if (Array.isArray(cacheObj.models)) {
-        for (const item of cacheObj.models) {
-          if (item?.slug && typeof item.slug === "string") {
-            sets.codex.add(item.slug.trim());
-          }
-        }
-      }
-    }
   } catch {
     // Ignore codex scan errors
   }
 
-  // 3. Scan Claude Code ~/.claude/settings.json & env
+  // 3. Claude Code: scan `~/.claude/settings.json`, `~/.claude/litellm_config.yaml`, and remote NIM/gateway `/v1/models`
   try {
-    if (process.env.ANTHROPIC_MODEL?.trim()) {
-      sets["claude-code"].add(process.env.ANTHROPIC_MODEL.trim());
-    }
+    const addClaudeModel = (raw: string | undefined) => {
+      if (!raw || typeof raw !== "string") return;
+      const trimmed = raw.trim();
+      if (!trimmed) return;
+      sets["claude-code"].add(trimmed);
+      const stripped = trimmed.replace(/\[.*\]$/, "").trim();
+      if (stripped) sets["claude-code"].add(stripped);
+    };
+
+    addClaudeModel(process.env.ANTHROPIC_MODEL);
+    addClaudeModel(process.env.ANTHROPIC_CUSTOM_MODEL_OPTION);
+    addClaudeModel(process.env.ANTHROPIC_DEFAULT_SONNET_MODEL);
+    addClaudeModel(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL);
+    addClaudeModel(process.env.ANTHROPIC_DEFAULT_OPUS_MODEL);
+
+    let gatewayToken = process.env.ANTHROPIC_AUTH_TOKEN || process.env.NVIDIA_NIM_API_KEY || "";
+    let gatewayBase = "https://integrate.api.nvidia.com/v1";
+
     const claudeSettingsPath = path.join(homeDir, ".claude", "settings.json");
     if (fs.existsSync(claudeSettingsPath)) {
       const settingsObj = JSON.parse(fs.readFileSync(claudeSettingsPath, "utf8")) as {
         model?: string;
         env?: Record<string, string>;
       };
-      if (typeof settingsObj.model === "string" && settingsObj.model.trim()) {
-        sets["claude-code"].add(settingsObj.model.trim());
+      addClaudeModel(settingsObj.model);
+      const env = settingsObj.env ?? {};
+      addClaudeModel(env.ANTHROPIC_MODEL);
+      addClaudeModel(env.ANTHROPIC_CUSTOM_MODEL_OPTION);
+      addClaudeModel(env.ANTHROPIC_DEFAULT_SONNET_MODEL);
+      addClaudeModel(env.ANTHROPIC_DEFAULT_HAIKU_MODEL);
+      addClaudeModel(env.ANTHROPIC_DEFAULT_OPUS_MODEL);
+      if (env.ANTHROPIC_AUTH_TOKEN?.trim()) {
+        gatewayToken = env.ANTHROPIC_AUTH_TOKEN.trim();
       }
-      if (settingsObj.env?.ANTHROPIC_MODEL?.trim()) {
-        sets["claude-code"].add(settingsObj.env.ANTHROPIC_MODEL.trim());
+    }
+
+    const litellmYamlPath = path.join(homeDir, ".claude", "litellm_config.yaml");
+    if (fs.existsSync(litellmYamlPath)) {
+      const yamlText = fs.readFileSync(litellmYamlPath, "utf8");
+      const defMatch = yamlText.match(/default_model:\s*["']?([^"'\r\n#]+)["']?/);
+      if (defMatch?.[1]) addClaudeModel(defMatch[1]);
+      const baseMatch = yamlText.match(/api_base:\s*["']?([^"'\r\n#]+)["']?/);
+      if (baseMatch?.[1]?.trim()) {
+        gatewayBase = baseMatch[1].trim().replace(/\/+$/, "");
+      }
+      for (const m of yamlText.matchAll(/-\s*model_name:\s*["']?([^"'\r\n#]+)["']?/g)) {
+        if (m[1]) addClaudeModel(m[1]);
+      }
+      for (const m of yamlText.matchAll(/model:\s*["']?([^"'\r\n#]+)["']?/g)) {
+        if (m[1]) addClaudeModel(m[1].trim().replace(/^nvidia_nim\//, ""));
+      }
+    }
+
+    // If an API token is configured (e.g. nvapi-... for NVIDIA NIM), fetch `/v1/models`
+    if (
+      !options?.skipCliSpawn &&
+      gatewayToken &&
+      !gatewayToken.includes("dummy") &&
+      !gatewayToken.includes("여기에_")
+    ) {
+      try {
+        const res = await fetch(`${gatewayBase}/models`, {
+          headers: { Authorization: `Bearer ${gatewayToken}` },
+          signal: AbortSignal.timeout(3000),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { data?: Array<{ id?: string }> };
+          if (Array.isArray(data.data)) {
+            for (const item of data.data) {
+              if (item?.id && typeof item.id === "string" && item.id.trim()) {
+                sets["claude-code"].add(item.id.trim());
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore remote gateway timeout/network error
       }
     }
   } catch {
     // Ignore claude scan errors
   }
 
-  // 4. Scan OpenCode ~/.config/opencode/opencode.json and `opencode models` CLI
+  // 4. OpenCode: scan `~/.config/opencode/opencode.json` and `opencode models` CLI
   try {
     const opencodeJsonPath = path.join(homeDir, ".config", "opencode", "opencode.json");
     if (fs.existsSync(opencodeJsonPath)) {
@@ -255,7 +315,7 @@ export function discoverHarnessModels(options?: {
       const resolved = resolveSpawnCommand("opencode", ["models"]);
       const res = child_process.spawnSync(resolved.command, resolved.args, {
         encoding: "utf8",
-        timeout: 3500,
+        timeout: 4000,
         windowsHide: true,
         shell: resolved.shell,
       });
@@ -894,7 +954,7 @@ export async function collectDashboardSnapshot(options?: {
 
   const routingConfig = loadRoutingConfig(projectRoot, homeDir);
   const hasLocalRouting = fs.existsSync(paths.localRoutingPath);
-  const availableModels = discoverHarnessModels({
+  const availableModels = await discoverHarnessModels({
     projectRoot,
     homeDir,
     skipCliSpawn: false,
@@ -1251,6 +1311,94 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       color: var(--text);
       font-family: monospace;
     }
+
+    /* Searchable Model Picker Popover */
+    .model-picker-wrap {
+      position: relative;
+      display: inline-block;
+      min-width: 195px;
+    }
+    .model-picker-btn {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      background: #090d14;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 4px;
+      padding: 5px 8px;
+      font-size: 12px;
+      font-family: monospace;
+      cursor: pointer;
+      text-align: left;
+    }
+    .model-picker-btn:hover {
+      border-color: var(--accent);
+    }
+    .model-picker-btn .mp-label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .model-picker-btn .mp-caret {
+      color: var(--muted);
+      font-size: 10px;
+      flex-shrink: 0;
+    }
+    .model-picker-popover {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      min-width: 270px;
+      max-width: 380px;
+      background: #0f1726;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      box-shadow: 0 12px 28px rgba(0,0,0,0.65);
+      z-index: 950;
+      display: none;
+      flex-direction: column;
+      padding: 6px;
+    }
+    .model-picker-wrap.open .model-picker-popover {
+      display: flex;
+    }
+    .mp-search {
+      width: 100%;
+      background: #070b12;
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 4px;
+      padding: 5px 8px;
+      font-size: 12px;
+      margin-bottom: 6px;
+      outline: none;
+    }
+    .mp-search:focus {
+      border-color: var(--accent);
+    }
+    .mp-list {
+      max-height: 210px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .mp-option {
+      padding: 5px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: monospace;
+      color: var(--text);
+      cursor: pointer;
+      word-break: break-all;
+    }
+    .mp-option:hover, .mp-option.selected {
+      background: rgba(88,166,255,0.22);
+      color: var(--accent);
+    }
   </style>
 </head>
 <body>
@@ -1332,10 +1480,10 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
     const SERVER_DEFAULT_LANG = "${defaultLang}";
     const HARNESS_OPTIONS = ["claude-code", "opencode", "codex", "antigravity"];
     let availableModelsByHarness = {
-      "antigravity": ["gemini-3.1-pro", "gemini-3-flash", "gemini-3-flash-lite"],
-      "claude-code": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
-      "codex": ["gpt-5.4", "gpt-5.3-codex", "gpt-5-codex"],
-      "opencode": ["minimax-m2.5-free", "glm-5", "deepseek-r1"]
+      "antigravity": [],
+      "claude-code": [],
+      "codex": [],
+      "opencode": []
     };
 
     const I18N = {
@@ -1346,6 +1494,8 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         modelsModalTitle: "하네스별 사용 가능한 모델 목록",
         btnRefreshModelsOnly: "🔄 모델 목록 새로고침",
         btnCloseModelsModal: "닫기",
+        modelSearchPlaceholder: "🔍 모델 검색...",
+        modelEmptyText: "(조회된 모델 없음)",
         harnessLabels: {
           "antigravity": "안티그래비티 (Antigravity)",
           "claude-code": "클로드 코드 (Claude Code)",
@@ -1361,7 +1511,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         routingCategoriesHeader: "난이도 3단계 & 도메인 카테고리 (Categories)",
         colKey: "대상 (Role / Category)",
         colPrimaryHarness: "1순위 하네스",
-        colPrimaryModel: "1순위 모델 (선택)",
+        colPrimaryModel: "1순위 모델 (클릭·검색)",
         colEffort: "추론 강도 (Effort)",
         colFallbacks: "2순위+ Fallback 체인 (harness:model, 쉼표 구분)",
         savedAlert: "프로젝트 라우팅(.asd/routing.jsonc)이 저장되었습니다.",
@@ -1413,6 +1563,8 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         modelsModalTitle: "Available Models by Harness",
         btnRefreshModelsOnly: "🔄 Refresh Model List",
         btnCloseModelsModal: "Close",
+        modelSearchPlaceholder: "🔍 Search models...",
+        modelEmptyText: "(No models found)",
         harnessLabels: {
           "antigravity": "Antigravity",
           "claude-code": "Claude Code",
@@ -1428,7 +1580,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         routingCategoriesHeader: "3 Difficulty Tiers & Domain Categories",
         colKey: "Role / Category",
         colPrimaryHarness: "Primary Harness",
-        colPrimaryModel: "Primary Model (Select)",
+        colPrimaryModel: "Primary Model (Search)",
         colEffort: "Thinking Effort",
         colFallbacks: "2nd+ Fallbacks (harness:model, comma-separated)",
         savedAlert: "Saved project routing config to .asd/routing.jsonc.",
@@ -1491,26 +1643,104 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
     let routingEditorOpen = false;
     let modelsModalOpen = false;
     let customHarnessPick = "opencode";
-    let customModelPick = "minimax-m2.5-free";
+    let customModelPick = "";
     let actionStatusMsg = "";
     let latestState = null;
 
-    function getModelsForHarness(harness, currentModel) {
-      const base = Array.isArray(availableModelsByHarness[harness])
+    function getModelsForHarness(harness) {
+      return Array.isArray(availableModelsByHarness[harness])
         ? [...availableModelsByHarness[harness]]
         : [];
-      if (currentModel && !base.includes(currentModel)) {
-        base.unshift(currentModel);
-      }
-      return base;
     }
 
-    function buildModelSelectOptionsHtml(harness, selectedModel) {
-      const models = getModelsForHarness(harness, selectedModel);
-      return models.map(m =>
-        \`<option value="\${esc(m)}" \${m === selectedModel ? 'selected' : ''}>\${esc(m)}</option>\`
+    function renderPickerOptionsListHtml(harness, selectedModel, query) {
+      const t = I18N[currentLang];
+      const all = getModelsForHarness(harness);
+      const q = (query || "").trim().toLowerCase();
+      const filtered = q ? all.filter(m => m.toLowerCase().includes(q)) : all;
+      if (!filtered.length) {
+        return \`<div class="meta-bar" style="padding:6px;">\${esc(t.modelEmptyText)}</div>\`;
+      }
+      return filtered.map(m =>
+        \`<div class="mp-option \${m === selectedModel ? 'selected' : ''}" data-model="\${esc(m)}" onclick="selectModelPickerOption(event, this)">\${esc(m)}</div>\`
       ).join("");
     }
+
+    function buildSearchableModelPickerHtml(pickerId, harness, selectedModel, extraInputClass) {
+      const t = I18N[currentLang];
+      const models = getModelsForHarness(harness);
+      const effectiveModel = selectedModel || models[0] || "";
+      const optionsHtml = renderPickerOptionsListHtml(harness, effectiveModel, "");
+      return \`
+        <div class="model-picker-wrap" id="wrap_\${esc(pickerId)}" data-harness="\${esc(harness)}">
+          <input type="hidden" class="mp-value \${esc(extraInputClass || '')}" id="\${esc(pickerId)}" value="\${esc(effectiveModel)}" />
+          <button type="button" class="model-picker-btn" onclick="toggleModelPicker(event, 'wrap_\${esc(pickerId)}')">
+            <span class="mp-label">\${esc(effectiveModel || t.modelEmptyText)}</span>
+            <span class="mp-caret">▾</span>
+          </button>
+          <div class="model-picker-popover" onclick="event.stopPropagation()">
+            <input type="text" class="mp-search" placeholder="\${esc(t.modelSearchPlaceholder)}" oninput="filterModelPicker(this)" />
+            <div class="mp-list">\${optionsHtml}</div>
+          </div>
+        </div>
+      \`;
+    }
+
+    function toggleModelPicker(ev, wrapId) {
+      ev.stopPropagation();
+      const wrap = document.getElementById(wrapId);
+      if (!wrap) return;
+      const wasOpen = wrap.classList.contains("open");
+      document.querySelectorAll(".model-picker-wrap.open").forEach(el => el.classList.remove("open"));
+      if (!wasOpen) {
+        const harness = wrap.getAttribute("data-harness") || "opencode";
+        const valInput = wrap.querySelector(".mp-value");
+        const curVal = valInput ? valInput.value : "";
+        const searchInput = wrap.querySelector(".mp-search");
+        if (searchInput) searchInput.value = "";
+        const listEl = wrap.querySelector(".mp-list");
+        if (listEl) {
+          listEl.innerHTML = renderPickerOptionsListHtml(harness, curVal, "");
+        }
+        wrap.classList.add("open");
+        if (searchInput) {
+          setTimeout(() => searchInput.focus(), 10);
+        }
+      }
+    }
+
+    function filterModelPicker(searchInputEl) {
+      const wrap = searchInputEl.closest(".model-picker-wrap");
+      if (!wrap) return;
+      const harness = wrap.getAttribute("data-harness") || "opencode";
+      const valInput = wrap.querySelector(".mp-value");
+      const curVal = valInput ? valInput.value : "";
+      const listEl = wrap.querySelector(".mp-list");
+      if (listEl) {
+        listEl.innerHTML = renderPickerOptionsListHtml(harness, curVal, searchInputEl.value);
+      }
+    }
+
+    function selectModelPickerOption(ev, optionEl) {
+      ev.stopPropagation();
+      const wrap = optionEl.closest(".model-picker-wrap");
+      if (!wrap) return;
+      const chosen = optionEl.getAttribute("data-model") || "";
+      const valInput = wrap.querySelector(".mp-value");
+      if (valInput) {
+        valInput.value = chosen;
+        if (valInput.id === "customModelSelect") {
+          customModelPick = chosen;
+        }
+      }
+      const labelEl = wrap.querySelector(".mp-label");
+      if (labelEl) labelEl.textContent = chosen;
+      wrap.classList.remove("open");
+    }
+
+    document.addEventListener("click", () => {
+      document.querySelectorAll(".model-picker-wrap.open").forEach(el => el.classList.remove("open"));
+    });
 
     function updateLangButtons() {
       document.documentElement.lang = currentLang;
@@ -1601,20 +1831,40 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
             availableModelsByHarness = data.availableModels;
             if (modelsModalOpen) renderModelsModal();
             if (routingEditorOpen) {
-              // Refresh only the model <select> options inside routing editor while preserving current selections
+              // Refresh only the model picker options inside routing editor while preserving current selections
               document.querySelectorAll("#routingEditorBody tr[data-rt-section]").forEach(tr => {
                 const hSel = tr.querySelector(".rt-harness");
-                const mSel = tr.querySelector(".rt-model");
-                if (hSel && mSel) {
-                  const curM = mSel.value;
-                  mSel.innerHTML = buildModelSelectOptionsHtml(hSel.value, curM);
+                const wrap = tr.querySelector(".model-picker-wrap");
+                if (hSel && wrap) {
+                  const harness = hSel.value;
+                  wrap.setAttribute("data-harness", harness);
+                  const valInput = wrap.querySelector(".mp-value");
+                  const curM = valInput ? valInput.value : "";
+                  const models = getModelsForHarness(harness);
+                  const nextM = curM || models[0] || "";
+                  if (valInput) valInput.value = nextM;
+                  const labelEl = wrap.querySelector(".mp-label");
+                  if (labelEl) labelEl.textContent = nextM || I18N[currentLang].modelEmptyText;
+                  const listEl = wrap.querySelector(".mp-list");
+                  if (listEl) listEl.innerHTML = renderPickerOptionsListHtml(harness, nextM, "");
                 }
               });
             }
             const customHSel = document.getElementById("customHarnessSelect");
-            const customMSel = document.getElementById("customModelSelect");
-            if (customHSel && customMSel) {
-              customMSel.innerHTML = buildModelSelectOptionsHtml(customHSel.value, customModelPick);
+            const customWrap = document.getElementById("wrap_customModelSelect");
+            if (customHSel && customWrap) {
+              const harness = customHSel.value;
+              customWrap.setAttribute("data-harness", harness);
+              const models = getModelsForHarness(harness);
+              if (!customModelPick || !models.includes(customModelPick)) {
+                customModelPick = models[0] || "";
+              }
+              const valInput = customWrap.querySelector(".mp-value");
+              if (valInput) valInput.value = customModelPick;
+              const labelEl = customWrap.querySelector(".mp-label");
+              if (labelEl) labelEl.textContent = customModelPick || I18N[currentLang].modelEmptyText;
+              const listEl = customWrap.querySelector(".mp-list");
+              if (listEl) listEl.innerHTML = renderPickerOptionsListHtml(harness, customModelPick, "");
             }
           }
         }
@@ -1633,12 +1883,20 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
     function onRoutingHarnessChange(selectEl) {
       const tr = selectEl.closest("tr");
       if (!tr) return;
-      const modelSelect = tr.querySelector(".rt-model");
-      if (!modelSelect) return;
+      const wrap = tr.querySelector(".model-picker-wrap");
+      if (!wrap) return;
       const nextHarness = selectEl.value;
-      const models = getModelsForHarness(nextHarness, "");
+      wrap.setAttribute("data-harness", nextHarness);
+      const models = getModelsForHarness(nextHarness);
       const defaultModel = models[0] || "";
-      modelSelect.innerHTML = buildModelSelectOptionsHtml(nextHarness, defaultModel);
+      const valInput = wrap.querySelector(".mp-value");
+      if (valInput) valInput.value = defaultModel;
+      const labelEl = wrap.querySelector(".mp-label");
+      if (labelEl) labelEl.textContent = defaultModel || I18N[currentLang].modelEmptyText;
+      const listEl = wrap.querySelector(".mp-list");
+      if (listEl) {
+        listEl.innerHTML = renderPickerOptionsListHtml(nextHarness, defaultModel, "");
+      }
     }
 
     function renderRoutingRows(sectionPrefix, mapObj) {
@@ -1652,12 +1910,13 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         const hOpts = HARNESS_OPTIONS.map(opt =>
           \`<option value="\${esc(opt)}" \${opt === h ? 'selected' : ''}>\${esc(opt)}</option>\`
         ).join("");
-        const mOpts = buildModelSelectOptionsHtml(h, m);
+        const pickerId = "rt_mp_" + sectionPrefix + "_" + key;
+        const mPicker = buildSearchableModelPickerHtml(pickerId, h, m, "rt-model");
         return \`
           <tr data-rt-section="\${esc(sectionPrefix)}" data-rt-key="\${esc(key)}">
             <td><strong>\${esc(key)}</strong></td>
             <td><select class="rt-harness" onchange="onRoutingHarnessChange(this)">\${hOpts}</select></td>
-            <td><select class="rt-model" style="min-width:190px;">\${mOpts}</select></td>
+            <td>\${mPicker}</td>
             <td><input type="text" class="rt-effort" value="\${esc(eff)}" placeholder="-" style="width:75px;" /></td>
             <td><input type="text" class="rt-fallbacks" value="\${esc(fbs)}" style="width:100%;min-width:220px;" /></td>
           </tr>
@@ -1772,11 +2031,19 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
 
     function onCustomHarnessChange(selEl) {
       customHarnessPick = selEl.value;
-      const models = getModelsForHarness(customHarnessPick, "");
+      const models = getModelsForHarness(customHarnessPick);
       customModelPick = models[0] || "";
-      const modelSelect = document.getElementById("customModelSelect");
-      if (modelSelect) {
-        modelSelect.innerHTML = buildModelSelectOptionsHtml(customHarnessPick, customModelPick);
+      const wrap = document.getElementById("wrap_customModelSelect");
+      if (wrap) {
+        wrap.setAttribute("data-harness", customHarnessPick);
+        const valInput = wrap.querySelector(".mp-value");
+        if (valInput) valInput.value = customModelPick;
+        const labelEl = wrap.querySelector(".mp-label");
+        if (labelEl) labelEl.textContent = customModelPick || I18N[currentLang].modelEmptyText;
+        const listEl = wrap.querySelector(".mp-list");
+        if (listEl) {
+          listEl.innerHTML = renderPickerOptionsListHtml(customHarnessPick, customModelPick, "");
+        }
       }
     }
 
@@ -2035,9 +2302,12 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         ? effectiveLogs.find(l => l.subSessionId === selectedSubSessionId) || effectiveLogs[0]
         : effectiveLogs[0];
 
-      // Preserve user focus if interacting with custom selects
+      // Preserve user focus if interacting with custom selects or open model picker
       const activeEl = document.activeElement;
-      if (activeEl && (activeEl.id === "customModelSelect" || activeEl.id === "customHarnessSelect")) {
+      if (
+        (activeEl && (activeEl.id === "customModelSelect" || activeEl.id === "customHarnessSelect" || activeEl.classList.contains("mp-search"))) ||
+        document.querySelector("#inspector .model-picker-wrap.open")
+      ) {
         return;
       }
 
@@ -2057,10 +2327,15 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
           return \`<span class="badge \${isCur ? 'st-running' : 'st-pending'}" style="cursor:pointer;" onclick="selectSubSession('\${esc(l.subSessionId)}')">\${esc(label)}</span>\`;
         }).join("");
 
+        const curHarnessModels = getModelsForHarness(customHarnessPick);
+        if (!customModelPick || !curHarnessModels.includes(customModelPick)) {
+          customModelPick = curHarnessModels[0] || "";
+        }
+
         const hOpts = HARNESS_OPTIONS.map(opt =>
           \`<option value="\${esc(opt)}" \${opt === customHarnessPick ? 'selected' : ''}>\${esc(opt)}</option>\`
         ).join("");
-        const mOpts = buildModelSelectOptionsHtml(customHarnessPick, customModelPick);
+        const mPicker = buildSearchableModelPickerHtml("customModelSelect", customHarnessPick, customModelPick, "");
         const statusBanner = actionStatusMsg
           ? \`<div class="meta-bar" style="color:var(--ok);margin-top:4px;">\${esc(actionStatusMsg)}</div>\`
           : "";
@@ -2078,7 +2353,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
             </div>
             <div class="custom-run-row">
               <select id="customHarnessSelect" onchange="onCustomHarnessChange(this)">\${hOpts}</select>
-              <select id="customModelSelect" style="min-width:175px;" onchange="customModelPick=this.value">\${mOpts}</select>
+              \${mPicker}
               <button type="button" class="btn btn-primary" onclick="triggerSubagentAction('custom', '\${esc(activeLog.sessionId)}', '\${esc(activeLog.subSessionId)}')">\${esc(t.btnCustomRun)}</button>
             </div>
             \${statusBanner}
@@ -2154,7 +2429,7 @@ export async function startDashboardServer(options?: {
       }
 
       if (req.method === "GET" && urlObj.pathname === "/api/models") {
-        const availableModels = discoverHarnessModels({
+        const availableModels = await discoverHarnessModels({
           projectRoot,
           homeDir,
           forceRefresh: false,
@@ -2168,7 +2443,7 @@ export async function startDashboardServer(options?: {
       }
 
       if (req.method === "POST" && urlObj.pathname === "/api/models/refresh") {
-        const availableModels = discoverHarnessModels({
+        const availableModels = await discoverHarnessModels({
           projectRoot,
           homeDir,
           forceRefresh: true,

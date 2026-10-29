@@ -837,6 +837,14 @@ describe("ASD CLI (src/cli/index.ts)", () => {
           assert.equal(fs.existsSync(localRtFile), false);
 
           // 4. Test dynamic model catalog endpoints (GET /api/models & POST /api/models/refresh)
+          const codexDir = path.join(uiHome, ".codex");
+          fs.mkdirSync(codexDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(codexDir, "models_cache.json"),
+            JSON.stringify({ models: [{ slug: "gpt-6-luna" }] }),
+            "utf8"
+          );
+
           const modelsRes = await fetch(`${handle.url}/api/models`);
           assert.equal(modelsRes.status, 200);
           const modelsJson = (await modelsRes.json()) as {
@@ -858,7 +866,11 @@ describe("ASD CLI (src/cli/index.ts)", () => {
             availableModels: Record<string, string[]>;
           };
           assert.equal(refreshJson.ok, true);
-          assert.ok(refreshJson.availableModels.antigravity.length > 0);
+          assert.ok(refreshJson.availableModels.codex.includes("gpt-6-luna"));
+          // Verify no hardcoded fake models are injected when unconfigured
+          assert.equal(refreshJson.availableModels.codex.includes("gpt-5.4"), false);
+          assert.ok(htmlText.includes("buildSearchableModelPickerHtml"));
+          assert.ok(htmlText.includes("filterModelPicker"));
         } finally {
           await handle.close();
         }
