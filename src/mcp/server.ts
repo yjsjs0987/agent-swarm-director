@@ -115,7 +115,7 @@ export const ASD_MCP_TOOLS = [
         },
         mainHarness: {
           type: "string",
-          enum: ["claude-code", "opencode", "codex", "antigravity"],
+          enum: ["claude-code", "opencode", "codex", "antigravity", "cursor"],
           description: "Main session orchestrator harness.",
         },
         tasks: {
@@ -179,7 +179,7 @@ export const ASD_MCP_TOOLS = [
         },
         harness: {
           type: "string",
-          enum: ["claude-code", "opencode", "codex", "antigravity"],
+          enum: ["claude-code", "opencode", "codex", "antigravity", "cursor"],
           description: "Optional harness override for task dispatch.",
         },
       },
@@ -250,7 +250,7 @@ export const ASD_MCP_TOOLS = [
         },
         harness: {
           type: "string",
-          enum: ["claude-code", "opencode", "codex", "antigravity"],
+          enum: ["claude-code", "opencode", "codex", "antigravity", "cursor"],
           description: "Optional proposer harness hint.",
         },
       },
@@ -320,7 +320,7 @@ function buildPromptForTask(
 
   lines.push(
     "## Operational Guidelines",
-    "1. Modify ONLY the files listed under Allowed Target Files.",
+    "1. Modify ONLY the files listed under Allowed Target Files (plus test files under tests/ or *.test.ts when needed to keep tests passing).",
     "2. Ensure implementation satisfies the acceptance criteria.",
     "3. Run automated tests and ensure zero errors.",
     "4. If you discover that a file OUTSIDE Allowed Target Files (e.g., owned by another harness/task) MUST be modified, DO NOT modify it directly (it will be blocked). Instead, complete your work within Allowed Target Files and emit an `asd-report` JSON block at the very end of your response:",
@@ -917,10 +917,53 @@ export class AsdMcpServer {
           wtPath = wt.wtPath;
         }
 
+        const subSessionId = `sub-${t.turn}-${t.task_id}-${t.role}-${route.harness}`;
+        let allowedFiles: string[] = [];
+        try {
+          allowedFiles = JSON.parse(t.target_files_json || "[]");
+        } catch {
+          allowedFiles = [];
+        }
+        if (allowedFiles.length > 0 && !allowedFiles.includes("tests/**")) {
+          allowedFiles = [...allowedFiles, "tests/**", "**/*.test.ts", "**/*.spec.ts"];
+        }
+        if (allowedFiles.length > 0 && !allowedFiles.includes("tests/**")) {
+          allowedFiles = [...allowedFiles, "tests/**", "**/*.test.ts", "**/*.spec.ts"];
+        }
+        const subDir = path.join(this.projectRoot, ".asd", "sessions", sessionId, "subagents", subSessionId);
+        fs.mkdirSync(subDir, { recursive: true });
+        const promptText = buildPromptForTask(t, upCtx.upstreamDecisions, upCtx.upstreamFiles);
+        const startedAt = Date.now();
+        atomicWriteFileSync(path.join(subDir, "prompt.md"), promptText);
+        atomicWriteFileSync(
+          path.join(subDir, "meta.json"),
+          JSON.stringify({
+            subSessionId,
+            parentSessionId: sessionId,
+            roleType: "subagent",
+            role: t.role,
+            harness: route.harness,
+            model: effectiveModel,
+            taskId: t.task_id,
+            pid: process.pid,
+            worktreePath: wtPath ?? null,
+            allowedFiles,
+            status: "running",
+            startedAt,
+          }, null, 2) + "\n"
+        );
+        if (!fs.existsSync(path.join(subDir, "output.log"))) {
+          atomicWriteFileSync(
+            path.join(subDir, "output.log"),
+            `[claim_only] Task ${t.task_id} claimed by @${route.harness}/${effectiveModel} at ${new Date(startedAt).toISOString()}\n`
+          );
+        }
+
         this.db.updateTaskStatus(sessionId, t.task_id, "running", {
           assignedHarness: route.harness,
           assignedModel: effectiveModel,
           worktreePath: wtPath,
+          subSessionId,
         });
 
         results.push({
@@ -1654,6 +1697,9 @@ export class AsdMcpServer {
     } catch {
       allowedFiles = [];
     }
+    if (allowedFiles.length > 0 && !allowedFiles.includes("tests/**")) {
+      allowedFiles = [...allowedFiles, "tests/**", "**/*.test.ts", "**/*.spec.ts"];
+    }
 
     let verifyResult: {
       verified: boolean;
@@ -1691,6 +1737,29 @@ export class AsdMcpServer {
 
     let autoCreatedTasks: AutoCreatedCrossScopeTask[] = [];
     let deferredCrossScopeRequests: DeferredCrossScopeRequest[] = [];
+
+    if (task.sub_session_id) {
+      try {
+        const subDir = path.join(this.projectRoot, ".asd", "sessions", sessionId, "subagents", task.sub_session_id);
+        const metaPath = path.join(subDir, "meta.json");
+        const logPath = path.join(subDir, "output.log");
+        if (fs.existsSync(metaPath)) {
+          const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+          const finishedAt = Date.now();
+          const startedAt = typeof meta.startedAt === "number" ? meta.startedAt : finishedAt;
+          meta.status = verifyResult.verified ? "done" : "failed";
+          meta.finishedAt = finishedAt;
+          meta.durationMs = Math.max(0, finishedAt - startedAt);
+          atomicWriteFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+          const logAppend = verifyResult.verified
+            ? `[verify:PASS] Commit: ${verifyResult.commitSha || "n/a"} | Summary: ${doneClaim?.summary || "completed"}\n`
+            : `[verify:FAIL] ${verifyResult.error || "Verification failed"}\n`;
+          fs.appendFileSync(logPath, logAppend, "utf8");
+        }
+      } catch {
+        // Ignore subagent log update error
+      }
+    }
 
     if (verifyResult.verified) {
       this.db.recordTaskVerified(sessionId, taskId, verifyResult.commitSha || "", doneClaim, task.duration_ms ?? 0);

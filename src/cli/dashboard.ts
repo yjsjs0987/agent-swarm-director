@@ -135,6 +135,7 @@ export async function discoverHarnessModels(options?: {
     "claude-code": new Set<string>(),
     codex: new Set<string>(),
     opencode: new Set<string>(),
+    cursor: new Set<string>(["auto", "composer-2", "claude-sonnet-4.6", "claude-opus-4.6", "gpt-5.4"]),
   };
 
   // 1. Antigravity: query `agy models` CLI and `~/.gemini/antigravity-cli/settings.json`
@@ -333,11 +334,27 @@ export async function discoverHarnessModels(options?: {
     // Ignore opencode CLI errors
   }
 
+  // 5. Cursor: scan ~/.cursor/cli-config.json
+  try {
+    const cursorCfgPath = path.join(homeDir, ".cursor", "cli-config.json");
+    if (fs.existsSync(cursorCfgPath)) {
+      const cObj = JSON.parse(fs.readFileSync(cursorCfgPath, "utf8")) as { model?: { modelId?: string } | string };
+      if (typeof cObj.model === "string" && cObj.model.trim()) {
+        sets.cursor.add(cObj.model.trim());
+      } else if (cObj.model && typeof cObj.model === "object" && typeof cObj.model.modelId === "string" && cObj.model.modelId.trim()) {
+        sets.cursor.add(cObj.model.modelId.trim());
+      }
+    }
+  } catch {
+    // Ignore cursor scan errors
+  }
+
   const catalog: HarnessModelCatalog = {
     antigravity: [...sets.antigravity],
     "claude-code": [...sets["claude-code"]],
     codex: [...sets.codex],
     opencode: [...sets.opencode],
+    cursor: [...sets.cursor],
   };
 
   modelCatalogCache.set(cacheKey, catalog);
@@ -1478,12 +1495,13 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
   </div>
   <script>
     const SERVER_DEFAULT_LANG = "${defaultLang}";
-    const HARNESS_OPTIONS = ["claude-code", "opencode", "codex", "antigravity"];
+    const HARNESS_OPTIONS = ["claude-code", "opencode", "codex", "antigravity", "cursor"];
     let availableModelsByHarness = {
       "antigravity": [],
       "claude-code": [],
       "codex": [],
-      "opencode": []
+      "opencode": [],
+      "cursor": []
     };
 
     const I18N = {
@@ -1500,7 +1518,8 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
           "antigravity": "안티그래비티 (Antigravity)",
           "claude-code": "클로드 코드 (Claude Code)",
           "codex": "코덱스 (Codex)",
-          "opencode": "오픈코드 (OpenCode)"
+          "opencode": "오픈코드 (OpenCode)",
+          "cursor": "커서 (Cursor)"
         },
         routingEditorTitle: "프로젝트 종속 라우팅 편집기 (.asd/routing.jsonc)",
         routingLocalActive: "현재 상태: 프로젝트 전용 오버라이드 적용 중 (.asd/routing.jsonc)",
@@ -1569,7 +1588,8 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
           "antigravity": "Antigravity",
           "claude-code": "Claude Code",
           "codex": "Codex",
-          "opencode": "OpenCode"
+          "opencode": "OpenCode",
+          "cursor": "Cursor"
         },
         routingEditorTitle: "Project-Scoped Routing Editor (.asd/routing.jsonc)",
         routingLocalActive: "Scope: Project Local Override Active (.asd/routing.jsonc)",
@@ -1802,7 +1822,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
     function renderModelsModal() {
       const t = I18N[currentLang];
       // 2x2 order matching user sketch: Top-Left: Antigravity, Top-Right: Claude Code, Bottom-Left: Codex, Bottom-Right: OpenCode
-      const gridOrder = ["antigravity", "claude-code", "codex", "opencode"];
+      const gridOrder = ["antigravity", "claude-code", "codex", "opencode", "cursor"];
       const html = gridOrder.map(h => {
         const list = availableModelsByHarness[h] || [];
         const label = (t.harnessLabels && t.harnessLabels[h]) || h;
@@ -2296,7 +2316,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
           )
         : sessionLogs;
 
-      const effectiveLogs = filteredLogs.length > 0 ? filteredLogs : sessionLogs;
+      const effectiveLogs = (selectedTaskId && selectedTaskId !== "__ALL__") ? filteredLogs : sessionLogs;
 
       const activeLog = selectedSubSessionId
         ? effectiveLogs.find(l => l.subSessionId === selectedSubSessionId) || effectiveLogs[0]

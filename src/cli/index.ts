@@ -36,6 +36,7 @@ import { fileURLToPath } from "node:url";
 import { antigravityAdapter } from "../adapters/antigravity.ts";
 import { claudeCodeAdapter } from "../adapters/claude-code.ts";
 import { codexAdapter } from "../adapters/codex.ts";
+import { cursorAdapter } from "../adapters/cursor.ts";
 import {
   runAsdDoctor,
   runAsdSync,
@@ -230,6 +231,8 @@ export function getAdapter(harnessId?: string): HarnessAdapter {
       return codexAdapter;
     case "antigravity":
       return antigravityAdapter;
+    case "cursor":
+      return cursorAdapter;
     default:
       return claudeCodeAdapter;
   }
@@ -572,7 +575,7 @@ Options:
       --json                         Output result in JSON format
       --project-root <dir>           Target project root directory (default: cwd)
       --home <dir>                   Custom home directory path
-      --harness <id>                 Target harness (claude-code|opencode|codex|antigravity)
+      --harness <id>                 Target harness (claude-code|opencode|codex|antigravity|cursor)
       --session <id>                 Target session ID
       --task <id>                    Target task ID (or comma-separated IDs for dispatch)
       --turn <num>                   Target wave/turn number for dispatch

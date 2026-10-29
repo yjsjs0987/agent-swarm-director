@@ -70,6 +70,7 @@ export const CLI_HARNESSES: readonly HarnessId[] = [
   "claude-code",
   "opencode",
   "codex",
+  "cursor",
 ] as const;
 
 // ============================================================================
@@ -239,6 +240,9 @@ export function detectAvailableCliHarnesses(
       found.push(harness);
     }
   }
+  if (resolveBinaryOnPath("cursor-agent", env) || resolveBinaryOnPath("agent", env)) {
+    found.push("cursor");
+  }
 
   return found.length > 0 ? found : [...CLI_HARNESSES];
 }
@@ -289,6 +293,7 @@ export function inferModelFamily(model: string, harness?: HarnessId): string {
   if (harness === "codex") return "gpt";
   if (harness === "antigravity") return "gemini";
   if (harness === "opencode") return "glm";
+  if (harness === "cursor") return "claude";
   return "general";
 }
 
