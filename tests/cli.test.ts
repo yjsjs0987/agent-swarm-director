@@ -856,6 +856,7 @@ describe("ASD CLI (src/cli/index.ts)", () => {
           assert.ok(Array.isArray(modelsJson.availableModels["claude-code"]));
           assert.ok(Array.isArray(modelsJson.availableModels.codex));
           assert.ok(Array.isArray(modelsJson.availableModels.opencode));
+          assert.ok(Array.isArray(modelsJson.availableModels.cursor));
 
           const refreshRes = await fetch(`${handle.url}/api/models/refresh`, {
             method: "POST",
@@ -871,6 +872,10 @@ describe("ASD CLI (src/cli/index.ts)", () => {
           assert.equal(refreshJson.availableModels.codex.includes("gpt-5.4"), false);
           assert.ok(htmlText.includes("buildSearchableModelPickerHtml"));
           assert.ok(htmlText.includes("filterModelPicker"));
+          assert.ok(htmlText.includes("renderSelectedItemMetaCard"));
+          assert.ok(htmlText.includes("saveInlineMemo"));
+          assert.ok(htmlText.includes("outputLogPre"));
+          assert.ok(htmlText.includes("promptPre"));
         } finally {
           await handle.close();
         }
