@@ -1,12 +1,24 @@
-# Patch Notes (`agent-swarm-director` / ASD v2.2)
+# Patch Notes (`agent-swarm-director` / ASD v2.3)
 
 **English** | [한국어](./PATCH_NOTES_ko.md) | [📖 Back to README](./README.md)
 
-Complete chronological patch history for **Agent Swarm Director (ASD v2.2)**, organized from the latest updates to the initial v2.2 foundation.
+Complete chronological patch history for **Agent Swarm Director (ASD v2.3)**, organized from the latest updates to the initial foundation.
 
 ---
 
-## 1. Latest Orchestration, Dashboard & Cross-Harness Enhancements
+## 1. Latest Orchestration, Dashboard & Cross-Harness Enhancements (v2.3.0)
+
+### `v2.3.0` — 5th Harness (`Cursor CLI` / `@cr`), Skill Modernization, Test-File Permission Rule & `asd ui` Inspector Upgrade
+- **5th Harness Support (`Cursor CLI` / `@cr`)**:
+  - Added `CursorAdapter` (`src/adapters/cursor.ts`) supporting headless execution (`agent -p <prompt> --force --output-format json --model <model>`), `PreToolUse` / `Stop` hooks, and global synchronization under `~/.cursor/` (`agents/`, `skills/`, `hooks.json`, `mcp.json`, `cli-config.json`).
+  - Wired `cursor` across `src/core/router.ts`, `src/core/debate.ts`, `src/adapters/installer.ts`, `src/core/policy.ts`, `src/mcp/server.ts`, `src/cli/index.ts`, and `src/cli/dashboard.ts`.
+- **Modernized & Differentiated All 6 Skills (`src/skills/*/SKILL.md`)**:
+  - Upgraded `/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`, and `/handoff` (`/asd-handoff`) to v2.3, eliminating legacy role names (`builder`, `analyst`, `verifier`), deduplicating boilerplate, and documenting Cross-Scope `autoCreatedTasks` (max 2) + `deferredCrossScopeRequests`.
+- **Automatic Test File Write Permission & `claim_only` Subagent Audit Logs**:
+  - Subagent `allowedFiles` in `src/mcp/server.ts` now automatically permits creating/updating test files (`tests/**`, `**/*.test.ts`, `**/*.spec.ts`) so agents can keep tests aligned with code changes during verification.
+  - Dispatches in `claim_only` mode now record structured `.asd/sessions/<sessionId>/subagents/<subSessionId>/{meta.json,prompt.md,output.log}` artifacts and update them upon `asd verify`.
+- **`asd ui` Task Log Selection Fix**:
+  - Fixed a dashboard bug where clicking a task with 0 subagent logs fell back to displaying all session logs (`sessionLogs`).
 
 ### `523c3cb` — Cross-Scope File Request Auto-Scheduling & Caller File Bundling
 - **Structured Subagent Cross-Scope Reporting (`asd-report`)**: Subagents are now instructed via `buildPromptForTask` not to directly touch files outside their `Allowed Target Files` (which are blocked by `PreToolUse`). Instead, they emit a trailing `asd-report` JSON block containing `summary`, `key_decisions`, `risks`, and `cross_scope_requests`.

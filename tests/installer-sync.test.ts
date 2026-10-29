@@ -140,7 +140,7 @@ describe("Installer & Sync Engine", () => {
       const opencodeJson = path.join(opencodeDir, "opencode.json");
       assert.ok(fs.existsSync(opencodeJson));
       const parsed = JSON.parse(fs.readFileSync(opencodeJson, "utf8"));
-      assert.equal(parsed._asdVersion, "2.2.0");
+      assert.equal(parsed._asdVersion, "2.3.0");
       assert.equal(parsed.mcpServers["asd-core"], undefined);
       assert.ok(parsed.mcpServers["context7"]);
       assert.equal(parsed.mcpServers["context7"]._asdManaged, true);

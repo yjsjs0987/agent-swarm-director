@@ -114,16 +114,16 @@ describe("ASD CLI (src/cli/index.ts)", () => {
       assert.ok(res.stdout.includes("Usage:"));
     });
 
-    test("asd --version displays 2.2.0", () => {
+    test("asd --version displays 2.3.0", () => {
       const res = runCli(["--version"]);
       assert.equal(res.exitCode, 0);
-      assert.ok(res.stdout.includes("2.2.0"));
+      assert.ok(res.stdout.includes("2.3.0"));
     });
 
     test("asd -v flag displays version", () => {
       const res = runCli(["-v"]);
       assert.equal(res.exitCode, 0);
-      assert.ok(res.stdout.includes("2.2.0"));
+      assert.ok(res.stdout.includes("2.3.0"));
     });
 
     test("unknown command exits with code 1 and error message", () => {

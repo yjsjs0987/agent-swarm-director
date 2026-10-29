@@ -1,9 +1,9 @@
-// ASD v2.2 default MCP catalog preset.
+// ASD v2.3 default MCP catalog preset.
 // Bootstrapped to ~/.asd/mcp.jsonc on first use; per-project
 // overrides live in <project>/.asd/mcp.jsonc (1st priority).
 // The <ASD_ROOT> placeholder is resolved by the installer at sync time.
 {
-  "_asdVersion": "2.2.0",
+  "_asdVersion": "2.3.0",
   "mcpServers": {
     "context7": {
       "url": "https://mcp.context7.com/mcp"

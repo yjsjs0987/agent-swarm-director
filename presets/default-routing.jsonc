@@ -1,10 +1,10 @@
-// ASD v2.2 default model routing preset.
+// ASD v2.3 default model routing preset.
 // Bootstrapped to ~/.asd/routing.jsonc on first use; per-project
 // overrides live in <project>/.asd/routing.jsonc (1st priority).
 // 5 core agent roles (planner, architect, worker, scout, critic) +
 // domain categories & 3 difficulty tiers (low, medium, high).
 {
-  "_asdVersion": "2.2.0",
+  "_asdVersion": "2.3.0",
   "agents": {
     "planner": {
       "harness": "claude-code",
