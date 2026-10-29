@@ -103,6 +103,7 @@ export interface VerifyHeavyTaskResult {
   testOutput?: string;
   error?: string;
   rolledBackTo?: string;
+  changedFiles?: string[];
 }
 
 export interface BoundaryAndSecretCheckResult {
@@ -849,6 +850,7 @@ export async function verifyAndMergeHeavyTask(
       verified: true,
       status: "done",
       commitSha: finalCommitSha,
+      changedFiles,
     };
   });
 }

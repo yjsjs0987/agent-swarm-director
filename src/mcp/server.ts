@@ -38,6 +38,7 @@ import { autoSyncIfNeeded } from "../adapters/installer.ts";
 import { loadRoutingConfig, resolveAsdPaths } from "../core/config.ts";
 import { openProjectDb, type SessionRow, type SqliteDriver, type TaskRow } from "../core/db.ts";
 import { buildDefaultHarnessCommand, runDebateBroker } from "../core/debate.ts";
+import { checkProtectedPath, isPathAllowed } from "../core/policy.ts";
 import {
   atomicWriteFileSync,
   renderPlanMd,
@@ -70,6 +71,9 @@ import type {
   AsdPlanOutput,
   AsdVerifyInput,
   AsdVerifyOutput,
+  AutoCreatedCrossScopeTask,
+  CrossScopeRequest,
+  DeferredCrossScopeRequest,
   DifficultyTier,
   DoneClaim,
   HarnessId,
@@ -198,6 +202,21 @@ export const ASD_MCP_TOOLS = [
             changed_files: { type: "array", items: { type: "string" } },
             key_decisions: { type: "array", items: { type: "string" } },
             risks: { type: "array", items: { type: "string" } },
+            cross_scope_requests: {
+              type: "array",
+              description:
+                "Optional requests to modify files outside this task's allowedFiles (up to 2 auto-scheduled into next Turn; excess deferred to Main Agent).",
+              items: {
+                type: "object",
+                properties: {
+                  target_file: { type: "string" },
+                  caller_files: { type: "array", items: { type: "string" } },
+                  reason: { type: "string" },
+                  suggested_change: { type: "string" },
+                },
+                required: ["target_file", "reason", "suggested_change"],
+              },
+            },
           },
           required: ["summary", "changed_files", "key_decisions", "risks"],
         },
@@ -303,10 +322,108 @@ function buildPromptForTask(
     "## Operational Guidelines",
     "1. Modify ONLY the files listed under Allowed Target Files.",
     "2. Ensure implementation satisfies the acceptance criteria.",
-    "3. Run automated tests and ensure zero errors."
+    "3. Run automated tests and ensure zero errors.",
+    "4. If you discover that a file OUTSIDE Allowed Target Files (e.g., owned by another harness/task) MUST be modified, DO NOT modify it directly (it will be blocked). Instead, complete your work within Allowed Target Files and emit an `asd-report` JSON block at the very end of your response:",
+    "```asd-report",
+    "{",
+    '  "summary": "Brief summary of completed work",',
+    '  "key_decisions": ["Key decision 1"],',
+    '  "risks": ["Any remaining risk"],',
+    '  "cross_scope_requests": [',
+    "    {",
+    '      "target_file": "path/to/other-harness-file.ts",',
+    '      "caller_files": ["path/to/your-own-file-to-bundle.ts"],',
+    '      "reason": "Why the external file needs modification",',
+    '      "suggested_change": "Exact interface/function change needed"',
+    "    }",
+    "  ]",
+    "}",
+    "```",
+    "(Up to 2 cross_scope_requests per task are automatically scheduled into the next Turn with your caller_files bundled; any additional requests beyond 2 are forwarded to the Main Director Agent for review.)"
   );
 
   return lines.join("\n");
+}
+
+export const MAX_AUTO_CROSS_SCOPE_PER_TASK = 2;
+export const MAX_CROSS_SCOPE_CHAIN_DEPTH = 2;
+
+export interface ParsedSubagentReport {
+  summary?: string;
+  key_decisions?: string[];
+  risks?: string[];
+  cross_scope_requests?: CrossScopeRequest[];
+}
+
+/**
+ * Extracts structured `asd-report` (or trailing JSON report) emitted by a subagent
+ * from its stdout/stderr log.
+ */
+export function parseSubagentReport(rawOutput: string): ParsedSubagentReport | null {
+  if (!rawOutput || typeof rawOutput !== "string") return null;
+
+  const candidates: string[] = [];
+  const fencedRegex = /```(?:asd-report|json)\s*([\s\S]*?)```/gi;
+  let match: RegExpExecArray | null;
+  while ((match = fencedRegex.exec(rawOutput)) !== null) {
+    if (match[1]?.trim()) {
+      candidates.push(match[1].trim());
+    }
+  }
+
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    try {
+      const parsed = JSON.parse(candidates[i]!) as Record<string, unknown>;
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        ("cross_scope_requests" in parsed ||
+          "key_decisions" in parsed ||
+          "risks" in parsed ||
+          "summary" in parsed)
+      ) {
+        const rawReqs = Array.isArray(parsed.cross_scope_requests)
+          ? parsed.cross_scope_requests
+          : [];
+        const validReqs: CrossScopeRequest[] = [];
+        for (const item of rawReqs) {
+          if (!item || typeof item !== "object") continue;
+          const r = item as Record<string, unknown>;
+          const targetFile = typeof r.target_file === "string" ? r.target_file.trim() : "";
+          const reason = typeof r.reason === "string" ? r.reason.trim() : "";
+          const suggestedChange =
+            typeof r.suggested_change === "string" ? r.suggested_change.trim() : "";
+          if (!targetFile || !reason) continue;
+          const callerFiles = Array.isArray(r.caller_files)
+            ? r.caller_files
+                .filter((f): f is string => typeof f === "string" && f.trim().length > 0)
+                .map((f) => f.trim())
+            : undefined;
+          validReqs.push({
+            target_file: targetFile,
+            ...(callerFiles && callerFiles.length > 0 ? { caller_files: callerFiles } : {}),
+            reason,
+            suggested_change: suggestedChange || reason,
+          });
+        }
+
+        return {
+          summary: typeof parsed.summary === "string" ? parsed.summary.trim() : undefined,
+          key_decisions: Array.isArray(parsed.key_decisions)
+            ? parsed.key_decisions.filter((d): d is string => typeof d === "string")
+            : undefined,
+          risks: Array.isArray(parsed.risks)
+            ? parsed.risks.filter((d): d is string => typeof d === "string")
+            : undefined,
+          cross_scope_requests: validReqs.length > 0 ? validReqs : undefined,
+        };
+      }
+    } catch {
+      // ignore malformed JSON block
+    }
+  }
+
+  return null;
 }
 
 function formatTaskForOutput(t: TaskRow) {
@@ -1088,11 +1205,19 @@ export class AsdMcpServer {
         }
 
         if (verifyResult.verified) {
+          const parsedReport = parseSubagentReport(readSpawnOutput(spawnResult.metaPath));
+          const effectiveChangedFiles = verifyResult.changedFiles ?? allowedFiles;
           const claim: DoneClaim = {
-            summary: `Completed task ${t.task_id}: ${t.title}`,
-            changed_files: verifyResult.changedFiles ?? allowedFiles,
-            key_decisions: [`Executed with @${activeRoute.harness}/${activeRoute.model}`],
-            risks: [],
+            summary: parsedReport?.summary || `Completed task ${t.task_id}: ${t.title}`,
+            changed_files: effectiveChangedFiles,
+            key_decisions: [
+              `Executed with @${activeRoute.harness}/${activeRoute.model}`,
+              ...(parsedReport?.key_decisions ?? []),
+            ],
+            risks: parsedReport?.risks ?? [],
+            ...(parsedReport?.cross_scope_requests && parsedReport.cross_scope_requests.length > 0
+              ? { cross_scope_requests: parsedReport.cross_scope_requests }
+              : {}),
           };
           this.db.recordTaskVerified(
             sessionId,
@@ -1121,6 +1246,9 @@ export class AsdMcpServer {
             model: activeRoute.model,
             commitSha: verifyResult.commitSha,
             durationMs: spawnResult.durationMs,
+            ...(claim.cross_scope_requests && claim.cross_scope_requests.length > 0
+              ? { crossScopeRequests: claim.cross_scope_requests }
+              : {}),
           };
           break;
         } else {
@@ -1146,6 +1274,18 @@ export class AsdMcpServer {
     // Execute concurrently with Promise.all
     const results = await Promise.all(spawnPromises);
 
+    // Process Cross-Scope modification requests (max 2 auto-scheduled per task; excess deferred to Main Agent)
+    const { autoCreatedTasks, deferredCrossScopeRequests } = this.processCrossScopeRequests(
+      sessionId,
+      selectedTurn,
+      results
+        .filter((r) => r.status === "done" && Array.isArray(r.crossScopeRequests) && r.crossScopeRequests.length > 0)
+        .map((r) => ({
+          taskId: r.taskId,
+          requests: r.crossScopeRequests!,
+        }))
+    );
+
     // Check if all session tasks are complete
     const finalSessionTasks = this.db.getSessionTasks(sessionId);
     const allDone = finalSessionTasks.length > 0 && finalSessionTasks.every((t) => t.status === "done");
@@ -1168,15 +1308,324 @@ export class AsdMcpServer {
     }
 
     renderPlanMd(session, finalSessionTasks);
-    const progressBoard = renderProgressBoard(session, finalSessionTasks);
+    const baseBoard = renderProgressBoard(session, finalSessionTasks);
+    const progressBoard = this.appendCrossScopeSummaryToBoard(
+      baseBoard,
+      autoCreatedTasks,
+      deferredCrossScopeRequests
+    );
 
     return {
       sessionId,
       turn: selectedTurn,
       dispatchedTasks: results,
       results,
+      ...(autoCreatedTasks.length > 0 ? { autoCreatedTasks } : {}),
+      ...(deferredCrossScopeRequests.length > 0 ? { deferredCrossScopeRequests } : {}),
       progressBoard,
     };
+  }
+
+  private processCrossScopeRequests(
+    sessionId: string,
+    currentTurn: number,
+    taskBatches: Array<{ taskId: string; requests: CrossScopeRequest[] }>
+  ): {
+    autoCreatedTasks: AutoCreatedCrossScopeTask[];
+    deferredCrossScopeRequests: DeferredCrossScopeRequest[];
+  } {
+    const autoCreatedTasks: AutoCreatedCrossScopeTask[] = [];
+    const deferredCrossScopeRequests: DeferredCrossScopeRequest[] = [];
+    if (taskBatches.length === 0) {
+      return { autoCreatedTasks, deferredCrossScopeRequests };
+    }
+
+    const allTasks = this.db.getSessionTasks(sessionId);
+    const taskById = new Map<string, TaskRow>(allTasks.map((t) => [t.task_id, t]));
+
+    const getCrossScopeChainDepth = (taskId: string, visited = new Set<string>()): number => {
+      if (visited.has(taskId)) return 0;
+      visited.add(taskId);
+      const row = taskById.get(taskId);
+      if (!row) return 0;
+      const isCrossScope = row.title.startsWith("[Cross-Scope");
+      let deps: string[] = [];
+      try {
+        deps = JSON.parse(row.depends_on_json || "[]");
+      } catch {
+        deps = [];
+      }
+      let maxUpstream = 0;
+      for (const depId of deps) {
+        maxUpstream = Math.max(maxUpstream, getCrossScopeChainDepth(depId, visited));
+      }
+      return (isCrossScope ? 1 : 0) + maxUpstream;
+    };
+
+    interface EligibleEntry {
+      callerTask: TaskRow;
+      callerAllowedFiles: string[];
+      callerChangedFiles: string[];
+      req: CrossScopeRequest;
+    }
+
+    const eligibleByTargetFile = new Map<string, EligibleEntry[]>();
+
+    for (const batch of taskBatches) {
+      const callerTask = taskById.get(batch.taskId);
+      if (!callerTask) continue;
+
+      const chainDepth = getCrossScopeChainDepth(batch.taskId);
+      if (chainDepth >= MAX_CROSS_SCOPE_CHAIN_DEPTH) {
+        for (const req of batch.requests) {
+          deferredCrossScopeRequests.push({
+            requestedByTaskId: batch.taskId,
+            target_file: req.target_file,
+            caller_files: req.caller_files,
+            reason: req.reason,
+            suggested_change: req.suggested_change,
+            deferReason: `Exceeded maximum cross-scope chain depth (${MAX_CROSS_SCOPE_CHAIN_DEPTH}); Main Agent review required`,
+          });
+        }
+        continue;
+      }
+
+      let callerAllowedFiles: string[] = [];
+      try {
+        callerAllowedFiles = JSON.parse(callerTask.target_files_json || "[]");
+      } catch {
+        callerAllowedFiles = [];
+      }
+
+      let callerChangedFiles: string[] = [];
+      if (callerTask.done_claim_json) {
+        try {
+          const parsedClaim = JSON.parse(callerTask.done_claim_json) as DoneClaim;
+          if (Array.isArray(parsedClaim.changed_files)) {
+            callerChangedFiles = parsedClaim.changed_files;
+          }
+        } catch {
+          callerChangedFiles = [];
+        }
+      }
+
+      let acceptedCountForTask = 0;
+      for (const req of batch.requests) {
+        const cleanTarget = req.target_file.replaceAll("\\", "/").replace(/^\.\//, "").trim();
+        if (!cleanTarget) continue;
+
+        const prot = checkProtectedPath(cleanTarget);
+        if (prot.protected) {
+          deferredCrossScopeRequests.push({
+            requestedByTaskId: batch.taskId,
+            target_file: cleanTarget,
+            caller_files: req.caller_files,
+            reason: req.reason,
+            suggested_change: req.suggested_change,
+            deferReason: prot.reason || "Target path is protected",
+          });
+          continue;
+        }
+
+        if (acceptedCountForTask >= MAX_AUTO_CROSS_SCOPE_PER_TASK) {
+          deferredCrossScopeRequests.push({
+            requestedByTaskId: batch.taskId,
+            target_file: cleanTarget,
+            caller_files: req.caller_files,
+            reason: req.reason,
+            suggested_change: req.suggested_change,
+            deferReason: `Exceeded max ${MAX_AUTO_CROSS_SCOPE_PER_TASK} auto cross-scope requests per subagent; deferred to Main Agent`,
+          });
+          continue;
+        }
+
+        acceptedCountForTask++;
+        const list = eligibleByTargetFile.get(cleanTarget) ?? [];
+        list.push({
+          callerTask,
+          callerAllowedFiles,
+          callerChangedFiles,
+          req: { ...req, target_file: cleanTarget },
+        });
+        eligibleByTargetFile.set(cleanTarget, list);
+      }
+    }
+
+    if (eligibleByTargetFile.size === 0) {
+      return { autoCreatedTasks, deferredCrossScopeRequests };
+    }
+
+    const nextTurn = currentTurn + 1;
+    const existingNextTurnTasks = allTasks.filter((t) => t.turn === nextTurn);
+    let nextIdx = existingNextTurnTasks.length + 1;
+    const existingIds = new Set(allTasks.map((t) => t.task_id));
+
+    const tasksToInsert: Array<{
+      taskId: string;
+      turn: number;
+      title: string;
+      track: TaskTrack;
+      role: AgentRole;
+      category: string;
+      difficulty: DifficultyTier;
+      dependsOn: string[];
+      targetFiles: string[];
+      contextHint: string;
+      acceptance: string;
+      verifyCmd: string | null;
+    }> = [];
+
+    for (const [targetFile, entries] of eligibleByTargetFile.entries()) {
+      while (existingIds.has(`T${nextTurn}.${nextIdx}`)) {
+        nextIdx++;
+      }
+      const newTaskId = `T${nextTurn}.${nextIdx}`;
+      existingIds.add(newTaskId);
+      nextIdx++;
+
+      // Find existing owner task(s) B in current or earlier turns that own targetFile
+      const ownerTasks: TaskRow[] = [];
+      for (const candidate of allTasks) {
+        if (candidate.turn > currentTurn) continue;
+        let candFiles: string[] = [];
+        try {
+          candFiles = JSON.parse(candidate.target_files_json || "[]");
+        } catch {
+          candFiles = [];
+        }
+        if (isPathAllowed(targetFile, candFiles)) {
+          ownerTasks.push(candidate);
+        }
+      }
+
+      // Bundle caller A's relevant files (up to 2 per caller) alongside targetFile
+      const bundledFiles = new Set<string>([targetFile]);
+      for (const entry of entries) {
+        const requestedCallers = (entry.req.caller_files ?? [])
+          .map((f) => f.replaceAll("\\", "/").replace(/^\.\//, "").trim())
+          .filter(
+            (f) =>
+              f.length > 0 &&
+              !checkProtectedPath(f).protected &&
+              (isPathAllowed(f, entry.callerAllowedFiles) || entry.callerChangedFiles.includes(f))
+          );
+
+        if (requestedCallers.length > 0) {
+          for (const cf of requestedCallers.slice(0, 2)) {
+            bundledFiles.add(cf);
+          }
+        } else {
+          // Fallback: automatically bundle up to 2 concrete files from caller A's changed_files or allowedFiles
+          const autoPool =
+            entry.callerChangedFiles.length > 0
+              ? entry.callerChangedFiles
+              : entry.callerAllowedFiles.filter((f) => !f.includes("*"));
+          for (const cf of autoPool.slice(0, 2)) {
+            const cleanCf = cf.replaceAll("\\", "/").replace(/^\.\//, "").trim();
+            if (cleanCf && !checkProtectedPath(cleanCf).protected) {
+              bundledFiles.add(cleanCf);
+            }
+          }
+        }
+      }
+
+      const dependsOnSet = new Set<string>();
+      const requestedBySet = new Set<string>();
+      for (const entry of entries) {
+        dependsOnSet.add(entry.callerTask.task_id);
+        requestedBySet.add(entry.callerTask.task_id);
+      }
+      for (const owner of ownerTasks) {
+        dependsOnSet.add(owner.task_id);
+      }
+
+      const primaryOwner = ownerTasks[0] ?? entries[0]!.callerTask;
+      const targetFilesArr = Array.from(bundledFiles);
+      const dependsOnArr = Array.from(dependsOnSet);
+      const requestedByArr = Array.from(requestedBySet);
+
+      const sanitizeInline = (s: string) =>
+        s.replace(/[|()\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+
+      const reasonsSummary = entries
+        .map((e) => `[from ${e.callerTask.task_id}] ${sanitizeInline(e.req.reason)}`)
+        .join("; ");
+      const changesSummary = entries
+        .map((e) => `[from ${e.callerTask.task_id}] ${sanitizeInline(e.req.suggested_change)}`)
+        .join("; ");
+
+      const track: TaskTrack =
+        targetFilesArr.length > 1 ||
+        ownerTasks.some((o) => o.track === "HEAVY") ||
+        entries.some((e) => e.callerTask.track === "HEAVY")
+          ? "HEAVY"
+          : "LIGHT";
+
+      const title = `[Cross-Scope from ${requestedByArr.join(",")}] Update ${targetFile}`;
+
+      tasksToInsert.push({
+        taskId: newTaskId,
+        turn: nextTurn,
+        title,
+        track,
+        role: (primaryOwner.role as AgentRole) || "worker",
+        category: primaryOwner.category || "general",
+        difficulty: (primaryOwner.difficulty as DifficultyTier) || "medium",
+        dependsOn: dependsOnArr,
+        targetFiles: targetFilesArr,
+        contextHint: reasonsSummary,
+        acceptance: changesSummary,
+        verifyCmd: primaryOwner.verify_cmd ?? entries[0]!.callerTask.verify_cmd ?? null,
+      });
+
+      autoCreatedTasks.push({
+        taskId: newTaskId,
+        turn: nextTurn,
+        title,
+        targetFiles: targetFilesArr,
+        dependsOn: dependsOnArr,
+        requestedBy: requestedByArr,
+      });
+    }
+
+    if (tasksToInsert.length > 0) {
+      this.db.withImmediateTx(() => {
+        this.db.upsertTasks(sessionId, tasksToInsert);
+        this.db.incrementStateVersion(sessionId);
+      });
+    }
+
+    return { autoCreatedTasks, deferredCrossScopeRequests };
+  }
+
+  private appendCrossScopeSummaryToBoard(
+    progressBoard: string,
+    autoCreatedTasks: AutoCreatedCrossScopeTask[],
+    deferredCrossScopeRequests: DeferredCrossScopeRequest[]
+  ): string {
+    if (autoCreatedTasks.length === 0 && deferredCrossScopeRequests.length === 0) {
+      return progressBoard;
+    }
+    const extra: string[] = [progressBoard, ""];
+    if (autoCreatedTasks.length > 0) {
+      extra.push("#### 🔄 자동 생성된 Cross-Scope 후속 태스크 (최대 2개/서브하네스)");
+      for (const t of autoCreatedTasks) {
+        extra.push(
+          `- **${t.taskId}** (Turn ${t.turn}, 요청: ${t.requestedBy.join(", ")}, 선행: ${t.dependsOn.join(", ")}) → 묶인 파일: \`${t.targetFiles.join("`, `")}\``
+        );
+      }
+      extra.push("");
+    }
+    if (deferredCrossScopeRequests.length > 0) {
+      extra.push("#### ⚠️ 메인 에이전트 판단 필요 (보류된 Cross-Scope 요청)");
+      for (const d of deferredCrossScopeRequests) {
+        extra.push(
+          `- **[요청: ${d.requestedByTaskId}]** 대상: \`${d.target_file}\` — 사유: ${d.reason} / 제안: ${d.suggested_change} *(보류 사유: ${d.deferReason})*`
+        );
+      }
+      extra.push("");
+    }
+    return extra.join("\n").trimEnd();
   }
 
   // ==========================================================================
@@ -1240,9 +1689,20 @@ export class AsdMcpServer {
       });
     }
 
+    let autoCreatedTasks: AutoCreatedCrossScopeTask[] = [];
+    let deferredCrossScopeRequests: DeferredCrossScopeRequest[] = [];
+
     if (verifyResult.verified) {
       this.db.recordTaskVerified(sessionId, taskId, verifyResult.commitSha || "", doneClaim, task.duration_ms ?? 0);
       this.db.resetNoProgress(sessionId);
+
+      if (Array.isArray(doneClaim.cross_scope_requests) && doneClaim.cross_scope_requests.length > 0) {
+        const crossScopeRes = this.processCrossScopeRequests(sessionId, task.turn, [
+          { taskId, requests: doneClaim.cross_scope_requests },
+        ]);
+        autoCreatedTasks = crossScopeRes.autoCreatedTasks;
+        deferredCrossScopeRequests = crossScopeRes.deferredCrossScopeRequests;
+      }
     } else {
       this.db.recordTaskAttemptFailure(sessionId, taskId);
     }
@@ -1269,7 +1729,12 @@ export class AsdMcpServer {
     }
 
     renderPlanMd(session, allTasks);
-    const progressBoard = renderProgressBoard(session, allTasks);
+    const baseBoard = renderProgressBoard(session, allTasks);
+    const progressBoard = this.appendCrossScopeSummaryToBoard(
+      baseBoard,
+      autoCreatedTasks,
+      deferredCrossScopeRequests
+    );
 
     const finalStatus: TaskStatus = verifyResult.verified
       ? "done"
@@ -1284,6 +1749,8 @@ export class AsdMcpServer {
       violations: verifyResult.violations,
       testOutput: verifyResult.testOutput,
       error: verifyResult.error,
+      ...(autoCreatedTasks.length > 0 ? { autoCreatedTasks } : {}),
+      ...(deferredCrossScopeRequests.length > 0 ? { deferredCrossScopeRequests } : {}),
       progressBoard,
     };
   }

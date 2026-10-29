@@ -949,5 +949,130 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
       // Progress board must be present and contain header
       assert.ok(debateResp.progressBoard.includes("### 📊 ASD TODO 진행 현황"));
     });
+
+    test("cross-scope requests bundle caller A files with target B file, link dependsOn [A, B], cap at 2 per subagent, and forward excess to Main Agent", async () => {
+      const projectRoot = makeProjectRoot();
+
+      const mockRunner: CommandRunner = {
+        async run(_cmd, _args, opts) {
+          opts.onSpawn?.(7777);
+          const loginPath = path.join(opts.cwd, "src", "ui", "LoginForm.tsx");
+          const authPath = path.join(opts.cwd, "src", "api", "auth.ts");
+
+          if (opts.cwd.includes("T1.1")) {
+            fs.mkdirSync(path.dirname(loginPath), { recursive: true });
+            fs.writeFileSync(loginPath, "export const LoginForm = () => 'login';\n", "utf8");
+            const reportBlock = [
+              "Implemented LoginForm, but backend API files need additional fields.",
+              "```asd-report",
+              JSON.stringify(
+                {
+                  summary: "LoginForm UI implemented",
+                  key_decisions: ["Added refreshToken hook call in LoginForm"],
+                  risks: ["Requires backend AuthResponse update"],
+                  cross_scope_requests: [
+                    {
+                      target_file: "src/api/auth.ts",
+                      caller_files: ["src/ui/LoginForm.tsx"],
+                      reason: "LoginForm requires refreshToken field on AuthResponse",
+                      suggested_change: "Add refreshToken?: string to AuthResponse interface",
+                    },
+                    {
+                      target_file: "src/api/session.ts",
+                      reason: "Session expiry helper needed by UI",
+                      suggested_change: "Export isSessionExpired(token: string): boolean",
+                    },
+                    {
+                      target_file: "src/api/audit.ts",
+                      reason: "Optional audit log hook for login attempts",
+                      suggested_change: "Add recordLoginAttempt()",
+                    },
+                  ],
+                },
+                null,
+                2
+              ),
+              "```",
+            ].join("\n");
+            opts.onStdout(reportBlock + "\n");
+          } else if (opts.cwd.includes("T1.2")) {
+            fs.mkdirSync(path.dirname(authPath), { recursive: true });
+            fs.writeFileSync(authPath, "export interface AuthResponse { token: string; }\n", "utf8");
+            opts.onStdout("Completed T1.2 backend auth.ts\n");
+          }
+          return { exitCode: 0, pid: 7777 };
+        },
+      };
+
+      const server = new AsdMcpServer({
+        projectRoot,
+        commandRunner: mockRunner,
+        autoSync: false,
+      });
+      openServers.push(server);
+
+      await server.handleRequest("asd_plan", {
+        action: "create",
+        sessionId: "cross-scope-session",
+        tasks: [
+          {
+            taskId: "T1.1",
+            turn: 1,
+            title: "Frontend LoginForm",
+            track: "HEAVY",
+            role: "worker",
+            category: "visual-ui",
+            difficulty: "medium",
+            targetFiles: ["src/ui/LoginForm.tsx", "src/ui/useAuth.ts"],
+          },
+          {
+            taskId: "T1.2",
+            turn: 1,
+            title: "Backend Auth API",
+            track: "HEAVY",
+            role: "architect",
+            category: "general",
+            difficulty: "high",
+            targetFiles: ["src/api/auth.ts"],
+          },
+        ],
+      });
+
+      const dispatchResp = (await server.handleRequest("asd_dispatch", {
+        sessionId: "cross-scope-session",
+        turn: 1,
+        mode: "parallel_spawn",
+      })) as AsdDispatchOutput;
+
+      assert.equal(dispatchResp.results.length, 2);
+      assert.ok(dispatchResp.results.every((r) => r.status === "done"));
+
+      assert.ok(Array.isArray(dispatchResp.autoCreatedTasks));
+      assert.equal(dispatchResp.autoCreatedTasks!.length, 2);
+
+      const t21 = dispatchResp.autoCreatedTasks![0]!;
+      assert.equal(t21.taskId, "T2.1");
+      assert.equal(t21.turn, 2);
+      assert.deepEqual(t21.targetFiles, ["src/api/auth.ts", "src/ui/LoginForm.tsx"]);
+      assert.deepEqual(t21.dependsOn, ["T1.1", "T1.2"]);
+
+      const t22 = dispatchResp.autoCreatedTasks![1]!;
+      assert.equal(t22.taskId, "T2.2");
+      assert.equal(t22.turn, 2);
+      assert.deepEqual(t22.targetFiles, ["src/api/session.ts", "src/ui/LoginForm.tsx"]);
+      assert.deepEqual(t22.dependsOn, ["T1.1"]);
+
+      assert.ok(Array.isArray(dispatchResp.deferredCrossScopeRequests));
+      assert.equal(dispatchResp.deferredCrossScopeRequests!.length, 1);
+      assert.equal(dispatchResp.deferredCrossScopeRequests![0]!.requestedByTaskId, "T1.1");
+      assert.equal(dispatchResp.deferredCrossScopeRequests![0]!.target_file, "src/api/audit.ts");
+
+      assert.ok(dispatchResp.progressBoard.includes("자동 생성된 Cross-Scope 후속 태스크"));
+      assert.ok(dispatchResp.progressBoard.includes("메인 에이전트 판단 필요"));
+      const db = openProjectDb(projectRoot);
+      const session = db.getSession("cross-scope-session");
+      assert.notEqual(session?.phase, "done");
+      db.close();
+    });
   });
 });

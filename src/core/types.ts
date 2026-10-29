@@ -75,11 +75,19 @@ export type SessionPhase = "planning" | "running" | "paused" | "done";
 // Done Claim Interface
 // ============================================================================
 
+export interface CrossScopeRequest {
+  target_file: string;
+  caller_files?: string[];
+  reason: string;
+  suggested_change: string;
+}
+
 export interface DoneClaim {
   summary: string;
   changed_files: string[];
   key_decisions: string[];
   risks: string[];
+  cross_scope_requests?: CrossScopeRequest[];
 }
 
 // ============================================================================
@@ -211,9 +219,37 @@ export interface AsdDispatchInput {
   harness?: HarnessId;
 }
 
+export interface AutoCreatedCrossScopeTask {
+  taskId: string;
+  turn: number;
+  title: string;
+  targetFiles: string[];
+  dependsOn: string[];
+  requestedBy: string[];
+}
+
+export interface DeferredCrossScopeRequest {
+  requestedByTaskId: string;
+  target_file: string;
+  caller_files?: string[];
+  reason: string;
+  suggested_change: string;
+  deferReason: string;
+}
+
 export interface AsdDispatchOutput {
   sessionId: string;
   turn: number;
+  dispatchedTasks?: Array<{
+    taskId: string;
+    status: TaskStatus;
+    harness: HarnessId;
+    model: string;
+    commitSha?: string;
+    durationMs: number;
+    error?: string;
+    crossScopeRequests?: CrossScopeRequest[];
+  }>;
   results: Array<{
     taskId: string;
     status: TaskStatus;
@@ -222,7 +258,10 @@ export interface AsdDispatchOutput {
     commitSha?: string;
     durationMs: number;
     error?: string;
+    crossScopeRequests?: CrossScopeRequest[];
   }>;
+  autoCreatedTasks?: AutoCreatedCrossScopeTask[];
+  deferredCrossScopeRequests?: DeferredCrossScopeRequest[];
   progressBoard: string;
 }
 
@@ -242,6 +281,8 @@ export interface AsdVerifyOutput {
   violations?: string[];
   testOutput?: string;
   error?: string;
+  autoCreatedTasks?: AutoCreatedCrossScopeTask[];
+  deferredCrossScopeRequests?: DeferredCrossScopeRequest[];
   progressBoard: string;
 }
 
