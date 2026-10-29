@@ -23,30 +23,72 @@ export const ASD_SKILLS = [
 
 export type AsdSkill = (typeof ASD_SKILLS)[number];
 
-export interface ClaudeHookEntry {
+export interface ClaudeHookCommand {
+  type: "command";
   command: string;
-  _asdManaged?: boolean;
+}
+
+export interface ClaudeHookMatcherEntry {
+  matcher: string;
+  hooks: ClaudeHookCommand[];
   [key: string]: unknown;
 }
 
 /**
- * Generates the ASD managed hook configuration entries for Claude Code.
+ * Checks whether a Claude Code hook entry (either legacy flat `{ command, _asdManaged }`
+ * or modern `{ matcher, hooks: [{ type: "command", command }] }`) is managed by ASD.
+ */
+export function isAsdManagedClaudeHook(entry: unknown): boolean {
+  if (!entry || typeof entry !== "object") return false;
+  const obj = entry as Record<string, unknown>;
+  if (obj._asdManaged === true) return true;
+  if (
+    typeof obj.command === "string" &&
+    (obj.command.includes("hook pre-tool-use") || obj.command.includes("hook stop"))
+  ) {
+    return true;
+  }
+  if (Array.isArray(obj.hooks)) {
+    return obj.hooks.some((h: unknown) => {
+      if (!h || typeof h !== "object") return false;
+      const hObj = h as Record<string, unknown>;
+      if (hObj._asdManaged === true) return true;
+      const cmd = typeof hObj.command === "string" ? hObj.command : "";
+      return cmd.includes("hook pre-tool-use") || cmd.includes("hook stop");
+    });
+  }
+  return false;
+}
+
+/**
+ * Generates the ASD managed hook configuration entries for Claude Code
+ * using the official `{ matcher, hooks: [{ type: "command", command }] }` schema.
  */
 export function createClaudeHookConfig(asdCliPath: string): {
-  PreToolUse: ClaudeHookEntry[];
-  Stop: ClaudeHookEntry[];
+  PreToolUse: ClaudeHookMatcherEntry[];
+  Stop: ClaudeHookMatcherEntry[];
 } {
   return {
     PreToolUse: [
       {
-        command: `node --no-warnings "${asdCliPath}" hook pre-tool-use`,
-        _asdManaged: true,
+        matcher: "",
+        hooks: [
+          {
+            type: "command",
+            command: `node --no-warnings "${asdCliPath}" hook pre-tool-use`,
+          },
+        ],
       },
     ],
     Stop: [
       {
-        command: `node --no-warnings "${asdCliPath}" hook stop`,
-        _asdManaged: true,
+        matcher: "",
+        hooks: [
+          {
+            type: "command",
+            command: `node --no-warnings "${asdCliPath}" hook stop`,
+          },
+        ],
       },
     ],
   };
@@ -54,7 +96,7 @@ export function createClaudeHookConfig(asdCliPath: string): {
 
 /**
  * Merges ASD hooks non-destructively into existing settings.json object.
- * Replaces any previous _asdManaged entries while preserving user hooks.
+ * Replaces any previous ASD-managed entries (legacy or current) while preserving user hooks.
  */
 export function mergeClaudeSettings(
   existing: Record<string, unknown> | null | undefined,
@@ -71,19 +113,13 @@ export function mergeClaudeSettings(
 
   const existingPre = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : [];
   hooks.PreToolUse = [
-    ...existingPre.filter(
-      (h: unknown) =>
-        !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
-    ),
+    ...existingPre.filter((h: unknown) => !isAsdManagedClaudeHook(h)),
     ...managed.PreToolUse,
   ];
 
   const existingStop = Array.isArray(hooks.Stop) ? hooks.Stop : [];
   hooks.Stop = [
-    ...existingStop.filter(
-      (h: unknown) =>
-        !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
-    ),
+    ...existingStop.filter((h: unknown) => !isAsdManagedClaudeHook(h)),
     ...managed.Stop,
   ];
 

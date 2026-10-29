@@ -98,8 +98,12 @@ describe("Installer & Sync Engine", () => {
       const settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
       assert.ok(settings.hooks?.PreToolUse?.length > 0);
       assert.ok(settings.hooks?.Stop?.length > 0);
-      assert.equal(settings.hooks.PreToolUse[0]._asdManaged, true);
-      assert.equal(settings.hooks.Stop[0]._asdManaged, true);
+      assert.equal(settings.hooks.PreToolUse[0].matcher, "");
+      assert.equal(settings.hooks.PreToolUse[0].hooks[0].type, "command");
+      assert.ok(settings.hooks.PreToolUse[0].hooks[0].command.includes("hook pre-tool-use"));
+      assert.equal(settings.hooks.Stop[0].matcher, "");
+      assert.equal(settings.hooks.Stop[0].hooks[0].type, "command");
+      assert.ok(settings.hooks.Stop[0].hooks[0].command.includes("hook stop"));
 
       // .claude.json & .claude/.mcp.json
       const claudeJson = path.join(tmpHome, ".claude.json");

@@ -365,32 +365,46 @@ describe("Harness Adapters", () => {
   });
 
   describe("6. Configuration Helpers", () => {
-    test("claude-code: mergeClaudeSettings merges hooks non-destructively and marks _asdManaged", () => {
+    test("claude-code: mergeClaudeSettings merges hooks non-destructively using official matcher+hooks schema", () => {
       const existing = {
         theme: "dark",
         hooks: {
-          PreToolUse: [{ command: "my-custom-audit-tool", _asdManaged: false }],
+          PreToolUse: [
+            {
+              matcher: "Bash",
+              hooks: [{ type: "command", command: "my-custom-audit-tool" }],
+            },
+          ],
         },
       };
 
       const merged = mergeClaudeSettings(existing, "/path/to/asd-cli");
       const hooks = merged.hooks as {
-        PreToolUse: Array<{ command: string; _asdManaged?: boolean }>;
-        Stop: Array<{ command: string; _asdManaged?: boolean }>;
+        PreToolUse: Array<{
+          matcher: string;
+          hooks: Array<{ type: string; command: string }>;
+        }>;
+        Stop: Array<{
+          matcher: string;
+          hooks: Array<{ type: string; command: string }>;
+        }>;
       };
 
       // Custom tool preserved
       assert.equal(hooks.PreToolUse.length, 2);
-      assert.equal(hooks.PreToolUse[0]?.command, "my-custom-audit-tool");
-      assert.equal(hooks.PreToolUse[0]?._asdManaged, false);
+      assert.equal(hooks.PreToolUse[0]?.matcher, "Bash");
+      assert.equal(hooks.PreToolUse[0]?.hooks[0]?.command, "my-custom-audit-tool");
 
-      // Managed tool added
-      assert.ok(hooks.PreToolUse[1]?.command.includes("/path/to/asd-cli"));
-      assert.equal(hooks.PreToolUse[1]?._asdManaged, true);
+      // Managed tool added in official matcher+hooks schema
+      assert.equal(hooks.PreToolUse[1]?.matcher, "");
+      assert.equal(hooks.PreToolUse[1]?.hooks[0]?.type, "command");
+      assert.ok(hooks.PreToolUse[1]?.hooks[0]?.command.includes("/path/to/asd-cli"));
 
       // Stop hook added
       assert.equal(hooks.Stop.length, 1);
-      assert.equal(hooks.Stop[0]?._asdManaged, true);
+      assert.equal(hooks.Stop[0]?.matcher, "");
+      assert.equal(hooks.Stop[0]?.hooks[0]?.type, "command");
+      assert.ok(hooks.Stop[0]?.hooks[0]?.command.includes("hook stop"));
 
       // Idempotent re-merge does not duplicate
       const reMerged = mergeClaudeSettings(merged, "/path/to/asd-cli");

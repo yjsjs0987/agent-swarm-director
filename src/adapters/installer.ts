@@ -45,6 +45,7 @@ import {
   ASD_SKILLS,
   ClaudeCodeAdapter,
   claudeCodeAdapter,
+  isAsdManagedClaudeHook,
   mergeClaudeSettings,
 } from "./claude-code.ts";
 import {
@@ -1221,13 +1222,13 @@ export async function uninstallHarnessConfigs(
         const hooks = cfg.hooks as Record<string, unknown[]>;
         if (Array.isArray(hooks.PreToolUse)) {
           hooks.PreToolUse = hooks.PreToolUse.filter(
-            (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+            (h: unknown) => !isAsdManagedClaudeHook(h)
           );
           if (hooks.PreToolUse.length === 0) delete hooks.PreToolUse;
         }
         if (Array.isArray(hooks.Stop)) {
           hooks.Stop = hooks.Stop.filter(
-            (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+            (h: unknown) => !isAsdManagedClaudeHook(h)
           );
           if (hooks.Stop.length === 0) delete hooks.Stop;
         }
