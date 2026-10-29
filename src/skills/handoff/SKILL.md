@@ -1,18 +1,18 @@
 ---
 name: handoff
-description: Multi-harness session handoff skill for ASD v2.2. Summarizes conversation history, SQLite session/task state, progressBoard, and multi-harness routing context into handoff.md for seamless continuation across Claude Code, OpenCode, Codex CLI, and Antigravity.
+description: Multi-harness session handoff skill for ASD v2.3. Summarizes conversation history, SQLite session/task state, progressBoard, and multi-harness routing context into handoff.md for seamless continuation across Claude Code, OpenCode, Codex CLI, Antigravity, and Cursor CLI.
 ---
 
 # ASD Multi-Harness Session Handoff (`/handoff`, `/asd-handoff`)
 
-You are generating a structured, high-signal session handoff document (`handoff.md`) so the user or another AI coding harness (**Claude Code**, **OpenCode**, **Codex CLI**, or **Antigravity**) can seamlessly resume work in a new session without losing context.
+You are generating a structured, high-signal session handoff document (`handoff.md`) so the user or another AI coding harness (**Claude Code**, **OpenCode**, **Codex CLI**, **Antigravity**, or **Cursor CLI**) can seamlessly resume work in a new session without losing context.
 
 ## Workflow
 
 ### Step 1: Gather Current Project & Multi-Harness State (Read-Only)
 Before writing `handoff.md`, inspect the live repository and ASD state:
 1. Run `asd status` (or `node --no-warnings src/cli/index.ts status`) to inspect the active SQLite session, `progressBoard` (`### 📊 ASD TODO 진행 현황`), and any unapplied auto-stash warnings.
-2. Check `.asd/PLAN.md` and `.asd/sessions/` (if present) for active or pending tasks (`[ ]`), escalated tasks (`[~]`), completed tasks (`[x]`), and subagent logs.
+2. Check `.asd/PLAN.md` and `.asd/sessions/` (if present) for active or pending tasks (`[ ]`), auto-created cross-scope tasks (`[Cross-Scope ...]`), escalated tasks (`[~]`), completed tasks (`[x]`), deferred cross-scope requests, and subagent logs.
 3. Run `git status --short` and `git log -n 5 --oneline` to capture current branch, recent commits, and any uncommitted or untracked files.
 
 ### Step 2: Write `handoff.md` in the Exact Standard Format
@@ -38,13 +38,13 @@ CURRENT STATE
 -------------
 - <Current Git branch, HEAD commit SHA, and sync status with origin>
 - <Test suite status (e.g., X/X passing tests)>
-- <Multi-harness sync status (`asd sync`) across Claude Code, OpenCode, Codex CLI, and Antigravity>
+- <Multi-harness sync status (`asd sync`) across Claude Code, OpenCode, Codex CLI, Antigravity, and Cursor CLI>
 - <Active ASD session ID, execution mode (`LIGHT` single-harness vs `HEAVY` multi-harness worktree), and `progressBoard` summary if a session is active>
 - <Modified or untracked local files in workspace root>
 
 PENDING TASKS
 -------------
-- <Remaining tasks from `.asd/PLAN.md` or user requests, or "None pending; all requested tasks are complete.">
+- <Remaining tasks from `.asd/PLAN.md` or user requests, including any pending auto-created `[Cross-Scope ...]` tasks and `deferredCrossScopeRequests` awaiting Main Director review, or "None pending; all requested tasks are complete.">
 
 KEY FILES
 ---------
