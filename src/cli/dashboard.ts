@@ -3,8 +3,12 @@
  *
  * Uses built-in `node:http` with zero external runtime dependencies.
  * Provides:
- * - `GET /api/state`: Live JSON snapshot of all SQLite sessions (with `.asd` memos),
- *   tasks, debates, subagent logs, harness availability, and project routing config.
+ * - `GET /api/state`: Live JSON snapshot of all SQLite sessions (with `.asd` memos
+ *   and standalone debate separation), tasks, debates, subagent logs, harness
+ *   availability, project routing config, and discovered models per harness.
+ * - `GET /api/models` & `POST /api/models/refresh`: Dynamic per-harness model
+ *   discovery (`opencode models` CLI + `.codex/models_cache.json` + `.codex/config.toml`
+ *   + `.claude/settings.json` + `.gemini/` + `routing.jsonc`).
  * - `POST /api/session-memo`: Updates the short session memo in `.asd/core.db`
  *   and `.asd/sessions/<sessionId>/main.json`.
  * - `POST /api/routing`: Saves or resets project-scoped `.asd/routing.jsonc`.
@@ -12,11 +16,14 @@
  *   `kill` (force terminate process tree), `retry` (re-run same harness/model),
  *   `fallback` (run next configured fallback), or `custom` (run user-picked harness/model).
  * - `GET /`: Master-detail dark-mode Web UI with session grouping, memos,
- *   project routing editor, and 4-option subagent controller.
+ *   2x2 harness model inspector popup modal, project routing editor with dynamic
+ *   primary model dropdowns, and 4-option subagent controller.
  */
 
+import * as child_process from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import { runAsdDoctor } from "../adapters/installer.ts";
@@ -44,6 +51,7 @@ import {
   DEFAULT_DEBATE_TIMEOUT_MS,
   DEFAULT_IDLE_TIMEOUT_MS,
   killProcessTree,
+  resolveSpawnCommand,
   spawnSubagent,
 } from "../core/spawner.ts";
 import {
@@ -53,6 +61,8 @@ import {
   type RoutingConfig,
 } from "../core/types.ts";
 import { scanSubagentLogs, type SubagentLogRecord } from "./index.ts";
+
+export type HarnessModelCatalog = Record<HarnessId, string[]>;
 
 export interface DashboardSnapshot {
   version: string;
@@ -69,6 +79,7 @@ export interface DashboardSnapshot {
   routingConfig: RoutingConfig;
   hasLocalRouting: boolean;
   localRoutingPath: string;
+  availableModels: HarnessModelCatalog;
   harnesses: Record<
     string,
     { installed: boolean; headlessSupported: boolean; binary?: string; resolvedPath?: string | null }
@@ -76,6 +87,7 @@ export interface DashboardSnapshot {
 }
 
 const doctorCache = new Map<string, DashboardSnapshot["harnesses"]>();
+const modelCatalogCache = new Map<string, HarnessModelCatalog>();
 
 function detectSystemLocale(): string {
   try {
@@ -97,6 +109,181 @@ function readMainJsonMeta(projectRoot: string, sessionId: string): Record<string
   }
 }
 
+/**
+ * Dynamically discovers available models for Antigravity, Claude Code, Codex, and OpenCode
+ * by querying local CLI caches/configs and `opencode models`.
+ */
+export function discoverHarnessModels(options?: {
+  projectRoot?: string;
+  homeDir?: string;
+  forceRefresh?: boolean;
+  skipCliSpawn?: boolean;
+}): HarnessModelCatalog {
+  const projectRoot = path.resolve(options?.projectRoot || process.cwd());
+  const homeDir = options?.homeDir || os.homedir();
+  const cacheKey = `${projectRoot}::${homeDir}`;
+
+  if (!options?.forceRefresh && modelCatalogCache.has(cacheKey)) {
+    return modelCatalogCache.get(cacheKey)!;
+  }
+
+  const sets: Record<HarnessId, Set<string>> = {
+    antigravity: new Set<string>([
+      "gemini-3.1-pro",
+      "gemini-3-flash",
+      "gemini-3-flash-lite",
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "gpt-oss-120b",
+    ]),
+    "claude-code": new Set<string>([
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5",
+      "opus",
+      "sonnet",
+      "haiku",
+    ]),
+    codex: new Set<string>([
+      "gpt-5.4",
+      "gpt-5.3-codex",
+      "gpt-5-codex",
+    ]),
+    opencode: new Set<string>([
+      "minimax-m2.5-free",
+      "glm-5",
+      "deepseek-r1",
+    ]),
+  };
+
+  // 1. Collect any models referenced in project/global routing.jsonc
+  try {
+    const cfg = loadRoutingConfig(projectRoot, options?.homeDir);
+    for (const entry of [
+      ...Object.values(cfg.agents ?? {}),
+      ...Object.values(cfg.categories ?? {}),
+    ]) {
+      if (entry?.harness && entry?.model && sets[entry.harness]) {
+        sets[entry.harness].add(entry.model);
+      }
+      for (const fb of entry?.fallbacks ?? []) {
+        if (fb?.harness && fb?.model && sets[fb.harness]) {
+          sets[fb.harness].add(fb.model);
+        }
+      }
+    }
+  } catch {
+    // Ignore routing parse error
+  }
+
+  // 2. Scan Codex ~/.codex/config.toml and ~/.codex/models_cache.json
+  try {
+    const codexTomlPath = path.join(homeDir, ".codex", "config.toml");
+    if (fs.existsSync(codexTomlPath)) {
+      const tomlText = fs.readFileSync(codexTomlPath, "utf8");
+      const matches = tomlText.matchAll(/^\s*model\s*=\s*["']([^"']+)["']/gm);
+      for (const m of matches) {
+        if (m[1]?.trim()) sets.codex.add(m[1].trim());
+      }
+    }
+    const codexCachePath = path.join(homeDir, ".codex", "models_cache.json");
+    if (fs.existsSync(codexCachePath)) {
+      const cacheObj = JSON.parse(fs.readFileSync(codexCachePath, "utf8")) as {
+        models?: Array<{ slug?: string }>;
+      };
+      if (Array.isArray(cacheObj.models)) {
+        for (const item of cacheObj.models) {
+          if (item?.slug && typeof item.slug === "string") {
+            sets.codex.add(item.slug.trim());
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore codex scan errors
+  }
+
+  // 3. Scan Claude Code ~/.claude/settings.json & env
+  try {
+    if (process.env.ANTHROPIC_MODEL?.trim()) {
+      sets["claude-code"].add(process.env.ANTHROPIC_MODEL.trim());
+    }
+    const claudeSettingsPath = path.join(homeDir, ".claude", "settings.json");
+    if (fs.existsSync(claudeSettingsPath)) {
+      const settingsObj = JSON.parse(fs.readFileSync(claudeSettingsPath, "utf8")) as {
+        model?: string;
+        env?: Record<string, string>;
+      };
+      if (typeof settingsObj.model === "string" && settingsObj.model.trim()) {
+        sets["claude-code"].add(settingsObj.model.trim());
+      }
+      if (settingsObj.env?.ANTHROPIC_MODEL?.trim()) {
+        sets["claude-code"].add(settingsObj.env.ANTHROPIC_MODEL.trim());
+      }
+    }
+  } catch {
+    // Ignore claude scan errors
+  }
+
+  // 4. Scan OpenCode ~/.config/opencode/opencode.json and `opencode models` CLI
+  try {
+    const opencodeJsonPath = path.join(homeDir, ".config", "opencode", "opencode.json");
+    if (fs.existsSync(opencodeJsonPath)) {
+      const ocObj = JSON.parse(fs.readFileSync(opencodeJsonPath, "utf8")) as {
+        model?: string;
+        small_model?: string;
+        provider?: Record<string, { models?: Record<string, unknown> }>;
+      };
+      if (typeof ocObj.model === "string" && ocObj.model.trim()) {
+        sets.opencode.add(ocObj.model.trim());
+      }
+      if (typeof ocObj.small_model === "string" && ocObj.small_model.trim()) {
+        sets.opencode.add(ocObj.small_model.trim());
+      }
+      if (ocObj.provider && typeof ocObj.provider === "object") {
+        for (const [provKey, provVal] of Object.entries(ocObj.provider)) {
+          if (provVal?.models && typeof provVal.models === "object") {
+            for (const mKey of Object.keys(provVal.models)) {
+              sets.opencode.add(`${provKey}/${mKey}`);
+            }
+          }
+        }
+      }
+    }
+
+    if (!options?.skipCliSpawn) {
+      const resolved = resolveSpawnCommand("opencode", ["models"]);
+      const res = child_process.spawnSync(resolved.command, resolved.args, {
+        encoding: "utf8",
+        timeout: 3500,
+        windowsHide: true,
+        shell: resolved.shell,
+      });
+      if (res.status === 0 && res.stdout) {
+        const lines = res.stdout
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0 && !l.startsWith("[") && !l.includes(" "));
+        for (const line of lines) {
+          sets.opencode.add(line);
+        }
+      }
+    }
+  } catch {
+    // Ignore opencode CLI errors
+  }
+
+  const catalog: HarnessModelCatalog = {
+    antigravity: [...sets.antigravity],
+    "claude-code": [...sets["claude-code"]],
+    codex: [...sets.codex],
+    opencode: [...sets.opencode],
+  };
+
+  modelCatalogCache.set(cacheKey, catalog);
+  return catalog;
+}
+
 export function saveSessionMemo(options: {
   projectRoot: string;
   homeDir?: string;
@@ -111,31 +298,36 @@ export function saveSessionMemo(options: {
     throw new Error("Invalid sessionId");
   }
 
+  // Handle virtual standalone debate session IDs (`<realSessionId>::<debateId>`)
+  const virtualSplitIdx = sessionId.indexOf("::");
+  const realSessionId =
+    virtualSplitIdx !== -1 ? sessionId.slice(0, virtualSplitIdx) : sessionId;
+
   let db: SqliteDriver | undefined;
   try {
     db = openProjectDb(projectRoot, options.homeDir);
-    const existing = db.getSession(sessionId);
+    const existing = db.getSession(realSessionId);
     if (!existing) {
       db.createOrGetSession({
-        sessionId,
+        sessionId: realSessionId,
         projectRoot,
         mainHarness: "claude-code",
         memo,
       });
-    } else {
-      db.updateSessionMemo(sessionId, memo);
+    } else if (virtualSplitIdx === -1) {
+      db.updateSessionMemo(realSessionId, memo);
     }
   } finally {
     db?.close();
   }
 
-  // Persist memo inside .asd/sessions/<sessionId>/main.json as well
+  // Persist memo inside .asd/sessions/<realSessionId>/main.json (including per-debate memos map)
   try {
-    const sessionDir = path.join(projectRoot, ".asd", "sessions", sessionId);
+    const sessionDir = path.join(projectRoot, ".asd", "sessions", realSessionId);
     fs.mkdirSync(sessionDir, { recursive: true });
     const mainJsonPath = path.join(sessionDir, "main.json");
-    const current = readMainJsonMeta(projectRoot, sessionId) ?? {
-      sessionId,
+    const current = readMainJsonMeta(projectRoot, realSessionId) ?? {
+      sessionId: realSessionId,
       roleType: "main",
       harness: "claude-code",
       role: "director",
@@ -143,7 +335,17 @@ export function saveSessionMemo(options: {
       pid: process.pid,
       startedAt: new Date().toISOString(),
     };
-    current.memo = memo;
+    if (virtualSplitIdx !== -1) {
+      const debateId = sessionId.slice(virtualSplitIdx + 2);
+      const debateMemos =
+        current.debateMemos && typeof current.debateMemos === "object"
+          ? (current.debateMemos as Record<string, string>)
+          : {};
+      debateMemos[debateId] = memo;
+      current.debateMemos = debateMemos;
+    } else {
+      current.memo = memo;
+    }
     atomicWriteFileSync(mainJsonPath, JSON.stringify(current, null, 2) + "\n");
   } catch {
     // Ignore file sync error if SQLite succeeded
@@ -238,10 +440,14 @@ function tryRefreshDebateVerdictFromLog(
   const paths = resolveAsdPaths(projectRoot, homeDir);
   if (!fs.existsSync(paths.dbPath)) return;
 
+  const realSessionId = sessionId.includes("::")
+    ? sessionId.split("::")[0]!
+    : sessionId;
+
   let db: SqliteDriver | undefined;
   try {
     db = openProjectDb(projectRoot, homeDir);
-    const debates = db.getSessionDebates(sessionId);
+    const debates = db.getSessionDebates(realSessionId);
     const debMatch = subSessionId.match(/-deb-(D-[A-Za-z0-9-]+)-/);
     const debateId = debMatch?.[1] || taskId;
     const debateRow = debates.find(
@@ -352,11 +558,16 @@ export async function runSubagentControlAction(options: {
 }> {
   const projectRoot = path.resolve(options.projectRoot);
   const logs = scanSubagentLogs(projectRoot);
-  const target = logs.find(
-    (l) =>
-      l.subSessionId === options.subSessionId &&
-      (!options.sessionId || l.sessionId === options.sessionId)
-  ) ?? logs.find((l) => l.subSessionId === options.subSessionId);
+  const realSessionId = options.sessionId.includes("::")
+    ? options.sessionId.split("::")[0]!
+    : options.sessionId;
+
+  const target =
+    logs.find(
+      (l) =>
+        l.subSessionId === options.subSessionId &&
+        (!realSessionId || l.sessionId === realSessionId)
+    ) ?? logs.find((l) => l.subSessionId === options.subSessionId);
 
   if (!target) {
     throw new Error(`Subagent not found: ${options.subSessionId}`);
@@ -464,6 +675,9 @@ export async function runSubagentControlAction(options: {
   const promptText = target.prompt || "Continue task.";
   const cmdInfo = buildDefaultHarnessCommand(nextHarness, promptText, nextModel);
 
+  const debMatch = target.subSessionId.match(/-deb-(D-[A-Za-z0-9-]+)-/);
+  const effectiveTaskId = target.taskId || debMatch?.[1] || normRole;
+
   const runPromise = spawnSubagent({
     projectRoot,
     homeDir: options.homeDir,
@@ -472,7 +686,7 @@ export async function runSubagentControlAction(options: {
     role: normRole as AgentRole,
     harness: nextHarness,
     model: nextModel || "default",
-    taskId: target.taskId || normRole,
+    taskId: effectiveTaskId,
     prompt: promptText,
     allowedFiles: target.allowedFiles ?? [],
     worktreePath: target.worktreePath ?? null,
@@ -494,7 +708,7 @@ export async function runSubagentControlAction(options: {
           projectRoot,
           options.homeDir,
           target.sessionId,
-          target.taskId,
+          effectiveTaskId,
           newSubSessionId,
           normRole,
           nextHarness,
@@ -513,7 +727,7 @@ export async function runSubagentControlAction(options: {
     return {
       ok: completed.exitCode === 0,
       action: options.action,
-      sessionId: target.sessionId,
+      sessionId: options.sessionId || target.sessionId,
       subSessionId: target.subSessionId,
       newSubSessionId,
       harness: nextHarness,
@@ -528,7 +742,7 @@ export async function runSubagentControlAction(options: {
   return {
     ok: true,
     action: options.action,
-    sessionId: target.sessionId,
+    sessionId: options.sessionId || target.sessionId,
     subSessionId: target.subSessionId,
     newSubSessionId,
     harness: nextHarness,
@@ -545,25 +759,17 @@ export async function collectDashboardSnapshot(options?: {
   const homeDir = options?.homeDir;
   const paths = resolveAsdPaths(projectRoot, homeDir);
 
-  let session: SessionRow | null = null;
-  let sessions: SessionRow[] = [];
-  let tasks: TaskRow[] = [];
+  let rawSessions: SessionRow[] = [];
   let allTasks: TaskRow[] = [];
-  let debates: DebateRow[] = [];
-  let allDebates: DebateRow[] = [];
+  let rawDebates: DebateRow[] = [];
 
   if (fs.existsSync(paths.dbPath)) {
     let db: SqliteDriver | undefined;
     try {
       db = openProjectDb(projectRoot, homeDir);
-      sessions = db.listSessions();
-      session = sessions[0] ?? null;
+      rawSessions = db.listSessions();
       allTasks = db.getAllTasks();
-      allDebates = db.getAllDebates();
-      if (session) {
-        tasks = allTasks.filter((t) => t.session_id === session!.session_id);
-        debates = allDebates.filter((d) => d.session_id === session!.session_id);
-      }
+      rawDebates = db.getAllDebates();
     } catch {
       // Ignore transient read issues
     } finally {
@@ -571,25 +777,80 @@ export async function collectDashboardSnapshot(options?: {
     }
   }
 
-  const subagentLogs = scanSubagentLogs(projectRoot);
+  const rawSubagentLogs = scanSubagentLogs(projectRoot);
 
-  // Merge any sessions that exist on disk (.asd/sessions/<id>) or in subagent logs
+  // Backfill missing taskId on legacy debate subagent logs (`...-deb-<debateId>-r1-1`)
+  const subagentLogs: SubagentLogRecord[] = rawSubagentLogs.map((l) => {
+    const debMatch = l.subSessionId.match(/-deb-(D-[A-Za-z0-9-]+)-/);
+    const inferredTaskId = l.taskId || debMatch?.[1] || "";
+    return {
+      ...l,
+      taskId: inferredTaskId,
+    };
+  });
+
+  // Split sessions that have multiple standalone (task_id === null) debates into
+  // separate virtual session rows (`<sessionId>::<debateId>`) so historical debates
+  // that were accidentally grouped under one session appear as individual entries.
   const sessionMap = new Map<string, SessionRow>();
-  for (const s of sessions) {
+  const allDebates: DebateRow[] = [];
+
+  for (const s of rawSessions) {
     const mainMeta = readMainJsonMeta(projectRoot, s.session_id);
     const diskMemo = typeof mainMeta?.memo === "string" ? mainMeta.memo : "";
-    const autoDebateTopic = allDebates.find((d) => d.session_id === s.session_id)?.topic ?? "";
-    const autoTaskTitle = allTasks.find((t) => t.session_id === s.session_id)?.title ?? "";
-    const effectiveMemo =
-      (s.memo && s.memo.trim()) ||
-      diskMemo.trim() ||
-      autoDebateTopic.slice(0, 40) ||
-      autoTaskTitle.slice(0, 40) ||
-      "";
-    sessionMap.set(s.session_id, {
-      ...s,
-      memo: effectiveMemo,
-    });
+    const debateMemos =
+      mainMeta?.debateMemos && typeof mainMeta.debateMemos === "object"
+        ? (mainMeta.debateMemos as Record<string, string>)
+        : {};
+
+    const sTasks = allTasks.filter((t) => t.session_id === s.session_id);
+    const sDebates = rawDebates.filter((d) => d.session_id === s.session_id);
+    const standaloneDebates = sDebates.filter((d) => !d.task_id);
+
+    if (sTasks.length === 0 && standaloneDebates.length > 1) {
+      // Split each standalone debate into its own selectable session entry
+      for (const d of standaloneDebates) {
+        const virtualId = `${s.session_id}::${d.debate_id}`;
+        const relatedLogs = subagentLogs.filter(
+          (l) =>
+            l.sessionId === s.session_id &&
+            (l.taskId === d.debate_id || l.subSessionId.includes(`-deb-${d.debate_id}-`))
+        );
+        for (const rl of relatedLogs) {
+          rl.sessionId = virtualId;
+        }
+        const startedTime =
+          relatedLogs.length > 0
+            ? Math.min(...relatedLogs.map((r) => r.startedAt || s.created_at))
+            : s.created_at;
+        const customDebateMemo = debateMemos[d.debate_id]?.trim();
+        sessionMap.set(virtualId, {
+          ...s,
+          session_id: virtualId,
+          memo: customDebateMemo || d.topic.slice(0, 40),
+          created_at: startedTime,
+          updated_at: startedTime,
+        });
+        allDebates.push({
+          ...d,
+          session_id: virtualId,
+        });
+      }
+    } else {
+      const autoDebateTopic = sDebates[0]?.topic ?? "";
+      const autoTaskTitle = sTasks[0]?.title ?? "";
+      const effectiveMemo =
+        (s.memo && s.memo.trim()) ||
+        diskMemo.trim() ||
+        autoDebateTopic.slice(0, 40) ||
+        autoTaskTitle.slice(0, 40) ||
+        "";
+      sessionMap.set(s.session_id, {
+        ...s,
+        memo: effectiveMemo,
+      });
+      allDebates.push(...sDebates);
+    }
   }
 
   for (const log of subagentLogs) {
@@ -614,12 +875,14 @@ export async function collectDashboardSnapshot(options?: {
     }
   }
 
-  sessions = [...sessionMap.values()].sort((a, b) => b.created_at - a.created_at);
-  if (!session && sessions.length > 0) {
-    session = sessions[0]!;
-  } else if (session && sessionMap.has(session.session_id)) {
-    session = sessionMap.get(session.session_id)!;
-  }
+  const sessions = [...sessionMap.values()].sort((a, b) => b.created_at - a.created_at);
+  const session = sessions[0] ?? null;
+  const tasks = session
+    ? allTasks.filter((t) => t.session_id === session.session_id)
+    : [];
+  const debates = session
+    ? allDebates.filter((d) => d.session_id === session.session_id)
+    : [];
 
   const cacheKey = `${projectRoot}::${homeDir ?? ""}`;
   let harnesses = doctorCache.get(cacheKey);
@@ -631,6 +894,11 @@ export async function collectDashboardSnapshot(options?: {
 
   const routingConfig = loadRoutingConfig(projectRoot, homeDir);
   const hasLocalRouting = fs.existsSync(paths.localRoutingPath);
+  const availableModels = discoverHarnessModels({
+    projectRoot,
+    homeDir,
+    skipCliSpawn: false,
+  });
 
   return {
     version: ASD_VERSION,
@@ -647,6 +915,7 @@ export async function collectDashboardSnapshot(options?: {
     routingConfig,
     hasLocalRouting,
     localRoutingPath: paths.localRoutingPath,
+    availableModels,
     harnesses,
   };
 }
@@ -691,7 +960,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
     .header-right {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
     }
     .lang-toggle {
       display: inline-flex;
@@ -782,8 +1051,8 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       border: 1px solid var(--border);
       color: var(--text);
       border-radius: 5px;
-      padding: 4px 9px;
-      font-size: 11px;
+      padding: 5px 10px;
+      font-size: 12px;
       font-weight: 600;
       cursor: pointer;
       transition: background 0.15s ease, color 0.15s ease;
@@ -902,6 +1171,86 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       text-align: left;
     }
     .routing-table th { color: var(--muted); font-weight: 600; }
+
+    /* Popup Modal for 2x2 Harness Model Viewer */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(5, 8, 14, 0.78);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      padding: 24px;
+    }
+    .modal-backdrop.open {
+      display: flex;
+    }
+    .modal-window {
+      background: var(--panel);
+      border: 1px solid var(--accent);
+      border-radius: 10px;
+      width: 100%;
+      max-width: 960px;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.6);
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border);
+    }
+    .modal-body {
+      padding: 18px 20px;
+      overflow-y: auto;
+    }
+    .model-grid-2x2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 720px) {
+      .model-grid-2x2 { grid-template-columns: 1fr; }
+    }
+    .model-harness-box {
+      background: #0d1421;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+    }
+    .model-harness-title {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .model-list-scroll {
+      max-height: 220px;
+      overflow-y: auto;
+      border-top: 1px solid var(--border);
+      padding-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .model-item-pill {
+      background: #131b2b;
+      border: 1px solid #1f2b42;
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 12px;
+      color: var(--text);
+      font-family: monospace;
+    }
   </style>
 </head>
 <body>
@@ -911,14 +1260,34 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       <div class="meta-bar" id="projPath">Loading...</div>
     </div>
     <div class="header-right">
-      <button type="button" class="btn btn-primary" id="btnToggleRouting" onclick="toggleRoutingEditor()">⚙️ 프로젝트 라우팅 편집 (.asd/routing.jsonc)</button>
       <div class="meta-bar" id="lastUpdated">Auto-refresh: 2s</div>
+      <button type="button" class="btn btn-primary" id="btnToggleRouting" onclick="toggleRoutingEditor()">라우팅 편집</button>
+      <button type="button" class="btn" id="btnOpenModelsModal" onclick="openModelsModal()">모델 확인</button>
       <div class="lang-toggle" role="group" aria-label="Language toggle">
         <button type="button" class="lang-btn" id="btnKo" onclick="setLang('ko')">한국어</button>
         <button type="button" class="lang-btn" id="btnEn" onclick="setLang('en')">EN</button>
       </div>
     </div>
   </header>
+
+  <!-- 2x2 Harness Model List Popup Modal -->
+  <div class="modal-backdrop" id="modelsModalBackdrop" onclick="closeModelsModalOnBackdrop(event)">
+    <div class="modal-window">
+      <div class="modal-header">
+        <div>
+          <strong id="modelsModalTitle" style="font-size:15px;color:var(--accent);">하네스별 사용 가능한 모델 목록</strong>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="btn btn-primary" id="btnRefreshModelsOnly" onclick="refreshModelCatalogOnly()">🔄 모델 목록 새로고침</button>
+          <button type="button" class="btn" id="btnCloseModelsModal" onclick="closeModelsModal()">닫기</button>
+        </div>
+      </div>
+      <div class="modal-body">
+        <div class="model-grid-2x2" id="modelsGrid2x2"></div>
+      </div>
+    </div>
+  </div>
+
   <div class="container">
     <nav>
       <div class="card" style="position:sticky; top:16px;">
@@ -928,12 +1297,13 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
     </nav>
     <main>
       <div class="card" id="routingEditorCard" style="display:none; margin-bottom:16px;">
-        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:8px;">
           <div>
             <div class="card-title" id="routingEditorTitle" style="margin-bottom:2px;">Project Routing Editor (.asd/routing.jsonc)</div>
             <div class="meta-bar" id="routingScopeBadge">-</div>
           </div>
           <div style="display:flex; gap:6px;">
+            <button type="button" class="btn" id="btnRefreshModelsInRouting" onclick="refreshModelCatalogOnly()">🔄 모델 목록 새로고침</button>
             <button type="button" class="btn btn-primary" id="btnSaveRouting" onclick="saveRouting()">저장 (.asd/routing.jsonc)</button>
             <button type="button" class="btn btn-warn" id="btnResetRouting" onclick="resetRouting()">글로벌 기본값으로 초기화</button>
             <button type="button" class="btn" onclick="toggleRoutingEditor()">닫기</button>
@@ -961,17 +1331,27 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
   <script>
     const SERVER_DEFAULT_LANG = "${defaultLang}";
     const HARNESS_OPTIONS = ["claude-code", "opencode", "codex", "antigravity"];
-    const MODEL_PRESETS = {
+    let availableModelsByHarness = {
+      "antigravity": ["gemini-3.1-pro", "gemini-3-flash", "gemini-3-flash-lite"],
       "claude-code": ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"],
-      "opencode": ["minimax-m2.5-free", "glm-5", "deepseek-r1"],
       "codex": ["gpt-5.4", "gpt-5.3-codex", "gpt-5-codex"],
-      "antigravity": ["gemini-3.1-pro", "gemini-3-flash", "gemini-3-flash-lite"]
+      "opencode": ["minimax-m2.5-free", "glm-5", "deepseek-r1"]
     };
 
     const I18N = {
       ko: {
         headerTitle: "ASD 멀티 에이전트 컨트롤 플레인 (v${ASD_VERSION})",
-        btnToggleRouting: "⚙️ 프로젝트 라우팅 편집 (.asd/routing.jsonc)",
+        btnToggleRouting: "라우팅 편집",
+        btnOpenModelsModal: "모델 확인",
+        modelsModalTitle: "하네스별 사용 가능한 모델 목록",
+        btnRefreshModelsOnly: "🔄 모델 목록 새로고침",
+        btnCloseModelsModal: "닫기",
+        harnessLabels: {
+          "antigravity": "안티그래비티 (Antigravity)",
+          "claude-code": "클로드 코드 (Claude Code)",
+          "codex": "코덱스 (Codex)",
+          "opencode": "오픈코드 (OpenCode)"
+        },
         routingEditorTitle: "프로젝트 종속 라우팅 편집기 (.asd/routing.jsonc)",
         routingLocalActive: "현재 상태: 프로젝트 전용 오버라이드 적용 중 (.asd/routing.jsonc)",
         routingGlobalFallback: "현재 상태: 글로벌 설정 사용 중 (저장 시 .asd/routing.jsonc 생성)",
@@ -981,9 +1361,9 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         routingCategoriesHeader: "난이도 3단계 & 도메인 카테고리 (Categories)",
         colKey: "대상 (Role / Category)",
         colPrimaryHarness: "1순위 하네스",
-        colPrimaryModel: "1순위 모델",
+        colPrimaryModel: "1순위 모델 (선택)",
         colEffort: "추론 강도 (Effort)",
-        colFallbacks: "Fallback 체인 (harness:model, 쉼표 구분)",
+        colFallbacks: "2순위+ Fallback 체인 (harness:model, 쉼표 구분)",
         savedAlert: "프로젝트 라우팅(.asd/routing.jsonc)이 저장되었습니다.",
         resetAlert: "프로젝트 로컬 라우팅을 삭제하고 글로벌 기본값으로 복원했습니다.",
         updatedPrefix: "최근 갱신: ",
@@ -1028,7 +1408,17 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       },
       en: {
         headerTitle: "ASD Multi-Agent Control Plane (v${ASD_VERSION})",
-        btnToggleRouting: "⚙️ Project Routing Editor (.asd/routing.jsonc)",
+        btnToggleRouting: "Routing Editor",
+        btnOpenModelsModal: "Models",
+        modelsModalTitle: "Available Models by Harness",
+        btnRefreshModelsOnly: "🔄 Refresh Model List",
+        btnCloseModelsModal: "Close",
+        harnessLabels: {
+          "antigravity": "Antigravity",
+          "claude-code": "Claude Code",
+          "codex": "Codex",
+          "opencode": "OpenCode"
+        },
         routingEditorTitle: "Project-Scoped Routing Editor (.asd/routing.jsonc)",
         routingLocalActive: "Scope: Project Local Override Active (.asd/routing.jsonc)",
         routingGlobalFallback: "Scope: Inheriting Global Config (Saving creates .asd/routing.jsonc)",
@@ -1038,9 +1428,9 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         routingCategoriesHeader: "3 Difficulty Tiers & Domain Categories",
         colKey: "Role / Category",
         colPrimaryHarness: "Primary Harness",
-        colPrimaryModel: "Primary Model",
+        colPrimaryModel: "Primary Model (Select)",
         colEffort: "Thinking Effort",
-        colFallbacks: "Fallbacks (harness:model, comma-separated)",
+        colFallbacks: "2nd+ Fallbacks (harness:model, comma-separated)",
         savedAlert: "Saved project routing config to .asd/routing.jsonc.",
         resetAlert: "Removed local override and restored global routing config.",
         updatedPrefix: "Updated: ",
@@ -1099,10 +1489,28 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
     let selectedTaskId = null;
     let selectedSubSessionId = null;
     let routingEditorOpen = false;
+    let modelsModalOpen = false;
     let customHarnessPick = "opencode";
     let customModelPick = "minimax-m2.5-free";
     let actionStatusMsg = "";
     let latestState = null;
+
+    function getModelsForHarness(harness, currentModel) {
+      const base = Array.isArray(availableModelsByHarness[harness])
+        ? [...availableModelsByHarness[harness]]
+        : [];
+      if (currentModel && !base.includes(currentModel)) {
+        base.unshift(currentModel);
+      }
+      return base;
+    }
+
+    function buildModelSelectOptionsHtml(harness, selectedModel) {
+      const models = getModelsForHarness(harness, selectedModel);
+      return models.map(m =>
+        \`<option value="\${esc(m)}" \${m === selectedModel ? 'selected' : ''}>\${esc(m)}</option>\`
+      ).join("");
+    }
 
     function updateLangButtons() {
       document.documentElement.lang = currentLang;
@@ -1111,6 +1519,11 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       const t = I18N[currentLang];
       document.getElementById("headerTitle").textContent = t.headerTitle;
       document.getElementById("btnToggleRouting").textContent = t.btnToggleRouting;
+      document.getElementById("btnOpenModelsModal").textContent = t.btnOpenModelsModal;
+      document.getElementById("modelsModalTitle").textContent = t.modelsModalTitle;
+      document.getElementById("btnRefreshModelsOnly").textContent = t.btnRefreshModelsOnly;
+      document.getElementById("btnRefreshModelsInRouting").textContent = t.btnRefreshModelsOnly;
+      document.getElementById("btnCloseModelsModal").textContent = t.btnCloseModelsModal;
       document.getElementById("routingEditorTitle").textContent = t.routingEditorTitle;
       document.getElementById("btnSaveRouting").textContent = t.btnSaveRouting;
       document.getElementById("btnResetRouting").textContent = t.btnResetRouting;
@@ -1126,6 +1539,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       try { localStorage.setItem("asd_lang", lang); } catch {}
       updateLangButtons();
       if (routingEditorOpen && latestState) renderRoutingEditor(latestState);
+      if (modelsModalOpen) renderModelsModal();
       render(latestState);
     }
 
@@ -1138,6 +1552,75 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         .replace(/'/g, "&#39;");
     }
 
+    function openModelsModal() {
+      modelsModalOpen = true;
+      document.getElementById("modelsModalBackdrop").classList.add("open");
+      renderModelsModal();
+    }
+
+    function closeModelsModal() {
+      modelsModalOpen = false;
+      document.getElementById("modelsModalBackdrop").classList.remove("open");
+    }
+
+    function closeModelsModalOnBackdrop(ev) {
+      if (ev.target && ev.target.id === "modelsModalBackdrop") {
+        closeModelsModal();
+      }
+    }
+
+    function renderModelsModal() {
+      const t = I18N[currentLang];
+      // 2x2 order matching user sketch: Top-Left: Antigravity, Top-Right: Claude Code, Bottom-Left: Codex, Bottom-Right: OpenCode
+      const gridOrder = ["antigravity", "claude-code", "codex", "opencode"];
+      const html = gridOrder.map(h => {
+        const list = availableModelsByHarness[h] || [];
+        const label = (t.harnessLabels && t.harnessLabels[h]) || h;
+        const itemsHtml = list.length
+          ? list.map(m => \`<div class="model-item-pill">\${esc(m)}</div>\`).join("")
+          : \`<div class="meta-bar">(없음)</div>\`;
+        return \`
+          <div class="model-harness-box">
+            <div class="model-harness-title">
+              <span>\${esc(label)}</span>
+              <span class="badge st-running">\${list.length}</span>
+            </div>
+            <div class="model-list-scroll">\${itemsHtml}</div>
+          </div>
+        \`;
+      }).join("");
+      document.getElementById("modelsGrid2x2").innerHTML = html;
+    }
+
+    async function refreshModelCatalogOnly() {
+      try {
+        const res = await fetch("/api/models/refresh", { method: "POST" });
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.availableModels) {
+            availableModelsByHarness = data.availableModels;
+            if (modelsModalOpen) renderModelsModal();
+            if (routingEditorOpen) {
+              // Refresh only the model <select> options inside routing editor while preserving current selections
+              document.querySelectorAll("#routingEditorBody tr[data-rt-section]").forEach(tr => {
+                const hSel = tr.querySelector(".rt-harness");
+                const mSel = tr.querySelector(".rt-model");
+                if (hSel && mSel) {
+                  const curM = mSel.value;
+                  mSel.innerHTML = buildModelSelectOptionsHtml(hSel.value, curM);
+                }
+              });
+            }
+            const customHSel = document.getElementById("customHarnessSelect");
+            const customMSel = document.getElementById("customModelSelect");
+            if (customHSel && customMSel) {
+              customMSel.innerHTML = buildModelSelectOptionsHtml(customHSel.value, customModelPick);
+            }
+          }
+        }
+      } catch {}
+    }
+
     function toggleRoutingEditor() {
       routingEditorOpen = !routingEditorOpen;
       const card = document.getElementById("routingEditorCard");
@@ -1145,6 +1628,17 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       if (routingEditorOpen && latestState) {
         renderRoutingEditor(latestState);
       }
+    }
+
+    function onRoutingHarnessChange(selectEl) {
+      const tr = selectEl.closest("tr");
+      if (!tr) return;
+      const modelSelect = tr.querySelector(".rt-model");
+      if (!modelSelect) return;
+      const nextHarness = selectEl.value;
+      const models = getModelsForHarness(nextHarness, "");
+      const defaultModel = models[0] || "";
+      modelSelect.innerHTML = buildModelSelectOptionsHtml(nextHarness, defaultModel);
     }
 
     function renderRoutingRows(sectionPrefix, mapObj) {
@@ -1158,11 +1652,12 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         const hOpts = HARNESS_OPTIONS.map(opt =>
           \`<option value="\${esc(opt)}" \${opt === h ? 'selected' : ''}>\${esc(opt)}</option>\`
         ).join("");
+        const mOpts = buildModelSelectOptionsHtml(h, m);
         return \`
           <tr data-rt-section="\${esc(sectionPrefix)}" data-rt-key="\${esc(key)}">
             <td><strong>\${esc(key)}</strong></td>
-            <td><select class="rt-harness">\${hOpts}</select></td>
-            <td><input type="text" class="rt-model" value="\${esc(m)}" style="width:170px;" /></td>
+            <td><select class="rt-harness" onchange="onRoutingHarnessChange(this)">\${hOpts}</select></td>
+            <td><select class="rt-model" style="min-width:190px;">\${mOpts}</select></td>
             <td><input type="text" class="rt-effort" value="\${esc(eff)}" placeholder="-" style="width:75px;" /></td>
             <td><input type="text" class="rt-fallbacks" value="\${esc(fbs)}" style="width:100%;min-width:220px;" /></td>
           </tr>
@@ -1277,10 +1772,12 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
 
     function onCustomHarnessChange(selEl) {
       customHarnessPick = selEl.value;
-      const presets = MODEL_PRESETS[customHarnessPick] || [];
-      customModelPick = presets[0] || "";
-      const modelInput = document.getElementById("customModelInput");
-      if (modelInput) modelInput.value = customModelPick;
+      const models = getModelsForHarness(customHarnessPick, "");
+      customModelPick = models[0] || "";
+      const modelSelect = document.getElementById("customModelSelect");
+      if (modelSelect) {
+        modelSelect.innerHTML = buildModelSelectOptionsHtml(customHarnessPick, customModelPick);
+      }
     }
 
     async function triggerSubagentAction(action, sessionId, subSessionId) {
@@ -1288,7 +1785,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       const payload = { action, sessionId, subSessionId };
       if (action === "custom") {
         const hEl = document.getElementById("customHarnessSelect");
-        const mEl = document.getElementById("customModelInput");
+        const mEl = document.getElementById("customModelSelect");
         payload.harness = hEl ? hEl.value : customHarnessPick;
         payload.model = mEl ? mEl.value.trim() : customModelPick;
         customHarnessPick = payload.harness;
@@ -1365,6 +1862,9 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       updateLangButtons();
       if (!data) return;
       latestState = data;
+      if (data.availableModels) {
+        availableModelsByHarness = data.availableModels;
+      }
       const t = I18N[currentLang];
 
       document.getElementById("projPath").textContent = data.projectRoot;
@@ -1387,12 +1887,15 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       } else {
         document.getElementById("sessionList").innerHTML = sessions.map(s => {
           const isSel = activeSess && s.session_id === activeSess.session_id;
+          const displayId = s.session_id.includes("::")
+            ? s.session_id.split("::")[1]
+            : s.session_id;
           const createdStr = formatCreatedTime(s.created_at);
           const memoStr = (s.memo && s.memo.trim()) ? s.memo.trim() : "";
           return \`
             <div class="session-item \${isSel ? 'active' : ''}" onclick="selectSession('\${esc(s.session_id)}')">
               <div class="session-item-header">
-                <span>\${esc(s.session_id)}</span>
+                <span>\${esc(displayId)}</span>
               </div>
               <div class="meta-bar">\${esc(createdStr)}</div>
               <div class="session-memo-row">
@@ -1409,6 +1912,16 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
       const tasks = activeSess ? allTasks.filter(x => x.session_id === activeSess.session_id) : [];
       const debates = activeSess ? allDebates.filter(d => d.session_id === activeSess.session_id) : [];
 
+      // Auto-select first Debate or first Task in the active session so the right-hand
+      // Subagent Inspector shows only the relevant item's subagents by default.
+      if (!selectedTaskId) {
+        if (debates.length > 0) {
+          selectedTaskId = debates[0].debate_id;
+        } else if (tasks.length > 0) {
+          selectedTaskId = tasks[0].task_id;
+        }
+      }
+
       const done = tasks.filter(x => x.status === "done").length;
       const pct = tasks.length ? Math.round((done / tasks.length) * 100) : 0;
 
@@ -1416,10 +1929,14 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         .map(([k, v]) => \`<span class="badge \${v.installed ? 'st-done' : 'st-pending'}">\${esc(k)}: \${v.installed ? t.installedOk : t.installedNo}</span>\`)
         .join("");
 
+      const activeDisplayId = activeSess
+        ? (activeSess.session_id.includes("::") ? activeSess.session_id.split("::")[1] : activeSess.session_id)
+        : t.noSession;
+
       document.getElementById("kpiGrid").innerHTML = \`
         <div class="card">
           <div class="card-title">\${t.activeSession}</div>
-          <div class="card-value">\${activeSess ? esc(activeSess.session_id) : t.noSession}</div>
+          <div class="card-value">\${esc(activeDisplayId)}</div>
           <div class="meta-bar">\${activeSess && activeSess.memo ? esc(activeSess.memo) + ' · ' : ''}\${t.phasePrefix}\${activeSess ? esc(activeSess.phase) : "-"}</div>
         </div>
         <div class="card">
@@ -1499,13 +2016,13 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         }).join("");
       }
 
-      // 4. Render Subagents in Selected Session + 4 Runtime Controls (Kill / Retry / Fallback / Custom)
+      // 4. Render Subagents in Selected Session + 4 Runtime Controls
       const allLogs = data.subagentLogs || [];
       const sessionLogs = activeSess
         ? allLogs.filter(l => l.sessionId === activeSess.session_id)
         : allLogs;
 
-      const filteredLogs = selectedTaskId
+      const filteredLogs = (selectedTaskId && selectedTaskId !== "__ALL__")
         ? sessionLogs.filter(l =>
             l.taskId.toUpperCase() === selectedTaskId.toUpperCase() ||
             l.subSessionId.toUpperCase().includes(selectedTaskId.toUpperCase())
@@ -1518,23 +2035,24 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         ? effectiveLogs.find(l => l.subSessionId === selectedSubSessionId) || effectiveLogs[0]
         : effectiveLogs[0];
 
-      // Preserve user focus if typing in customModelInput
+      // Preserve user focus if interacting with custom selects
       const activeEl = document.activeElement;
-      if (activeEl && (activeEl.id === "customModelInput" || activeEl.id === "customHarnessSelect")) {
+      if (activeEl && (activeEl.id === "customModelSelect" || activeEl.id === "customHarnessSelect")) {
         return;
       }
 
       if (!activeLog) {
         document.getElementById("inspector").innerHTML =
-          \`<div class="meta-bar">\${t.noLogs}\${selectedTaskId ? t.forTask + esc(selectedTaskId) : ''}.</div>\`;
+          \`<div class="meta-bar">\${t.noLogs}\${selectedTaskId && selectedTaskId !== '__ALL__' ? t.forTask + esc(selectedTaskId) : ''}.</div>\`;
       } else {
         const statusText = t.statusMap[activeLog.status] || activeLog.status;
-        const resetFilterBtn = selectedTaskId
-          ? \`<div style="margin-bottom:6px;"><button type="button" class="memo-edit-btn" onclick="selectTask(null)">\${esc(t.showAllSessionLogs)} (\${sessionLogs.length})</button></div>\`
+        const resetFilterBtn = (selectedTaskId && selectedTaskId !== "__ALL__" && sessionLogs.length > effectiveLogs.length)
+          ? \`<div style="margin-bottom:6px;"><button type="button" class="memo-edit-btn" onclick="selectTask('__ALL__')">\${esc(t.showAllSessionLogs)} (\${sessionLogs.length})</button></div>\`
           : "";
         const logPills = effectiveLogs.map(l => {
           const isCur = l.subSessionId === activeLog.subSessionId;
-          const shortSub = l.subSessionId.replace(l.sessionId + "-", "");
+          const realSessPrefix = l.sessionId.includes("::") ? l.sessionId.split("::")[0] : l.sessionId;
+          const shortSub = l.subSessionId.replace(realSessPrefix + "-", "");
           const label = (l.role || l.taskId || "sub") + " [" + shortSub + "] @" + l.harness;
           return \`<span class="badge \${isCur ? 'st-running' : 'st-pending'}" style="cursor:pointer;" onclick="selectSubSession('\${esc(l.subSessionId)}')">\${esc(label)}</span>\`;
         }).join("");
@@ -1542,7 +2060,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
         const hOpts = HARNESS_OPTIONS.map(opt =>
           \`<option value="\${esc(opt)}" \${opt === customHarnessPick ? 'selected' : ''}>\${esc(opt)}</option>\`
         ).join("");
-        const presetList = Object.values(MODEL_PRESETS).flat().map(m => \`<option value="\${esc(m)}"></option>\`).join("");
+        const mOpts = buildModelSelectOptionsHtml(customHarnessPick, customModelPick);
         const statusBanner = actionStatusMsg
           ? \`<div class="meta-bar" style="color:var(--ok);margin-top:4px;">\${esc(actionStatusMsg)}</div>\`
           : "";
@@ -1560,8 +2078,7 @@ function renderDashboardHtml(defaultLocale = detectSystemLocale()): string {
             </div>
             <div class="custom-run-row">
               <select id="customHarnessSelect" onchange="onCustomHarnessChange(this)">\${hOpts}</select>
-              <input type="text" id="customModelInput" list="modelPresetList" value="\${esc(customModelPick)}" placeholder="model id" style="width:155px;" oninput="customModelPick=this.value" />
-              <datalist id="modelPresetList">\${presetList}</datalist>
+              <select id="customModelSelect" style="min-width:175px;" onchange="customModelPick=this.value">\${mOpts}</select>
               <button type="button" class="btn btn-primary" onclick="triggerSubagentAction('custom', '\${esc(activeLog.sessionId)}', '\${esc(activeLog.subSessionId)}')">\${esc(t.btnCustomRun)}</button>
             </div>
             \${statusBanner}
@@ -1633,6 +2150,34 @@ export async function startDashboardServer(options?: {
           "Cache-Control": "no-store",
         });
         res.end(body);
+        return;
+      }
+
+      if (req.method === "GET" && urlObj.pathname === "/api/models") {
+        const availableModels = discoverHarnessModels({
+          projectRoot,
+          homeDir,
+          forceRefresh: false,
+        });
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(JSON.stringify({ ok: true, availableModels }));
+        return;
+      }
+
+      if (req.method === "POST" && urlObj.pathname === "/api/models/refresh") {
+        const availableModels = discoverHarnessModels({
+          projectRoot,
+          homeDir,
+          forceRefresh: true,
+        });
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(JSON.stringify({ ok: true, availableModels }));
         return;
       }
 

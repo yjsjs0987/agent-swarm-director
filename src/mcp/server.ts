@@ -1297,10 +1297,15 @@ export class AsdMcpServer {
     signal?: AbortSignal,
     onProgress?: (msg: string) => void
   ): Promise<AsdDebateOutput> {
-    const sessionId =
-      input.sessionId?.trim() ||
-      this.db.getLatestSession()?.session_id ||
-      `${Date.now()}-main`;
+    let sessionId = input.sessionId?.trim() || "";
+    if (!sessionId) {
+      if (input.taskId) {
+        const latest = this.db.getLatestSession();
+        sessionId = latest?.session_id || `${Date.now()}-debate`;
+      } else {
+        sessionId = `${Date.now()}-debate`;
+      }
+    }
     let progressStep = 0;
     const brokerResult = await runDebateBroker({
       projectRoot: this.projectRoot,

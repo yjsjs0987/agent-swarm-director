@@ -835,6 +835,30 @@ describe("ASD CLI (src/cli/index.ts)", () => {
           });
           assert.equal(resetRtRes.status, 200);
           assert.equal(fs.existsSync(localRtFile), false);
+
+          // 4. Test dynamic model catalog endpoints (GET /api/models & POST /api/models/refresh)
+          const modelsRes = await fetch(`${handle.url}/api/models`);
+          assert.equal(modelsRes.status, 200);
+          const modelsJson = (await modelsRes.json()) as {
+            ok: boolean;
+            availableModels: Record<string, string[]>;
+          };
+          assert.equal(modelsJson.ok, true);
+          assert.ok(Array.isArray(modelsJson.availableModels.antigravity));
+          assert.ok(Array.isArray(modelsJson.availableModels["claude-code"]));
+          assert.ok(Array.isArray(modelsJson.availableModels.codex));
+          assert.ok(Array.isArray(modelsJson.availableModels.opencode));
+
+          const refreshRes = await fetch(`${handle.url}/api/models/refresh`, {
+            method: "POST",
+          });
+          assert.equal(refreshRes.status, 200);
+          const refreshJson = (await refreshRes.json()) as {
+            ok: boolean;
+            availableModels: Record<string, string[]>;
+          };
+          assert.equal(refreshJson.ok, true);
+          assert.ok(refreshJson.availableModels.antigravity.length > 0);
         } finally {
           await handle.close();
         }
