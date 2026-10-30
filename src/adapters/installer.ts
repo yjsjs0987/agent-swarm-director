@@ -271,6 +271,30 @@ function cleanupLegacyAgentFiles(agentDir: string): void {
   }
 }
 
+export function getAgentTemplate(role: AgentRole, model?: string): string | null {
+  const presetPath = path.join(getAsdRoot(), "presets", "agents", `${role}.md`);
+  try {
+    if (fs.existsSync(presetPath)) {
+      const raw = fs.readFileSync(presetPath, "utf8").replace(/\r\n/g, "\n").trim();
+      if (raw.length > 0) {
+        let body = raw.replace(/^---\n[\s\S]*?\n---\n+/, "").trim() + "\n";
+        if (model) {
+          const modelLine = `**Configured Model**: \`${model}\` (synced from \`routing.jsonc\`)`;
+          if (body.includes("multi-agent system.")) {
+            body = body.replace("multi-agent system.", `multi-agent system.\n${modelLine}`);
+          } else {
+            body = `${modelLine}\n\n${body}`;
+          }
+        }
+        return body;
+      }
+    }
+  } catch {
+    // Fallback to built-in template
+  }
+  return null;
+}
+
 export function generateAgentContent(
   role: AgentRole,
   opts?: { harnessId?: HarnessId; model?: string }
@@ -321,6 +345,10 @@ export function generateAgentContent(
     frontmatterLines.push(`model: ${opts.model}`);
   }
   frontmatterLines.push(`---`);
+  const presetBody = getAgentTemplate(role, opts?.model);
+  if (presetBody) {
+    return `${frontmatterLines.join("\n")}\n\n${presetBody}`;
+  }
 
   return `${frontmatterLines.join("\n")}
 
