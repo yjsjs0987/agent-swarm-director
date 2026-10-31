@@ -12,7 +12,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { resolveAsdPaths } from "./config.ts";
+import { readCachedUpdateNotice, resolveAsdPaths } from "./config.ts";
 import { redactSecrets } from "./redact.ts";
 import type {
   DebateInput,
@@ -652,6 +652,12 @@ export function renderProgressBoard(
 
   const header = `### 📊 ASD TODO 진행 현황 [Turn ${completedTurns}/${totalTurns} 완료 | 진행률: ${doneCount}/${totalTasks} (${pct}%)]`;
   const lines: string[] = [header];
+  const updateNotice = readCachedUpdateNotice();
+  if (updateNotice?.updateAvailable) {
+    lines.push(
+      `> 💡 **ASD Update Available (\`v${updateNotice.currentVersion}\` → \`v${updateNotice.latestVersion}\`)**: Run \`asd update\` in your terminal to update and sync automatically.`
+    );
+  }
 
   for (const t of tasks) {
     const taskId = "task_id" in t ? t.task_id : t.taskId;

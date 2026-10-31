@@ -199,3 +199,174 @@ export function ensureProjectInitialized(
   fs.mkdirSync(path.dirname(paths.dbPath), { recursive: true });
   ensureGitExclude(projectRoot, ".asd/");
 }
+
+// ============================================================================
+// Version Comparison & Cached Remote Update Check
+// ============================================================================
+
+export const DEFAULT_REMOTE_PKG_URL =
+  "https://raw.githubusercontent.com/yjsjs0987/agent-swarm-director/main/package.json";
+const UPDATE_CHECK_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+export interface UpdateCheckNotice {
+  currentVersion: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+  checkedAt: number;
+}
+
+export function compareSemver(a: string, b: string): number {
+  const cleanA = a.replace(/^v/i, "").trim().split("-")[0] ?? "";
+  const cleanB = b.replace(/^v/i, "").trim().split("-")[0] ?? "";
+  const partsA = cleanA.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const partsB = cleanB.split(".").map((n) => Number.parseInt(n, 10) || 0);
+  const len = Math.max(partsA.length, partsB.length, 3);
+  for (let i = 0; i < len; i++) {
+    const va = partsA[i] ?? 0;
+    const vb = partsB[i] ?? 0;
+    if (va < vb) return -1;
+    if (va > vb) return 1;
+  }
+  return 0;
+}
+
+function getUpdateCachePath(homeDir?: string): string {
+  const home = homeDir || process.env.ASD_HOME_DIR || os.homedir();
+  return path.join(home, ".asd", "state", "update-check.json");
+}
+
+export function readCachedUpdateNotice(homeDir?: string): UpdateCheckNotice | null {
+  try {
+    const cachePath = getUpdateCachePath(homeDir);
+    if (!fs.existsSync(cachePath)) return null;
+    const raw = JSON.parse(fs.readFileSync(cachePath, "utf8")) as {
+      latestVersion?: string;
+      checkedAt?: number;
+    };
+    if (typeof raw.latestVersion !== "string" || !raw.latestVersion.trim()) {
+      return null;
+    }
+    const latestVersion = raw.latestVersion.trim();
+    return {
+      currentVersion: ASD_VERSION,
+      latestVersion,
+      updateAvailable: compareSemver(ASD_VERSION, latestVersion) < 0,
+      checkedAt: typeof raw.checkedAt === "number" ? raw.checkedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function checkForRemoteUpdate(options?: {
+  homeDir?: string;
+  force?: boolean;
+  timeoutMs?: number;
+  remoteUrl?: string;
+}): Promise<{
+  currentVersion: string;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+}> {
+  const cached = readCachedUpdateNotice(options?.homeDir);
+  if (
+    !options?.force &&
+    cached &&
+    Date.now() - cached.checkedAt < UPDATE_CHECK_TTL_MS
+  ) {
+    return {
+      currentVersion: ASD_VERSION,
+      latestVersion: cached.latestVersion,
+      updateAvailable: cached.updateAvailable,
+    };
+  }
+
+  const url =
+    options?.remoteUrl ||
+    process.env.ASD_UPDATE_CHECK_URL ||
+    DEFAULT_REMOTE_PKG_URL;
+  const isTempTestHome =
+    !options?.force &&
+    !options?.remoteUrl &&
+    !process.env.ASD_UPDATE_CHECK_URL &&
+    Boolean(
+      options?.homeDir &&
+        path
+          .resolve(options.homeDir)
+          .toLowerCase()
+          .startsWith(path.resolve(os.tmpdir()).toLowerCase())
+    );
+  if (isTempTestHome) {
+    return {
+      currentVersion: ASD_VERSION,
+      latestVersion: cached?.latestVersion ?? null,
+      updateAvailable: cached?.updateAvailable ?? false,
+    };
+  }
+  const timeoutMs = options?.timeoutMs ?? 1500;
+
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) {
+      return {
+        currentVersion: ASD_VERSION,
+        latestVersion: cached?.latestVersion ?? null,
+        updateAvailable: cached?.updateAvailable ?? false,
+      };
+    }
+    const pkg = (await res.json()) as { version?: string };
+    const latestVersion =
+      typeof pkg.version === "string" && pkg.version.trim()
+        ? pkg.version.trim()
+        : null;
+    if (!latestVersion) {
+      return {
+        currentVersion: ASD_VERSION,
+        latestVersion: null,
+        updateAvailable: false,
+      };
+    }
+
+    const cachePath = getUpdateCachePath(options?.homeDir);
+    try {
+      fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+      fs.writeFileSync(
+        cachePath,
+        JSON.stringify({ latestVersion, checkedAt: Date.now() }, null, 2) + "\n",
+        "utf8"
+      );
+    } catch {
+      // Ignore cache write errors
+    }
+
+    return {
+      currentVersion: ASD_VERSION,
+      latestVersion,
+      updateAvailable: compareSemver(ASD_VERSION, latestVersion) < 0,
+    };
+  } catch {
+    return {
+      currentVersion: ASD_VERSION,
+      latestVersion: cached?.latestVersion ?? null,
+      updateAvailable: cached?.updateAvailable ?? false,
+    };
+  }
+}
+
+export function formatTerminalUpdateBanner(
+  currentVersion: string,
+  latestVersion: string
+): string {
+  const line1 = `💡 ASD update available: v${currentVersion} -> v${latestVersion}`;
+  const line2 = `Run \`asd update\` to download the latest version and sync configs.`;
+  return [
+    "",
+    "╭────────────────────────────────────────────────────────────────────╮",
+    `│ ${line1.padEnd(65, " ")} │`,
+    `│ ${line2.padEnd(66, " ")} │`,
+    "╰────────────────────────────────────────────────────────────────────╯",
+  ].join("\n");
+}

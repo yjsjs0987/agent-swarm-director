@@ -20,7 +20,9 @@
  *      harness CLI availability, and synthetic PreToolUse block probe (.GIT/config, .ENV).
  */
 
+import * as child_process from "node:child_process";
 import * as crypto from "node:crypto";
+import { checkForRemoteUpdate, compareSemver } from "../core/config.ts";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1855,3 +1857,130 @@ export async function doctorProbe(
 }
 
 export const runAsdDoctor = doctorProbe;
+
+// ============================================================================
+// Self-Updater: runAsdUpdate (`asd update`)
+// ============================================================================
+
+export interface AsdUpdateResult {
+  updated: boolean;
+  aborted?: boolean;
+  previousVersion: string;
+  latestVersion: string;
+  message: string;
+}
+
+export async function runAsdUpdate(options?: {
+  homeDir?: string;
+  projectRoot?: string;
+  remoteUrl?: string;
+  asdRootOverride?: string;
+}): Promise<AsdUpdateResult> {
+  const asdRoot = options?.asdRootOverride
+    ? path.resolve(options.asdRootOverride)
+    : getAsdRoot();
+  const homeDir = resolveHome(options?.homeDir);
+  const previousVersion = ASD_VERSION;
+
+  const check = await checkForRemoteUpdate({
+    homeDir,
+    force: true,
+    timeoutMs: 5000,
+    remoteUrl: options?.remoteUrl,
+  });
+
+  // Check for uncommitted tracked modifications in asdRoot
+  const statusRes = child_process.spawnSync(
+    "git",
+    ["status", "--porcelain", "--untracked-files=no"],
+    { cwd: asdRoot, encoding: "utf8", windowsHide: true }
+  );
+  if (statusRes.status === 0 && (statusRes.stdout || "").trim().length > 0) {
+    return {
+      updated: false,
+      aborted: true,
+      previousVersion,
+      latestVersion: check.latestVersion ?? previousVersion,
+      message: `Update aborted: Uncommitted local changes detected in ${asdRoot}. Please commit or stash them first.`,
+    };
+  }
+
+  if (
+    check.latestVersion &&
+    compareSemver(previousVersion, check.latestVersion) >= 0
+  ) {
+    return {
+      updated: false,
+      previousVersion,
+      latestVersion: check.latestVersion,
+      message: `ASD is already up to date (v${previousVersion}).`,
+    };
+  }
+
+  const pullRes = child_process.spawnSync("git", ["pull", "--ff-only"], {
+    cwd: asdRoot,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (pullRes.status !== 0) {
+    const errText = (pullRes.stderr || pullRes.stdout || "git pull failed").trim();
+    throw new Error(`Failed to pull latest changes in ${asdRoot}: ${errText}`);
+  }
+
+  // Read newly pulled package.json version
+  let newVersion = check.latestVersion ?? previousVersion;
+  try {
+    const pkgRaw = fs.readFileSync(path.join(asdRoot, "package.json"), "utf8");
+    const parsedPkg = JSON.parse(pkgRaw) as { version?: string };
+    if (parsedPkg.version?.trim()) {
+      newVersion = parsedPkg.version.trim();
+    }
+  } catch {
+    // fallback
+  }
+
+  // Update cached version file so the update banner clears immediately
+  try {
+    const cachePath = path.join(homeDir, ".asd", "state", "update-check.json");
+    ensureDir(path.dirname(cachePath));
+    fs.writeFileSync(
+      cachePath,
+      JSON.stringify({ latestVersion: newVersion, checkedAt: Date.now() }, null, 2) + "\n",
+      "utf8"
+    );
+  } catch {
+    // ignore
+  }
+
+  // Run sync in a fresh Node process so the newly pulled code & version are loaded
+  const cliScript = path.join(asdRoot, "src", "cli", "index.ts");
+  if (fs.existsSync(cliScript)) {
+    const syncArgs = ["--no-warnings", cliScript, "sync", "--force"];
+    if (options?.homeDir) {
+      syncArgs.push("--home", options.homeDir);
+    }
+    child_process.spawnSync(process.execPath, syncArgs, {
+      cwd: asdRoot,
+      encoding: "utf8",
+      windowsHide: true,
+    });
+  } else {
+    await syncHarnessConfigs({ homeDir, force: true, projectRoot: options?.projectRoot });
+  }
+
+  if (newVersion === previousVersion && (pullRes.stdout || "").includes("Already up to date")) {
+    return {
+      updated: false,
+      previousVersion,
+      latestVersion: newVersion,
+      message: `ASD is already up to date (v${newVersion}).`,
+    };
+  }
+
+  return {
+    updated: true,
+    previousVersion,
+    latestVersion: newVersion,
+    message: `ASD successfully updated from v${previousVersion} to v${newVersion}!`,
+  };
+}

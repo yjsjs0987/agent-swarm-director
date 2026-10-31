@@ -41,9 +41,14 @@ import {
   runAsdDoctor,
   runAsdSync,
   runAsdUninstall,
+  runAsdUpdate,
 } from "../adapters/installer.ts";
 import { opencodeAdapter } from "../adapters/opencode.ts";
-import { resolveAsdPaths } from "../core/config.ts";
+import {
+  checkForRemoteUpdate,
+  formatTerminalUpdateBanner,
+  resolveAsdPaths,
+} from "../core/config.ts";
 import {
   openProjectDb,
   type SessionRow,
@@ -560,6 +565,7 @@ Commands:
   verify --task <id> [--summary <s>]     Verify task boundaries, run tests, and commit/merge
   debate --topic <t> --proposal <p>      Run zero-timeout cross-model blind debate via CLI
   sync [--force] [--no-path]             Sync ASD harnesses globally and install 'asd' CLI to PATH
+  update                                 Pull latest ASD release from GitHub and sync configs
   status [--json]                        Display current session progress board and warnings
   logs [taskId] [--json]                 Inspect latest (or task-specific) subagent prompt & output log
   ui [--port <num>] [--json]             Launch lightweight local web dashboard (default port: 3847)
@@ -609,6 +615,12 @@ export async function main(
 
   if (parsed.flags.version) {
     console.log(`ASD v${ASD_VERSION}`);
+    const notice = await checkForRemoteUpdate({ homeDir: parsed.options.home });
+    if (notice.updateAvailable && notice.latestVersion) {
+      console.log(
+        formatTerminalUpdateBanner(notice.currentVersion, notice.latestVersion)
+      );
+    }
     return 0;
   }
 
@@ -621,8 +633,37 @@ export async function main(
   const projectRoot = path.resolve(options.projectRoot || process.cwd());
   const homeDir = options.home || process.env.ASD_HOME_DIR;
 
+  const printUpdateBannerIfAvailable = async () => {
+    if (flags.json || process.env.ASD_SESSION_ROLE === "subagent") return;
+    const notice = await checkForRemoteUpdate({ homeDir });
+    if (notice.updateAvailable && notice.latestVersion) {
+      console.log(
+        formatTerminalUpdateBanner(notice.currentVersion, notice.latestVersion)
+      );
+    }
+  };
+
   try {
     switch (command) {
+      case "update": {
+        if (!flags.json) {
+          console.log(`Checking for updates (current: v${ASD_VERSION})...`);
+        }
+        const res = await runAsdUpdate({ homeDir, projectRoot });
+        if (flags.json) {
+          console.log(JSON.stringify(res, null, 2));
+        } else {
+          if (res.updated) {
+            console.log(
+              `New version found: v${res.latestVersion}. Pulling latest changes from GitHub...`
+            );
+            console.log(`Syncing global harness configurations (asd sync)...`);
+          }
+          console.log(res.message);
+        }
+        return res.aborted ? 1 : 0;
+      }
+
       case "sync": {
         const res = await runAsdSync({
           homeDir,
@@ -652,6 +693,7 @@ export async function main(
               console.log(`  - ${shim}`);
             }
           }
+          await printUpdateBannerIfAvailable();
         }
         return 0;
       }
@@ -699,11 +741,13 @@ export async function main(
           console.log(
             "No active ASD session found. Run an ASD command or skill to start a session."
           );
+          await printUpdateBannerIfAvailable();
           return 0;
         }
 
         const board = renderProgressBoard(session, tasks);
         console.log(board);
+        await printUpdateBannerIfAvailable();
 
         if (session.stashed_work_sha) {
           console.log(

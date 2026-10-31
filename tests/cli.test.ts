@@ -1044,4 +1044,66 @@ describe("ASD CLI (src/cli/index.ts)", () => {
       }
     });
   });
+
+  // ==========================================================================
+  // 10. Update Notification & asd update Command
+  // ==========================================================================
+  describe("10. Update Notification & asd update Command", () => {
+    test("displays English update notice in progressBoard and terminal banner when update is cached", () => {
+      const updHome = createTempDir("asd-cli-upd-home-");
+      const updProj = createTempDir("asd-cli-upd-proj-");
+      initGitRepo(updProj);
+
+      try {
+        // Seed update-check.json with a newer version
+        const stateDir = path.join(updHome, ".asd", "state");
+        fs.mkdirSync(stateDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(stateDir, "update-check.json"),
+          JSON.stringify({
+            checkedAt: new Date().toISOString(),
+            latestVersion: "9.9.9",
+          }),
+          "utf-8"
+        );
+
+        const db = openProjectDb(updProj, updHome);
+        db.createOrGetSession({
+          sessionId: "sess-upd-test",
+          projectRoot: updProj,
+          mainHarness: "claude-code",
+        });
+        db.upsertTasks("sess-upd-test", [
+          {
+            taskId: "T1.1",
+            turn: 1,
+            title: "Check update banner",
+            track: "LIGHT",
+          },
+        ]);
+        db.close();
+
+        const statusRes = runCli(["status", "--home", updHome], {
+          cwd: updProj,
+          env: { ASD_HOME_DIR: updHome },
+        });
+        assert.equal(statusRes.exitCode, 0, `status stderr: ${statusRes.stderr}`);
+        assert.ok(
+          statusRes.stdout.includes(
+            `> 💡 **ASD Update Available (\`v${ASD_VERSION}\` → \`v9.9.9\`)**: Run \`asd update\` in your terminal to update and sync automatically.`
+          ),
+          `Expected progressBoard update notice in stdout:\n${statusRes.stdout}`
+        );
+        assert.ok(
+          statusRes.stdout.includes(
+            `💡 ASD update available: v${ASD_VERSION} -> v9.9.9`
+          ),
+          `Expected terminal update banner in stdout:\n${statusRes.stdout}`
+        );
+      } finally {
+        removeTempDir(updHome);
+        removeTempDir(updProj);
+      }
+    });
+  });
 });
