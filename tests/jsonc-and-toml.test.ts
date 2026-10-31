@@ -7,6 +7,7 @@ import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { parseJsonc, upsertTomlFence, removeTomlFence } from "../src/core/jsonc.ts";
 import { redactSecrets } from "../src/core/redact.ts";
+import { ASD_VERSION } from "../src/core/types.ts";
 
 describe("jsonc.ts - parseJsonc", () => {
   test("parses valid JSON without comments", () => {
@@ -286,5 +287,5 @@ MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQD...
 });
 
 // Import the fence constants for testing
-const BEGIN_FENCE = `# >>> BEGIN MANAGED BY ASD-V2 (v2.3.0) >>>`;
+const BEGIN_FENCE = `# >>> BEGIN MANAGED BY ASD-V2 (v${ASD_VERSION}) >>>`;
 const END_FENCE = `# <<< END MANAGED BY ASD-V2 <<<`;

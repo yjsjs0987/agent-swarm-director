@@ -334,7 +334,7 @@ export function generateAgentContent(
   const frontmatterLines = [
     `---`,
     `name: asd-${role}`,
-    `description: ASD v2.2 ${meta.title} Agent. ${meta.desc}`,
+    `description: ASD v${ASD_VERSION} ${meta.title} Agent. ${meta.desc}`,
   ];
   if (opts?.harnessId === "opencode") {
     frontmatterLines.push(`mode: subagent`);
@@ -352,7 +352,7 @@ export function generateAgentContent(
 
 # ASD Agent: asd-${role} (${meta.title})
 
-You are operating as the **${meta.title}** agent in the ASD v2.2 multi-agent system.${
+You are operating as the **${meta.title}** agent in the ASD v${ASD_VERSION} multi-agent system.${
     opts?.model ? `\n**Configured Model**: \`${opts.model}\` (synced from \`routing.jsonc\`)` : ""
   }
 
@@ -423,7 +423,8 @@ function bootstrapGlobalPresets(homeDir: string): { routingPath: string; mcpPath
 
   if (!fs.existsSync(routingPath)) {
     if (fs.existsSync(presetRouting)) {
-      fs.copyFileSync(presetRouting, routingPath);
+      const content = fs.readFileSync(presetRouting, "utf8").replace(/"_asdVersion":\s*"[^"]*"/, `"_asdVersion": "${ASD_VERSION}"`);
+      safeWriteText(routingPath, content);
     } else {
       safeWriteText(routingPath, `// ASD Default Routing\n{\n  "_asdVersion": "${ASD_VERSION}"\n}\n`);
     }
@@ -431,7 +432,8 @@ function bootstrapGlobalPresets(homeDir: string): { routingPath: string; mcpPath
 
   if (!fs.existsSync(mcpPath)) {
     if (fs.existsSync(presetMcp)) {
-      fs.copyFileSync(presetMcp, mcpPath);
+      const content = fs.readFileSync(presetMcp, "utf8").replace(/"_asdVersion":\s*"[^"]*"/, `"_asdVersion": "${ASD_VERSION}"`);
+      safeWriteText(mcpPath, content);
     } else {
       safeWriteText(mcpPath, `// ASD Default MCP\n{\n  "_asdVersion": "${ASD_VERSION}"\n}\n`);
     }

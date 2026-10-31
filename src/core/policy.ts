@@ -25,7 +25,7 @@ import {
   resolveAsdPaths,
 } from "./config.ts";
 import { SqliteDriver } from "./db.ts";
-import type { SubagentSessionMeta } from "./types.ts";
+import { ASD_VERSION, type SubagentSessionMeta } from "./types.ts";
 
 // ============================================================================
 // Manifest & Policy Types
@@ -43,7 +43,7 @@ export interface HarnessToolManifest {
 }
 
 export const DEFAULT_HARNESS_TOOL_MANIFEST: HarnessToolManifest = {
-  _asdVersion: "2.3.0",
+  _asdVersion: ASD_VERSION,
   harnesses: {
     "claude-code": {
       WriteTools: ["Write", "Edit", "MultiEdit", "NotebookEdit"],

@@ -42,7 +42,7 @@ import {
   cursorAdapter,
   probeCursorHeadless,
 } from "../src/adapters/cursor.ts";
-import { AGENT_ROLES, type HarnessAdapter } from "../src/core/types.ts";
+import { AGENT_ROLES, ASD_VERSION, type HarnessAdapter } from "../src/core/types.ts";
 
 describe("Harness Adapters", () => {
   describe("1. Adapter Instantiation & HarnessAdapter Contract", () => {
@@ -465,7 +465,7 @@ describe("Harness Adapters", () => {
         { director: { harness: "claude-code", model: "claude-opus-4-6" } }
       );
 
-      assert.equal(cfg._asdVersion, "2.3.0");
+      assert.equal(cfg._asdVersion, ASD_VERSION);
       assert.ok(cfg.mcpServers);
       assert.ok(cfg.agentRouting);
     });

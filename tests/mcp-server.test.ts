@@ -35,7 +35,7 @@ import { AsdMcpServer, ASD_MCP_TOOLS } from "../src/mcp/server.ts";
 import { openProjectDb, type SqliteDriver } from "../src/core/db.ts";
 import { ensureGitUserIdentity, prepareBaseline, runGit } from "../src/core/workspace.ts";
 import type { CommandRunner } from "../src/core/spawner.ts";
-import type { AsdPlanOutput, AsdDispatchOutput, AsdVerifyOutput, AsdDebateOutput, DoneClaim } from "../src/core/types.ts";
+import { ASD_VERSION, type AsdPlanOutput, type AsdDispatchOutput, type AsdVerifyOutput, type AsdDebateOutput, type DoneClaim } from "../src/core/types.ts";
 
 const tmpDirs: string[] = [];
 const openServers: AsdMcpServer[] = [];
@@ -84,7 +84,7 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
 
       assert.equal(resp.protocolVersion, "2024-11-05");
       assert.equal(resp.serverInfo.name, "asd-core");
-      assert.equal(resp.serverInfo.version, "2.3.0");
+      assert.equal(resp.serverInfo.version, ASD_VERSION);
     });
 
     test("tools/list returns exactly the 4 ASD tools with complete schemas", async () => {

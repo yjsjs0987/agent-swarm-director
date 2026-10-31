@@ -9,7 +9,25 @@
 // Version Constants
 // ============================================================================
 
-export const ASD_VERSION = "2.3.0" as const;
+import * as fs from "node:fs";
+
+function readPackageVersion(): string {
+  try {
+    const raw = fs.readFileSync(
+      new URL("../../package.json", import.meta.url),
+      "utf8"
+    );
+    const parsed = JSON.parse(raw) as { version?: string };
+    if (typeof parsed.version === "string" && parsed.version.trim().length > 0) {
+      return parsed.version.trim();
+    }
+  } catch {
+    // Fallback if package.json is unreadable
+  }
+  return "2.3.0";
+}
+
+export const ASD_VERSION: string = readPackageVersion();
 
 // ============================================================================
 // Agent Roles (5 standard roles)

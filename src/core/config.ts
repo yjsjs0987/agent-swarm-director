@@ -13,7 +13,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { parseJsonc } from "./jsonc.ts";
-import type { RoutingConfig } from "./types.ts";
+import { ASD_VERSION, type RoutingConfig } from "./types.ts";
 
 /**
  * Resolve the closest EXISTING ancestor of targetPath via realpathSync.native,
@@ -130,7 +130,8 @@ export function loadRoutingConfig(
       "default-routing.jsonc"
     );
     fs.mkdirSync(path.dirname(paths.globalRoutingPath), { recursive: true });
-    fs.copyFileSync(presetPath, paths.globalRoutingPath);
+    const content = fs.readFileSync(presetPath, "utf8").replace(/"_asdVersion":\s*"[^"]*"/, `"_asdVersion": "${ASD_VERSION}"`);
+    fs.writeFileSync(paths.globalRoutingPath, content, "utf8");
   }
   return parseJsonc<RoutingConfig>(
     fs.readFileSync(paths.globalRoutingPath, "utf8")

@@ -23,6 +23,7 @@ import { buildDefaultHarnessCommand } from "../src/core/debate.ts";
 import { resolveSpawnCommand } from "../src/core/spawner.ts";
 import { startDashboardServer } from "../src/cli/dashboard.ts";
 import { getLatestSession, runAsdLogs } from "../src/cli/index.ts";
+import { ASD_VERSION } from "../src/core/types.ts";
 import { runGit } from "../src/core/workspace.ts";
 
 function createTempDir(prefix: string): string {
@@ -117,13 +118,13 @@ describe("ASD CLI (src/cli/index.ts)", () => {
     test("asd --version displays 2.3.0", () => {
       const res = runCli(["--version"]);
       assert.equal(res.exitCode, 0);
-      assert.ok(res.stdout.includes("2.3.0"));
+      assert.ok(res.stdout.includes(ASD_VERSION));
     });
 
     test("asd -v flag displays version", () => {
       const res = runCli(["-v"]);
       assert.equal(res.exitCode, 0);
-      assert.ok(res.stdout.includes("2.3.0"));
+      assert.ok(res.stdout.includes(ASD_VERSION));
     });
 
     test("unknown command exits with code 1 and error message", () => {
