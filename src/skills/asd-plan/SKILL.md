@@ -28,7 +28,10 @@ Use the standard ASD criteria (canonical definition in `/asd`, Section 2):
    - **Test File Permission & Verification Rule**: Always allow or include corresponding test files (`tests/*.test.ts`) in `targetFiles` when a task changes version constants, types, or runtime behavior so the verification gate (`npm test`) passes within the same turn. For documentation or skill-only tasks, set a targeted `verifyCmd` rather than running unrelated failing tests.
    - Persist and render:
      ```bash
-     asd plan create --payload '{"tasks":[{"taskId":"T1.1","turn":1,"title":"<Task>","track":"LIGHT","role":"worker","targetFiles":["src/...","tests/..."],"verifyCmd":"npm test"}]}'
+     asd plan create --payload - <<'EOF'
+     {"tasks":[{"taskId":"T1.1","turn":1,"title":"<Task>","track":"LIGHT","role":"worker","targetFiles":["src/...","tests/..."],"verifyCmd":"npm test"}]}
+     EOF
+     # PowerShell: $json | asd plan create --payload -  (or use: asd plan create --file <path.json>)
      ```
      *(Or via CLI flags: `asd plan --title "<Project/Feature Title>" --tasks '<JSON_ARRAY>'`)*
    - If `.asd/PLAN.md` already contains auto-created `[Cross-Scope ...]` tasks from a previous run, keep them scheduled in their assigned turn — do not renumber or delete them.

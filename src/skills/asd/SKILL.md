@@ -42,7 +42,10 @@ ASD v2.3.1 defines exactly five specialist subagent roles (`AGENT_ROLES`), synce
      - **Test File Permission & Scoped Verification Rule**: When a task modifies constants, types, or behavior covered by existing tests, always include the relevant test files (`tests/*.test.ts`) in `targetFiles` (or allow test file updates) so the subagent can update test assertions in the same turn, and scope `verifyCmd` to the relevant test file (or non-code verification command for docs/skills tasks) so unrelated tests do not cause false-negative rollbacks.
    - Persist to the SQLite SSOT and `.asd/PLAN.md`:
      ```bash
-     asd plan create --payload '{"tasks":[{"taskId":"T1.1","turn":1,"title":"<Task>","track":"LIGHT","role":"worker","targetFiles":["src/...","tests/..."],"verifyCmd":"npm test"}]}'
+     asd plan create --payload - <<'EOF'
+     {"tasks":[{"taskId":"T1.1","turn":1,"title":"<Task>","track":"LIGHT","role":"worker","targetFiles":["src/...","tests/..."],"verifyCmd":"npm test"}]}
+     EOF
+     # PowerShell: $json | asd plan create --payload -  (or use: asd plan create --file <path.json>)
      ```
      *(Or via CLI flags: `asd plan --title "<Goal>" --tasks '<JSON_ARRAY>'`)*
    - Render the initial `progressBoard`.
