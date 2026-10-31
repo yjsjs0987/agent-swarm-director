@@ -61,6 +61,9 @@ import {
   spawnSubagent,
   type CommandRunner,
 } from "../core/spawner.ts";
+import {
+  ASD_VERSION,
+} from "../core/types.ts";
 import type {
   AgentRole,
   AsdDebateInput,
@@ -563,7 +566,7 @@ export class AsdMcpServer {
         },
         serverInfo: {
           name: "asd-core",
-          version: "2.2.0",
+          version: ASD_VERSION,
         },
       };
     }
@@ -935,9 +938,6 @@ export class AsdMcpServer {
         if (allowedFiles.length > 0 && !allowedFiles.includes("tests/**")) {
           allowedFiles = [...allowedFiles, "tests/**", "**/*.test.ts", "**/*.spec.ts"];
         }
-        if (allowedFiles.length > 0 && !allowedFiles.includes("tests/**")) {
-          allowedFiles = [...allowedFiles, "tests/**", "**/*.test.ts", "**/*.spec.ts"];
-        }
         const subDir = path.join(this.projectRoot, ".asd", "sessions", sessionId, "subagents", subSessionId);
         fs.mkdirSync(subDir, { recursive: true });
         const promptText = buildPromptForTask(t, upCtx.upstreamDecisions, upCtx.upstreamFiles);
@@ -1107,6 +1107,9 @@ export class AsdMcpServer {
           allowedFiles = [];
         }
 
+        if (allowedFiles.length > 0 && !allowedFiles.includes("tests/**")) {
+          allowedFiles = [...allowedFiles, "tests/**", "**/*.test.ts", "**/*.spec.ts"];
+        }
         const workDir = wtInfo ? wtInfo.wtPath : this.projectRoot;
         const readSpawnOutput = (metaPath: string): string => {
           try {
@@ -1344,7 +1347,8 @@ export class AsdMcpServer {
       visited.add(taskId);
       const row = taskById.get(taskId);
       if (!row) return 0;
-      const isCrossScope = row.title.startsWith("[Cross-Scope");
+      const isCrossScope =
+        row.is_cross_scope === 1 || row.title.startsWith("[Cross-Scope");
       let deps: string[] = [];
       try {
         deps = JSON.parse(row.depends_on_json || "[]");
@@ -1469,6 +1473,7 @@ export class AsdMcpServer {
       contextHint: string;
       acceptance: string;
       verifyCmd: string | null;
+      isCrossScope: boolean;
     }> = [];
 
     for (const [targetFile, entries] of eligibleByTargetFile.entries()) {
@@ -1572,6 +1577,7 @@ export class AsdMcpServer {
         contextHint: reasonsSummary,
         acceptance: changesSummary,
         verifyCmd: primaryOwner.verify_cmd ?? entries[0]!.callerTask.verify_cmd ?? null,
+        isCrossScope: true,
       });
 
       autoCreatedTasks.push({

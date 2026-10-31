@@ -84,7 +84,7 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
 
       assert.equal(resp.protocolVersion, "2024-11-05");
       assert.equal(resp.serverInfo.name, "asd-core");
-      assert.equal(resp.serverInfo.version, "2.2.0");
+      assert.equal(resp.serverInfo.version, "2.3.0");
     });
 
     test("tools/list returns exactly the 4 ASD tools with complete schemas", async () => {

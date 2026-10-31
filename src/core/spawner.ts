@@ -221,7 +221,17 @@ const defaultCommandRunner: CommandRunner = {
       child.on("close", (code) =>
         resolve({ exitCode: code ?? -1, pid: child.pid ?? -1 })
       );
-      child.on("error", () => resolve({ exitCode: -1, pid: child.pid ?? -1 }));
+      child.on("error", (err) => {
+        const totalArgChars = finalArgs.reduce((acc, a) => acc + a.length, 0);
+        const argHint =
+          totalArgChars > 8000
+            ? ` (arg length: ${totalArgChars} chars — may exceed OS command-line limit)`
+            : "";
+        opts.onStderr(
+          `[asd:spawn-error] Failed to spawn '${resolved.command}': ${err.message}${argHint}\n`
+        );
+        resolve({ exitCode: -1, pid: child.pid ?? -1 });
+      });
     });
   },
 };

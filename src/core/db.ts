@@ -71,6 +71,7 @@ export interface TaskRow {
   sub_session_id: string | null;
   commit_sha: string | null;
   duration_ms: number | null;
+  is_cross_scope?: number;
   thinking_effort?: string | null;
 }
 
@@ -87,6 +88,7 @@ export interface TaskInput {
   contextHint?: string | null;
   acceptance?: string | null;
   verifyCmd?: string | null;
+  isCrossScope?: boolean;
 }
 
 export interface TaskStatusExtra {
@@ -153,9 +155,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   turn INTEGER NOT NULL DEFAULT 1,        -- 병렬 실행 웨이브(Turn) 번호
   title TEXT NOT NULL,
   track TEXT NOT NULL DEFAULT 'LIGHT',    -- 'LIGHT' | 'HEAVY'
-  role TEXT NOT NULL DEFAULT 'worker',    -- 10대 역할 중 하나
+  role TEXT NOT NULL DEFAULT 'worker',    -- 'worker' | 'planner' | 'architect' | 'scout' | 'critic'
   category TEXT NOT NULL DEFAULT 'general', -- 'visual-ui' | 'design' | 'research' | 'writing' | 'general'
-  difficulty TEXT NOT NULL DEFAULT 'medium',-- 'trivial' | 'low' | 'medium' | 'high' | 'critical'
+  difficulty TEXT NOT NULL DEFAULT 'medium',-- 'low' | 'medium' | 'high'
   status TEXT NOT NULL DEFAULT 'pending', -- 'pending'|'running'|'verifying'|'done'|'escalated'|'failed'|'merge_conflict'
   attempts INTEGER NOT NULL DEFAULT 0,    -- 검증 실패 횟수 (최대 maxAttemptsPerTask = 3)
   assigned_harness TEXT,                  -- 라우터가 배정한 하네스 ID
@@ -170,6 +172,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   sub_session_id TEXT,                    -- 'sub-<turn>-<taskId>-<role>-<harness>'
   commit_sha TEXT,                        -- 완료 후 생성된 체크포인트/병합 커밋 SHA
   duration_ms INTEGER,
+  is_cross_scope INTEGER NOT NULL DEFAULT 0, -- Cross-Scope 자동 생성 태스크 여부 (0 | 1)
   PRIMARY KEY (session_id, task_id),
   FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
@@ -187,7 +190,7 @@ CREATE TABLE IF NOT EXISTS debates (
 );
 `;
 
-const TASK_COLUMNS = `task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, assigned_harness, assigned_model, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, done_claim_json, worktree_path, sub_session_id, commit_sha, duration_ms`;
+const TASK_COLUMNS = `task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, assigned_harness, assigned_model, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, done_claim_json, worktree_path, sub_session_id, commit_sha, duration_ms, is_cross_scope`;
 
 // ============================================================================
 // SqliteDriver
@@ -212,6 +215,14 @@ export class SqliteDriver {
         .all() as Array<{ name?: string }>;
       if (!cols.some((c) => c.name === "memo")) {
         this.db.exec("ALTER TABLE sessions ADD COLUMN memo TEXT DEFAULT ''");
+      }
+      const taskCols = this.db
+        .prepare("PRAGMA table_info(tasks)")
+        .all() as Array<{ name?: string }>;
+      if (!taskCols.some((c) => c.name === "is_cross_scope")) {
+        this.db.exec(
+          "ALTER TABLE tasks ADD COLUMN is_cross_scope INTEGER NOT NULL DEFAULT 0"
+        );
       }
     } catch {
       // Ignore migration check error if table already matches
@@ -402,8 +413,8 @@ export class SqliteDriver {
   upsertTasks(sessionId: string, tasks: TaskInput[]): void {
     this.withImmediateTx(() => {
       const stmt = this.db.prepare(
-        `INSERT INTO tasks (task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?)
+        `INSERT INTO tasks (task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, is_cross_scope)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id, task_id) DO UPDATE SET
            turn = excluded.turn,
            title = excluded.title,
@@ -415,7 +426,8 @@ export class SqliteDriver {
            target_files_json = excluded.target_files_json,
            context_hint = excluded.context_hint,
            acceptance = excluded.acceptance,
-           verify_cmd = excluded.verify_cmd`
+           verify_cmd = excluded.verify_cmd,
+           is_cross_scope = MAX(tasks.is_cross_scope, excluded.is_cross_scope)`
       );
       for (const t of tasks) {
         stmt.run(
@@ -431,7 +443,8 @@ export class SqliteDriver {
           JSON.stringify(t.targetFiles ?? []),
           t.contextHint ?? null,
           t.acceptance ?? null,
-          t.verifyCmd ?? null
+          t.verifyCmd ?? null,
+          t.isCrossScope ? 1 : 0
         );
       }
     });

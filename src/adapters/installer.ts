@@ -373,9 +373,9 @@ export function generateAllAgentsMarkdown(
   routingConfig?: RoutingConfig | null,
   harnessId?: HarnessId
 ): string {
-  let md = `# ASD Multi-Agent Roster (v2.2.0)
+  let md = `# ASD Multi-Agent Roster (v${ASD_VERSION})
 
-This document defines the 10 standard specialist agent roles in ASD v2.2 and the delegation rules for \`LIGHT\` vs \`HEAVY\` execution modes.
+This document defines the 10 standard specialist agent roles in ASD v${ASD_VERSION} and the delegation rules for \`LIGHT\` vs \`HEAVY\` execution modes.
 
 ## Execution Mode & Subagent Delegation Rules
 
