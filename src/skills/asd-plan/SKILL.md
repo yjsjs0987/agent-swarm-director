@@ -1,11 +1,11 @@
 ---
 name: asd-plan
-description: Plan-only workflow for ASD v2.3. Explores codebase, clarifies ambiguities, and generates .asd/PLAN.md with live progress board across 5 harnesses.
+description: Plan-only workflow for ASD v2.3.1. Explores codebase, clarifies ambiguities, and generates .asd/PLAN.md with live progress board across 5 harnesses.
 ---
 
-# ASD v2.3 — Plan Workflow (`/asd-plan`)
+# ASD v2.3.1 — Plan Workflow (`/asd-plan`)
 
-You are the **Planner** in ASD v2.3. Explore the codebase, resolve ambiguities, and produce a verified `.asd/PLAN.md` without modifying implementation files, concluding with a mode recommendation (`LIGHT` vs `HEAVY`) and user confirmation prompt.
+You are the **Planner** in ASD v2.3.1. Explore the codebase, resolve ambiguities, and produce a verified `.asd/PLAN.md` without modifying implementation files, concluding with a mode recommendation (`LIGHT` vs `HEAVY`) and user confirmation prompt.
 
 ## 1. Mode Classification Criteria (`LIGHT` vs `HEAVY`)
 

@@ -216,7 +216,8 @@ export function getSkillTemplate(skillName: string): string {
   const skillsDir = path.join(getAsdRoot(), "src", "skills", canonicalName, "SKILL.md");
   try {
     if (fs.existsSync(skillsDir)) {
-      const content = fs.readFileSync(skillsDir, "utf8");
+      const rawContent = fs.readFileSync(skillsDir, "utf8");
+      const content = rawContent.replace(/\bASD v\d+\.\d+(?:\.\d+)?\b/g, `ASD v${ASD_VERSION}`);
       if (skillName === "asd-handoff") {
         return content.replace(/^name:\s*handoff$/m, "name: asd-handoff");
       }
@@ -418,6 +419,7 @@ function bootstrapGlobalPresets(homeDir: string): { routingPath: string; mcpPath
   const mcpPath = path.join(asdHome, "mcp.jsonc");
 
   const asdRoot = getAsdRoot();
+  syncRepoVersionStrings(asdRoot);
   const presetRouting = path.join(asdRoot, "presets", "default-routing.jsonc");
   const presetMcp = path.join(asdRoot, "presets", "default-mcp.jsonc");
 
@@ -825,11 +827,61 @@ function removeCliPathShims(homeDir: string, removedFiles: string[]): void {
 // Core Synchronizer: Strictly Global-Only
 // ============================================================================
 
+export function syncRepoVersionStrings(asdRoot = getAsdRoot()): void {
+  const relFiles = [
+    "README.md",
+    "README_ko.md",
+    "PROJECT_STATUS.md",
+    "ISSUES.md",
+    "ASD_UI_SPEC.md",
+    "package.json",
+    "presets/default-mcp.jsonc",
+    "presets/default-routing.jsonc",
+    "src/skills/asd/SKILL.md",
+    "src/skills/asd-plan/SKILL.md",
+    "src/skills/asd-run/SKILL.md",
+    "src/skills/asd-debate/SKILL.md",
+    "src/skills/asd-debug/SKILL.md",
+    "src/skills/asd-handoff/SKILL.md",
+    "src/skills/handoff/SKILL.md",
+  ];
+
+  for (const rel of relFiles) {
+    const filePath = path.join(asdRoot, rel);
+    if (!fs.existsSync(filePath)) continue;
+    try {
+      const orig = fs.readFileSync(filePath, "utf8");
+      let updated = orig;
+      if (rel === "package.json") {
+        updated = updated.replace(
+          /("description":\s*"[^"]*?\bASD v)\d+\.\d+(?:\.\d+)?/g,
+          `$1${ASD_VERSION}`
+        );
+      } else if (rel.endsWith(".jsonc")) {
+        updated = updated
+          .replace(/\bASD v\d+\.\d+(?:\.\d+)?\b/g, `ASD v${ASD_VERSION}`)
+          .replace(/("_asdVersion":\s*")[^"]*(")/g, `$1${ASD_VERSION}$2`);
+      } else {
+        updated = updated
+          .replace(/\bASD v\d+\.\d+(?:\.\d+)?\b/g, `ASD v${ASD_VERSION}`)
+          .replace(/(> \*\*버전\*\*: `)[^`]+(`)/g, `$1${ASD_VERSION}$2`)
+          .replace(/(\(v)\d+\.\d+\.\d+(\))/g, `$1${ASD_VERSION}$2`);
+      }
+      if (updated !== orig) {
+        fs.writeFileSync(filePath, updated, "utf8");
+      }
+    } catch {
+      // Ignore write errors on read-only environments
+    }
+  }
+}
+
 export async function syncHarnessConfigs(
   options?: SyncHarnessOptions
 ): Promise<SyncHarnessConfigsResult> {
   const homeDir = resolveHome(options?.homeDir);
   const asdRoot = getAsdRoot();
+  syncRepoVersionStrings(asdRoot);
   const asdCliPath = options?.asdCliPath || path.join(asdRoot, "src", "cli", "index.ts");
 
   // 1. Bootstrap presets, load catalog & native capabilities, and compute config hash

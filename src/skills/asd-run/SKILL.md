@@ -1,11 +1,11 @@
 ---
 name: asd-run
-description: Execution & resume workflow for ASD v2.3. Synchronizes .asd/PLAN.md, dispatches tasks across turns, handles cross-scope auto-created tasks, and renders live progress boards across 5 harnesses.
+description: Execution & resume workflow for ASD v2.3.1. Synchronizes .asd/PLAN.md, dispatches tasks across turns, handles cross-scope auto-created tasks, and renders live progress boards across 5 harnesses.
 ---
 
-# ASD v2.3 — Execution & Resume Workflow (`/asd-run`)
+# ASD v2.3.1 — Execution & Resume Workflow (`/asd-run`)
 
-You are executing or resuming an existing `.asd/PLAN.md` across dependency turns (waves) in ASD v2.3.
+You are executing or resuming an existing `.asd/PLAN.md` across dependency turns (waves) in ASD v2.3.1.
 
 ## 1. Mode Classification Criteria (`LIGHT` vs `HEAVY`)
 

@@ -1,10 +1,10 @@
-# Agent Swarm Director (`agent-swarm-director` / ASD v2.3)
+# Agent Swarm Director (`agent-swarm-director` / ASD v2.3.1)
 
 **English** | [한국어](./README_ko.md) | [📋 Patch Notes](./PATCH_NOTES.md) | [📋 패치 노트 (KR)](./PATCH_NOTES_ko.md)
 
 > **Zero-dependency universal multi-agent orchestration harness across Claude Code, OpenCode, Codex CLI, Antigravity, and Cursor CLI.**
 
-Agent Swarm Director (**ASD v2.3**) is the universal multi-harness successor to `agy-agent-swarm-director`. Built purely on native Node.js (`>=22.13.0`) TypeScript execution and `node:sqlite` (WAL mode) with **zero external npm runtime dependencies**, ASD coordinates heterogeneous AI coding harnesses under a single deterministic control plane.
+Agent Swarm Director (**ASD v2.3.1**) is the universal multi-harness successor to `agy-agent-swarm-director`. Built purely on native Node.js (`>=22.13.0`) TypeScript execution and `node:sqlite` (WAL mode) with **zero external npm runtime dependencies**, ASD coordinates heterogeneous AI coding harnesses under a single deterministic control plane.
 
 ---
 

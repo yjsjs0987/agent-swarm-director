@@ -1,9 +1,9 @@
 ---
 name: asd-debug
-description: Systematic hypothesis-driven debugging workflow for ASD v2.3. Reproduce first, diagnose, fix, and verify.
+description: Systematic hypothesis-driven debugging workflow for ASD v2.3.1. Reproduce first, diagnose, fix, and verify.
 ---
 
-# ASD v2.3 — Hypothesis-Driven Debugging Workflow (`/asd-debug`)
+# ASD v2.3.1 — Hypothesis-Driven Debugging Workflow (`/asd-debug`)
 
 You are running a rigorous, evidence-backed debugging loop to resolve a failure or quarantined task.
 

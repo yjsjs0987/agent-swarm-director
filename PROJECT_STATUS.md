@@ -1,14 +1,14 @@
-# Agent Swarm Director (ASD v2.2) — 프로젝트 상태 및 아키텍처 상세 보고서
+# Agent Swarm Director (ASD v2.3.1) — 프로젝트 상태 및 아키텍처 상세 보고서
 
 > **작성 기준일**: 2026-10-27
-> **버전**: `2.2.0` (`agent-swarm-director`)
+> **버전**: `2.3.1` (`agent-swarm-director`)
 > **대상 하네스**: Claude Code (`@cc`), OpenCode (`@oc`), Codex CLI (`@cx`), Antigravity (`@ag`)
 
 ---
 
 ## 1. 프로젝트 개요 및 핵심 철학
 
-**Agent Swarm Director (ASD v2.2)**는 서로 다른 4개의 AI 코딩 하네스(**Claude Code**, **OpenCode**, **Codex CLI**, **Antigravity**)를 단일 결정론적 컨트롤 플레인으로 통합 제어하는 **외부 의존성 0개(Zero-Dependency)** 멀티 에이전트 오케스트레이션 하네스입니다.
+**Agent Swarm Director (ASD v2.3.1)**는 서로 다른 4개의 AI 코딩 하네스(**Claude Code**, **OpenCode**, **Codex CLI**, **Antigravity**)를 단일 결정론적 컨트롤 플레인으로 통합 제어하는 **외부 의존성 0개(Zero-Dependency)** 멀티 에이전트 오케스트레이션 하네스입니다.
 
 ### 3대 아키텍처 불변성 (Core Invariants)
 1. **Zero External Runtime Dependencies (`dependencies: {}`)**:
@@ -72,7 +72,7 @@ asd-multiagent/
 
 ## 3. 2-Path 상태 저장소 및 `.asd/sessions` 기록 조건
 
-ASD v2.2는 프로젝트 폴더 오염을 막고 멀티 프로세스 동시성을 보장하기 위해 **글로벌 상태 디렉토리(`~/.asd`)**와 **프로젝트 로컬 뷰 디렉토리(`<project>/.asd`)**로 역할을 분리합니다.
+ASD v2.3.1는 프로젝트 폴더 오염을 막고 멀티 프로세스 동시성을 보장하기 위해 **글로벌 상태 디렉토리(`~/.asd`)**와 **프로젝트 로컬 뷰 디렉토리(`<project>/.asd`)**로 역할을 분리합니다.
 
 ### 3.1 글로벌 상태 디렉토리 (`~/.asd`)
 - `~/.asd/state/<projectHash>/core.db`: SQLite WAL 모드 단일 진실 공급원(SSOT). `sessions`, `tasks`, `debates` 3개 테이블로 구성됩니다.

@@ -1,9 +1,9 @@
 ---
 name: asd-debate
-description: Cross-harness adversarial debate workflow for ASD v2.3. Conducts multi-model blind debate and synthesizes binding consensus across 5 harnesses.
+description: Cross-harness adversarial debate workflow for ASD v2.3.1. Conducts multi-model blind debate and synthesizes binding consensus across 5 harnesses.
 ---
 
-# ASD v2.3 — Adversarial Debate Workflow (`/asd-debate`)
+# ASD v2.3.1 — Adversarial Debate Workflow (`/asd-debate`)
 
 You are the **Debate Broker** coordinating a hostile design review before committing to a major architectural or implementation decision.
 
