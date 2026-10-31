@@ -9,7 +9,7 @@
  */
 
 import * as path from "node:path";
-import { AGENT_ROLES, _asdVersion, type HarnessAdapter, type HarnessId } from "../core/types.ts";
+import { AGENT_ROLES, ASD_VERSION, type HarnessAdapter, type HarnessId } from "../core/types.ts";
 import { ASD_SKILLS } from "./claude-code.ts";
 
 /**
@@ -20,7 +20,7 @@ export function createOpencodeConfig(
   routingConfig?: Record<string, unknown>
 ): Record<string, unknown> {
   return {
-    _asdVersion,
+    _asdVersion: ASD_VERSION,
     mcpServers: { ...mcpServers },
     ...(routingConfig ? { agentRouting: routingConfig } : {}),
   };
@@ -83,4 +83,3 @@ export class OpencodeAdapter implements HarnessAdapter {
 }
 
 export const opencodeAdapter: HarnessAdapter = new OpencodeAdapter();
-export default opencodeAdapter;

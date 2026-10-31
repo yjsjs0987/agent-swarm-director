@@ -25,7 +25,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { parseJsonc } from "../core/jsonc.ts";
+import { parseJsonc, removeTomlFence, upsertTomlFence } from "../core/jsonc.ts";
 import { evaluatePreToolUse } from "../core/policy.ts";
 import { resolveBinaryOnPath } from "../core/router.ts";
 import {
@@ -51,8 +51,6 @@ import {
 import {
   CodexAdapter,
   codexAdapter,
-  mergeCodexConfigToml,
-  removeCodexConfigToml,
 } from "./codex.ts";
 import {
   CursorAdapter,
@@ -1019,13 +1017,13 @@ export async function syncHarnessConfigs(
             existingToml = "";
           }
         }
-        const unmanagedToml = removeCodexConfigToml(existingToml);
+        const unmanagedToml = removeTomlFence(existingToml);
         const managedTomlBlock = buildCodexManagedTomlBlock({
           unmanagedToml,
           catalog: catalogMcpServers,
           nativeCapabilities: nativeCaps,
         });
-        const mergedToml = mergeCodexConfigToml(existingToml, managedTomlBlock, ASD_VERSION);
+        const mergedToml = upsertTomlFence(existingToml, managedTomlBlock, ASD_VERSION);
         safeWriteText(configTomlPath, mergedToml);
         written.push(configTomlPath);
 
@@ -1446,7 +1444,7 @@ export async function uninstallHarnessConfigs(
   if (fs.existsSync(configToml)) {
     try {
       const raw = fs.readFileSync(configToml, "utf8");
-      const cleaned = removeCodexConfigToml(raw);
+      const cleaned = removeTomlFence(raw);
       removeBackupFile(configToml);
       if (cleaned.trim() === "") {
         removeFile(configToml, "codex");

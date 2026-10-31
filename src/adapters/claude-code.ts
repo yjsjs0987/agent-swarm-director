@@ -21,8 +21,6 @@ export const ASD_SKILLS = [
   "handoff",
 ] as const;
 
-export type AsdSkill = (typeof ASD_SKILLS)[number];
-
 export interface ClaudeHookCommand {
   type: "command";
   command: string;
@@ -184,4 +182,3 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
 }
 
 export const claudeCodeAdapter: HarnessAdapter = new ClaudeCodeAdapter();
-export default claudeCodeAdapter;

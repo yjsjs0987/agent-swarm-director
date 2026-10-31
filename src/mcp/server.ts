@@ -51,8 +51,8 @@ import {
   escalateTaskRoute,
   isFallbackTriggerOutput,
   normalizeAntigravityModel,
-  resolveFallback,
   resolveRoute,
+  runWithFallbacks,
   type ResolvedRoute,
 } from "../core/router.ts";
 import {
@@ -1089,15 +1089,8 @@ export class AsdMcpServer {
         }
 
         const subSessionId = `sub-${t.turn}-${t.task_id}-${t.role}-${route.harness}`;
-        this.db.updateTaskStatus(sessionId, t.task_id, "running", { subSessionId });
 
         const prompt = buildPromptForTask(t, upCtx.upstreamDecisions, upCtx.upstreamFiles);
-        const cmdInfo = buildDefaultHarnessCommand(
-          route.harness,
-          prompt,
-          route.model,
-          route.thinkingEffort ?? t.thinking_effort
-        );
 
         let allowedFiles: string[] = [];
         try {
@@ -1106,28 +1099,7 @@ export class AsdMcpServer {
           allowedFiles = [];
         }
 
-        let spawnResult = await spawnSubagent({
-          projectRoot: this.projectRoot,
-          cwd: wtInfo ? wtInfo.wtPath : this.projectRoot,
-          worktreePath: wtInfo ? wtInfo.wtPath : null,
-          homeDir: this.homeDir,
-          mainSessionId: sessionId,
-          subSessionId,
-          role: t.role as AgentRole,
-          harness: route.harness,
-          model: route.model,
-          taskId: t.task_id,
-          prompt,
-          allowedFiles,
-          command: cmdInfo.command,
-          args: cmdInfo.args,
-          commandRunner: this.commandRunner,
-          timeoutMs: DEFAULT_DISPATCH_TIMEOUT_MS,
-          idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
-          signal,
-        });
-
-        let activeRoute: ResolvedRoute = route;
+        const workDir = wtInfo ? wtInfo.wtPath : this.projectRoot;
         const readSpawnOutput = (metaPath: string): string => {
           try {
             const logFile = path.join(path.dirname(metaPath), "output.log");
@@ -1141,84 +1113,57 @@ export class AsdMcpServer {
           if (res.exitCode !== 0 || res.timedOut) return true;
           const out = readSpawnOutput(res.metaPath);
           if (!isFallbackTriggerOutput(out)) return false;
-          const workDir = wtInfo ? wtInfo.wtPath : this.projectRoot;
           return getChangedFiles(workDir).length === 0;
         };
 
-        // Step through configured fallbacks (same harness different model, or cross-harness)
-        // when CLI exits non-zero, times out, or reports quota/rate-limit/network failure.
-        let fbIndex = 0;
-        while (needsFallbackRetry(spawnResult)) {
-          const nextFb = resolveFallback(activeRoute, routingCfg, runtimeCaps);
-          if (!nextFb) break;
-          fbIndex++;
-          activeRoute = nextFb;
-          const fbSubSessionId = `sub-${t.turn}-${t.task_id}-${t.role}-${activeRoute.harness}-fb${fbIndex}`;
-          this.db.updateTaskStatus(sessionId, t.task_id, "running", {
-            assignedHarness: activeRoute.harness,
-            assignedModel: activeRoute.model,
-            subSessionId: fbSubSessionId,
-          });
-          const fbCmdInfo = buildDefaultHarnessCommand(
-            activeRoute.harness,
-            prompt,
-            activeRoute.model,
-            activeRoute.thinkingEffort ?? t.thinking_effort
-          );
-          const fbResult = await spawnSubagent({
-            projectRoot: this.projectRoot,
-            cwd: wtInfo ? wtInfo.wtPath : this.projectRoot,
-            worktreePath: wtInfo ? wtInfo.wtPath : null,
-            homeDir: this.homeDir,
-            mainSessionId: sessionId,
-            subSessionId: fbSubSessionId,
-            role: t.role as AgentRole,
-            harness: activeRoute.harness,
-            model: activeRoute.model,
-            taskId: t.task_id,
-            prompt,
-            allowedFiles,
-            command: fbCmdInfo.command,
-            args: fbCmdInfo.args,
-            commandRunner: this.commandRunner,
-            timeoutMs: DEFAULT_DISPATCH_TIMEOUT_MS,
-            idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
-            signal,
-          });
-          spawnResult = fbResult;
-        }
-
-        if (needsFallbackRetry(spawnResult) && activeRoute.model && !this.commandRunner) {
-          const defaultCmdInfo = buildDefaultHarnessCommand(
-            activeRoute.harness,
-            prompt,
-            "",
-            t.thinking_effort
-          );
-          const retryResult = await spawnSubagent({
-            projectRoot: this.projectRoot,
-            cwd: wtInfo ? wtInfo.wtPath : this.projectRoot,
-            worktreePath: wtInfo ? wtInfo.wtPath : null,
-            homeDir: this.homeDir,
-            mainSessionId: sessionId,
-            subSessionId: `${subSessionId}-default`,
-            role: t.role as AgentRole,
-            harness: activeRoute.harness,
-            model: "default",
-            taskId: t.task_id,
-            prompt,
-            allowedFiles,
-            command: defaultCmdInfo.command,
-            args: defaultCmdInfo.args,
-            commandRunner: this.commandRunner,
-            timeoutMs: DEFAULT_DISPATCH_TIMEOUT_MS,
-            idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
-            signal,
-          });
-          if (retryResult.exitCode === 0) {
-            spawnResult = retryResult;
-          }
-        }
+        const run = await runWithFallbacks({
+          initialRoute: route,
+          routingConfig: routingCfg,
+          runtimeCapabilities: runtimeCaps,
+          baseSubSessionId: subSessionId,
+          allowDefaultModelRetry: !this.commandRunner,
+          shouldRetry: needsFallbackRetry,
+          attempt: (r, sid) => {
+            this.db.updateTaskStatus(sessionId, t.task_id, "running", {
+              assignedHarness: r.harness,
+              assignedModel: r.model,
+              subSessionId: sid,
+            });
+            const cmdInfo = buildDefaultHarnessCommand(
+              r.harness,
+              prompt,
+              r.model,
+              r.thinkingEffort ?? t.thinking_effort
+            );
+            return spawnSubagent({
+              projectRoot: this.projectRoot,
+              cwd: workDir,
+              worktreePath: wtInfo ? wtInfo.wtPath : null,
+              homeDir: this.homeDir,
+              mainSessionId: sessionId,
+              subSessionId: sid,
+              role: t.role as AgentRole,
+              harness: r.harness,
+              model: r.model,
+              taskId: t.task_id,
+              prompt,
+              allowedFiles,
+              command: cmdInfo.command,
+              args: cmdInfo.args,
+              commandRunner: this.commandRunner,
+              timeoutMs: DEFAULT_DISPATCH_TIMEOUT_MS,
+              idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
+              signal,
+            });
+          },
+        });
+        const spawnResult = run.result;
+        const activeRoute: ResolvedRoute = {
+          ...route,
+          harness: run.harness,
+          model: run.model,
+          modelFamily: run.modelFamily,
+        };
 
         // Verification
         let verifyResult: { verified: boolean; commitSha?: string; error?: string; status?: TaskStatus; changedFiles?: string[] };

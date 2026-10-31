@@ -37,8 +37,8 @@ import {
 } from "../core/db.ts";
 import {
   buildDefaultHarnessCommand,
-  deduplicateStrings,
   parseReviewerOpening,
+  synthesizeInsightVerdict,
 } from "../core/debate.ts";
 import { atomicWriteFileSync } from "../core/render.ts";
 import {
@@ -567,38 +567,7 @@ function tryRefreshDebateVerdictFromLog(
       openings.push(newOpening);
     }
 
-    const verdicts = openings.map((o) => String(o.verdict ?? "APPROVE"));
-    const finalVerdict = verdicts.includes("REJECT")
-      ? "REJECT"
-      : verdicts.includes("MINOR_AMEND")
-        ? "MINOR_AMEND"
-        : "APPROVE";
-
-    const hardConstraints = deduplicateStrings(
-      openings.flatMap((o) =>
-        Array.isArray(o.hard_constraints) ? (o.hard_constraints as string[]) : []
-      )
-    );
-    const decisions = deduplicateStrings(
-      openings.flatMap((o) =>
-        Array.isArray(o.decisions) ? (o.decisions as string[]) : []
-      )
-    );
-    const risks = deduplicateStrings(
-      openings.flatMap((o) =>
-        Array.isArray(o.risks) ? (o.risks as string[]) : []
-      )
-    );
-
-    const insightVerdict = {
-      verdict: finalVerdict,
-      hard_constraints: hardConstraints,
-      decisions,
-      risks,
-      reasoning: openings
-        .map((o) => `${o.role} (@${o.harness}/${o.model}): ${o.reasoning || o.verdict}`)
-        .join("; "),
-    };
+    const insightVerdict = synthesizeInsightVerdict(openings);
 
     db.updateDebateVerdict(debateRow.debate_id, "done", {
       round1BundleJson: JSON.stringify({

@@ -105,4 +105,3 @@ export class AntigravityAdapter implements HarnessAdapter {
 }
 
 export const antigravityAdapter: HarnessAdapter = new AntigravityAdapter();
-export default antigravityAdapter;

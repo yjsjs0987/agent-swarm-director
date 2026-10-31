@@ -9,7 +9,6 @@
 // Version Constants
 // ============================================================================
 
-export const _asdVersion = "2.3.0" as const;
 export const ASD_VERSION = "2.3.0" as const;
 
 // ============================================================================
@@ -148,23 +147,6 @@ export interface RoutingConfig {
   _asdVersion: string;
   agents: Record<AgentRole, RouteEntry>;
   categories: Record<string, RouteEntry>;
-}
-
-// ============================================================================
-// MCP Catalog Configuration
-// ============================================================================
-
-export interface McpCatalogConfig {
-  _asdVersion: string;
-  mcpServers: Record<
-    string,
-    {
-      command?: string;
-      args?: string[];
-      url?: string;
-      [k: string]: unknown;
-    }
-  >;
 }
 
 // ============================================================================

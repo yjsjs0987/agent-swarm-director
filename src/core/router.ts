@@ -622,6 +622,73 @@ export function resolveFallback(
 }
 
 /**
+ * Shared spawn-with-fallback-chain loop used by debate Round 1, the Round 2
+ * arbiter, and task dispatch. Runs one attempt, then steps through the
+ * route's configured fallback chain (via resolveFallback) while the caller's
+ * `shouldRetry` predicate holds. Optionally finishes with a same-harness
+ * "default" (no-model) retry when the model is not an explicit pin.
+ */
+export interface RunWithFallbacksOptions<T> {
+  initialRoute: ResolvedRoute;
+  routingConfig?: RoutingConfig;
+  runtimeCapabilities?: RuntimeCapabilities;
+  baseSubSessionId: string;
+  attempt: (route: ResolvedRoute, subSessionId: string) => Promise<T>;
+  shouldRetry: (result: T) => boolean;
+  allowDefaultModelRetry: boolean;
+}
+
+export interface RunWithFallbacksResult<T> {
+  result: T;
+  harness: HarnessId;
+  model: string;
+  modelFamily: string;
+  fallbackCount: number;
+}
+
+export async function runWithFallbacks<
+  T extends { exitCode: number | null; timedOut?: boolean; metaPath: string },
+>(options: RunWithFallbacksOptions<T>): Promise<RunWithFallbacksResult<T>> {
+  let route = options.initialRoute;
+  let result = await options.attempt(route, options.baseSubSessionId);
+  let fallbackCount = 0;
+
+  while (options.shouldRetry(result)) {
+    const next = resolveFallback(
+      route,
+      options.routingConfig,
+      options.runtimeCapabilities
+    );
+    if (!next) break;
+    fallbackCount++;
+    route = next;
+    result = await options.attempt(
+      route,
+      `${options.baseSubSessionId}-fb${fallbackCount}`
+    );
+  }
+
+  if (options.shouldRetry(result) && route.model && options.allowDefaultModelRetry) {
+    const retry = await options.attempt(
+      { ...route, model: "default" },
+      `${options.baseSubSessionId}-default`
+    );
+    if (retry.exitCode === 0) {
+      result = retry;
+      route = { ...route, model: "default" };
+    }
+  }
+
+  return {
+    result,
+    harness: route.harness,
+    model: route.model,
+    modelFamily: route.modelFamily,
+    fallbackCount,
+  };
+}
+
+/**
  * 3-attempt task escalation engine:
  * - Attempt 1 (attempts === 0): initial route (status: 'pending' or current status).
  * - Attempt 2 (attempts === 1): same model after rollback (status unchanged).

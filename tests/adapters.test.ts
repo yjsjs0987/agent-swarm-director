@@ -30,9 +30,8 @@ import {
 import {
   CodexAdapter,
   codexAdapter,
-  mergeCodexConfigToml,
-  removeCodexConfigToml,
 } from "../src/adapters/codex.ts";
+import { removeTomlFence, upsertTomlFence } from "../src/core/jsonc.ts";
 import {
   OpencodeAdapter,
   opencodeAdapter,
@@ -471,17 +470,17 @@ describe("Harness Adapters", () => {
       assert.ok(cfg.agentRouting);
     });
 
-    test("codex: mergeCodexConfigToml and removeCodexConfigToml manage fence blocks", () => {
+    test("codex: upsertTomlFence and removeTomlFence manage fence blocks", () => {
       const original = 'model = "gpt-5"\ntemperature = 0.2';
       const managed = '[mcp_servers.asd-core]\ncommand = "node"';
 
-      const merged = mergeCodexConfigToml(original, managed, "2.2.0");
+      const merged = upsertTomlFence(original, managed, "2.2.0");
       assert.ok(merged.includes("# >>> BEGIN MANAGED BY ASD-V2 (v2.2.0) >>>"));
       assert.ok(merged.includes('[mcp_servers.asd-core]'));
       assert.ok(merged.includes("# <<< END MANAGED BY ASD-V2 <<<"));
       assert.ok(merged.includes('model = "gpt-5"'));
 
-      const cleaned = removeCodexConfigToml(merged);
+      const cleaned = removeTomlFence(merged);
       assert.equal(cleaned, original);
     });
   });

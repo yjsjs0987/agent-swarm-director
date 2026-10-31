@@ -10,27 +10,8 @@
  */
 
 import * as path from "node:path";
-import { upsertTomlFence, removeTomlFence } from "../core/jsonc.ts";
 import { type HarnessAdapter, type HarnessId } from "../core/types.ts";
 import { ASD_SKILLS } from "./claude-code.ts";
-
-/**
- * Merges ASD managed configuration into Codex config.toml using managed fence blocks.
- */
-export function mergeCodexConfigToml(
-  existingToml: string,
-  managedBlock: string,
-  version?: string
-): string {
-  return upsertTomlFence(existingToml, managedBlock, version);
-}
-
-/**
- * Removes ASD managed fence block from Codex config.toml.
- */
-export function removeCodexConfigToml(existingToml: string): string {
-  return removeTomlFence(existingToml);
-}
 
 export class CodexAdapter implements HarnessAdapter {
   readonly harnessId: HarnessId = "codex";
@@ -89,4 +70,3 @@ export class CodexAdapter implements HarnessAdapter {
 }
 
 export const codexAdapter: HarnessAdapter = new CodexAdapter();
-export default codexAdapter;

@@ -32,13 +32,12 @@ import {
   detectAvailableCliHarnesses,
   inferModelFamily,
   isFallbackTriggerOutput,
-  resolveFallback,
+  runWithFallbacks,
   selectDiverseReviewer,
 } from "./router.ts";
 import type {
   DiverseReviewerSelection,
   ProposalRouteInput,
-  ResolvedRoute,
   RuntimeCapabilities,
 } from "./router.ts";
 import {
@@ -231,6 +230,52 @@ export function buildDefaultHarnessCommand(
 
 export function deduplicateStrings(items: string[]): string[] {
   return [...new Set(items.map((s) => s.trim()).filter(Boolean))];
+}
+
+/**
+ * Folds reviewer openings into a single InsightVerdict:
+ * REJECT > MINOR_AMEND > APPROVE, with deduplicated constraint/decision/risk unions.
+ */
+export function synthesizeInsightVerdict(
+  openings: Array<{
+    verdict?: unknown;
+    hard_constraints?: unknown;
+    decisions?: unknown;
+    risks?: unknown;
+    role?: unknown;
+    harness?: unknown;
+    model?: unknown;
+    reasoning?: unknown;
+  }>,
+  diversityDegraded = false
+): InsightVerdict {
+  const toStringArray = (val: unknown): string[] => {
+    if (Array.isArray(val)) return val.map((x) => String(x).trim()).filter(Boolean);
+    if (typeof val === "string" && val.trim().length > 0) return [val.trim()];
+    return [];
+  };
+  const verdicts = openings.map((o) => String(o.verdict ?? "APPROVE"));
+  return {
+    verdict: verdicts.includes("REJECT")
+      ? "REJECT"
+      : verdicts.includes("MINOR_AMEND")
+        ? "MINOR_AMEND"
+        : "APPROVE",
+    hard_constraints: deduplicateStrings(
+      openings.flatMap((o) => toStringArray(o.hard_constraints))
+    ),
+    decisions: deduplicateStrings(openings.flatMap((o) => toStringArray(o.decisions))),
+    risks: deduplicateStrings(openings.flatMap((o) => toStringArray(o.risks))),
+    diversity_degraded: diversityDegraded,
+    reasoning: openings
+      .map(
+        (o) =>
+          `${o.role ?? "reviewer"} (@${o.harness ?? "unknown"}/${o.model ?? "default"}): ${
+            typeof o.reasoning === "string" && o.reasoning ? o.reasoning : o.verdict
+          }`
+      )
+      .join("; "),
+  };
 }
 
 function extractLogErrorSnippet(metaPath: string): string {
@@ -774,133 +819,62 @@ export async function runDebateBroker(
 
     const round1Promises = reviewers.map(async (reviewer, index) => {
       const subSessionId = `${options.sessionId}-deb-${debateId}-r1-${index + 1}`;
-      const cmdInfo = options.commandBuilder
-        ? options.commandBuilder(reviewer.harness, round1Prompt, reviewer.model)
-        : buildDefaultHarnessCommand(
-            reviewer.harness,
-            round1Prompt,
-            reviewer.model
-          );
-
-      let spawnResult = await spawnSubagent({
-        projectRoot: options.projectRoot,
-        homeDir: options.homeDir,
-        mainSessionId: options.sessionId,
-        subSessionId,
-        role: reviewer.role,
-        harness: reviewer.harness,
-        model: reviewer.model,
-        taskId: logTaskId,
-        prompt: round1Prompt,
-        allowedFiles: [],
-        command: cmdInfo.command,
-        args: cmdInfo.args,
-        commandRunner: options.commandRunner,
-        signal: options.signal,
-        timeoutMs: effectiveTimeoutMs,
-        idleTimeoutMs: effectiveIdleTimeoutMs,
-      });
-
-      // Step through configured fallbacks (same harness different model, or cross-harness)
-      // when CLI exits non-zero, times out, or reports quota/rate-limit/network failure.
-      let activeHarness = reviewer.harness;
-      let activeModel = reviewer.model;
-      let activeFamily = reviewer.modelFamily;
-      let activeRouteState: ResolvedRoute = {
-        harness: reviewer.harness,
-        model: reviewer.model,
-        modelFamily: reviewer.modelFamily,
-        fallbacks: reviewer.fallbacks ?? [],
-        tier: 2,
-      };
-
-      const shouldFallback = (res: { exitCode: number | null; timedOut: boolean; metaPath: string }): boolean => {
-        if (res.exitCode !== 0 || res.timedOut) return true;
-        try {
-          const outFile = path.join(path.dirname(res.metaPath), "output.log");
-          if (fs.existsSync(outFile)) {
-            const raw = fs.readFileSync(outFile, "utf8");
-            if (!parseReviewerOpening(raw) && isFallbackTriggerOutput(raw)) {
-              return true;
+      const r1Run = await runWithFallbacks({
+        initialRoute: {
+          harness: reviewer.harness,
+          model: reviewer.model,
+          modelFamily: reviewer.modelFamily,
+          fallbacks: reviewer.fallbacks ?? [],
+          tier: 2,
+        },
+        routingConfig: effectiveRoutingConfig,
+        runtimeCapabilities: effectiveCapabilities,
+        baseSubSessionId: subSessionId,
+        allowDefaultModelRetry: !options.commandBuilder,
+        shouldRetry: (res) => {
+          if (res.exitCode !== 0 || res.timedOut) return true;
+          try {
+            const outFile = path.join(path.dirname(res.metaPath), "output.log");
+            if (fs.existsSync(outFile)) {
+              const raw = fs.readFileSync(outFile, "utf8");
+              if (!parseReviewerOpening(raw) && isFallbackTriggerOutput(raw)) {
+                return true;
+              }
             }
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore
-        }
-        return false;
-      };
-
-      let fbIdx = 0;
-      while (shouldFallback(spawnResult)) {
-        const nextFb = resolveFallback(
-          activeRouteState,
-          effectiveRoutingConfig,
-          effectiveCapabilities
-        );
-        if (!nextFb) break;
-        fbIdx++;
-        activeRouteState = nextFb;
-        activeHarness = nextFb.harness;
-        activeModel = nextFb.model;
-        activeFamily = nextFb.modelFamily;
-        const fbCmdInfo = options.commandBuilder
-          ? options.commandBuilder(activeHarness, round1Prompt, activeModel)
-          : buildDefaultHarnessCommand(activeHarness, round1Prompt, activeModel);
-        const fbResult = await spawnSubagent({
-          projectRoot: options.projectRoot,
-          homeDir: options.homeDir,
-          mainSessionId: options.sessionId,
-          subSessionId: `${subSessionId}-fb${fbIdx}`,
-          role: reviewer.role,
-          harness: activeHarness,
-          model: activeModel,
-          taskId: logTaskId,
-          prompt: round1Prompt,
-          allowedFiles: [],
-          command: fbCmdInfo.command,
-          args: fbCmdInfo.args,
-          commandRunner: options.commandRunner,
-          signal: options.signal,
-          timeoutMs: effectiveTimeoutMs,
-          idleTimeoutMs: effectiveIdleTimeoutMs,
-        });
-        spawnResult = fbResult;
-      }
-
-      // Final fallback retry without --model if all configured fallbacks failed
-      if (
-        shouldFallback(spawnResult) &&
-        activeModel &&
-        !options.commandBuilder
-      ) {
-        const defaultCmdInfo = buildDefaultHarnessCommand(
-          activeHarness,
-          round1Prompt,
-          ""
-        );
-        const retryResult = await spawnSubagent({
-          projectRoot: options.projectRoot,
-          homeDir: options.homeDir,
-          mainSessionId: options.sessionId,
-          subSessionId: `${subSessionId}-default`,
-          role: reviewer.role,
-          harness: activeHarness,
-          model: "default",
-          taskId: logTaskId,
-          prompt: round1Prompt,
-          allowedFiles: [],
-          command: defaultCmdInfo.command,
-          args: defaultCmdInfo.args,
-          commandRunner: options.commandRunner,
-          signal: options.signal,
-          timeoutMs: effectiveTimeoutMs,
-          idleTimeoutMs: effectiveIdleTimeoutMs,
-        });
-        if (retryResult.exitCode === 0) {
-          spawnResult = retryResult;
-          activeModel = "default";
-        }
-      }
+          return false;
+        },
+        attempt: (route, sid) => {
+          const cmdModel = route.model === "default" ? "" : route.model;
+          const cmdInfo = options.commandBuilder
+            ? options.commandBuilder(route.harness, round1Prompt, cmdModel)
+            : buildDefaultHarnessCommand(route.harness, round1Prompt, cmdModel);
+          return spawnSubagent({
+            projectRoot: options.projectRoot,
+            homeDir: options.homeDir,
+            mainSessionId: options.sessionId,
+            subSessionId: sid,
+            role: reviewer.role,
+            harness: route.harness,
+            model: route.model,
+            taskId: logTaskId,
+            prompt: round1Prompt,
+            allowedFiles: [],
+            command: cmdInfo.command,
+            args: cmdInfo.args,
+            commandRunner: options.commandRunner,
+            signal: options.signal,
+            timeoutMs: effectiveTimeoutMs,
+            idleTimeoutMs: effectiveIdleTimeoutMs,
+          });
+        },
+      });
+      const spawnResult = r1Run.result;
+      const activeHarness = r1Run.harness;
+      const activeModel = r1Run.model;
+      const activeFamily = r1Run.modelFamily;
 
       if (spawnResult.exitCode !== 0) {
         const snippet = extractLogErrorSnippet(spawnResult.metaPath);
@@ -995,33 +969,10 @@ export async function runDebateBroker(
 
     if (!hasReject) {
       // 3. Early Exit: All surviving openings are APPROVE or MINOR_AMEND
-      const hasMinorAmend = survivingOpenings.some(
-        (o) => o.verdict === "MINOR_AMEND"
+      insightVerdict = synthesizeInsightVerdict(
+        survivingOpenings,
+        diversityDegraded
       );
-      const earlyVerdict: DebateVerdict = hasMinorAmend
-        ? "MINOR_AMEND"
-        : "APPROVE";
-
-      const hardConstraints = deduplicateStrings(
-        survivingOpenings.flatMap((o) => o.hard_constraints)
-      );
-      const decisions = deduplicateStrings(
-        survivingOpenings.flatMap((o) => o.decisions)
-      );
-      const risks = deduplicateStrings(
-        survivingOpenings.flatMap((o) => o.risks)
-      );
-
-      insightVerdict = {
-        verdict: earlyVerdict,
-        hard_constraints: hardConstraints,
-        decisions,
-        risks,
-        diversity_degraded: diversityDegraded,
-        reasoning: survivingOpenings
-          .map((o) => `${o.role} (@${o.harness}): ${o.reasoning || o.verdict}`)
-          .join("; "),
-      };
 
       db.updateDebateVerdict(debateId, "done", {
         round1BundleJson: JSON.stringify(round1Bundle),
@@ -1030,7 +981,7 @@ export async function runDebateBroker(
       });
 
       options.onProgress?.(
-        `[Debate ${debateId}] Round 1 early exit: unanimous non-rejection (${earlyVerdict})`
+        `[Debate ${debateId}] Round 1 early exit: unanimous non-rejection (${insightVerdict.verdict})`
       );
     } else {
       // 4. Round 2: Conflict Resolution & Arbiter Verdict
@@ -1089,132 +1040,65 @@ export async function runDebateBroker(
         codeContext
       );
       const r2SubSessionId = `${options.sessionId}-deb-${debateId}-r2-arbiter`;
-      const r2CmdInfo = options.commandBuilder
-        ? options.commandBuilder(arbiterSpec.harness, r2Prompt, arbiterSpec.model)
-        : buildDefaultHarnessCommand(
-            arbiterSpec.harness,
-            r2Prompt,
-            arbiterSpec.model
-          );
 
       let arbiterOpening: ReviewerOpening;
       try {
-        let arbResult = await spawnSubagent({
-          projectRoot: options.projectRoot,
-          homeDir: options.homeDir,
-          mainSessionId: options.sessionId,
-          subSessionId: r2SubSessionId,
-          role: arbiterSpec.role,
-          harness: arbiterSpec.harness,
-          model: arbiterSpec.model,
-          taskId: logTaskId,
-          prompt: r2Prompt,
-          allowedFiles: [],
-          command: r2CmdInfo.command,
-          args: r2CmdInfo.args,
-          commandRunner: options.commandRunner,
-          signal: options.signal,
-          timeoutMs: effectiveTimeoutMs,
-          idleTimeoutMs: effectiveIdleTimeoutMs,
-        });
-
-        let activeArbHarness = arbiterSpec.harness;
-        let activeArbModel = arbiterSpec.model;
-        let activeArbFamily = arbiterSpec.modelFamily;
-        let arbRouteState: ResolvedRoute = {
-          harness: arbiterSpec.harness,
-          model: arbiterSpec.model,
-          modelFamily: arbiterSpec.modelFamily,
-          fallbacks: arbiterSpec.fallbacks ?? [],
-          tier: 2,
-        };
-
-        const shouldFallbackArb = (res: { exitCode: number | null; timedOut: boolean; metaPath: string }): boolean => {
-          if (res.exitCode !== 0 || res.timedOut) return true;
-          try {
-            const outFile = path.join(path.dirname(res.metaPath), "output.log");
-            if (fs.existsSync(outFile)) {
-              const raw = fs.readFileSync(outFile, "utf8");
-              if (!parseReviewerOpening(raw) && isFallbackTriggerOutput(raw)) {
-                return true;
+        const arbRun = await runWithFallbacks({
+          initialRoute: {
+            harness: arbiterSpec.harness,
+            model: arbiterSpec.model,
+            modelFamily: arbiterSpec.modelFamily,
+            fallbacks: arbiterSpec.fallbacks ?? [],
+            tier: 2,
+          },
+          routingConfig: effectiveRoutingConfig,
+          runtimeCapabilities: effectiveCapabilities,
+          baseSubSessionId: r2SubSessionId,
+          allowDefaultModelRetry: !options.commandBuilder,
+          shouldRetry: (res) => {
+            if (res.exitCode !== 0 || res.timedOut) return true;
+            try {
+              const outFile = path.join(
+                path.dirname(res.metaPath),
+                "output.log"
+              );
+              if (fs.existsSync(outFile)) {
+                const raw = fs.readFileSync(outFile, "utf8");
+                if (!parseReviewerOpening(raw) && isFallbackTriggerOutput(raw)) {
+                  return true;
+                }
               }
+            } catch {
+              // ignore
             }
-          } catch {
-            // ignore
-          }
-          return false;
-        };
-
-        let arbFbIdx = 0;
-        while (shouldFallbackArb(arbResult)) {
-          const nextFb = resolveFallback(
-            arbRouteState,
-            effectiveRoutingConfig,
-            effectiveCapabilities
-          );
-          if (!nextFb) break;
-          arbFbIdx++;
-          arbRouteState = nextFb;
-          activeArbHarness = nextFb.harness;
-          activeArbModel = nextFb.model;
-          activeArbFamily = nextFb.modelFamily;
-          const fbR2Cmd = options.commandBuilder
-            ? options.commandBuilder(activeArbHarness, r2Prompt, activeArbModel)
-            : buildDefaultHarnessCommand(activeArbHarness, r2Prompt, activeArbModel);
-          const fbArbResult = await spawnSubagent({
-            projectRoot: options.projectRoot,
-            homeDir: options.homeDir,
-            mainSessionId: options.sessionId,
-            subSessionId: `${r2SubSessionId}-fb${arbFbIdx}`,
-            role: arbiterSpec.role,
-            harness: activeArbHarness,
-            model: activeArbModel,
-            taskId: logTaskId,
-            prompt: r2Prompt,
-            allowedFiles: [],
-            command: fbR2Cmd.command,
-            args: fbR2Cmd.args,
-            commandRunner: options.commandRunner,
-            signal: options.signal,
-            timeoutMs: effectiveTimeoutMs,
-            idleTimeoutMs: effectiveIdleTimeoutMs,
-          });
-          arbResult = fbArbResult;
-        }
-
-        if (
-          shouldFallbackArb(arbResult) &&
-          activeArbModel &&
-          !options.commandBuilder
-        ) {
-          const defaultR2Cmd = buildDefaultHarnessCommand(
-            activeArbHarness,
-            r2Prompt,
-            ""
-          );
-          const retryArb = await spawnSubagent({
-            projectRoot: options.projectRoot,
-            homeDir: options.homeDir,
-            mainSessionId: options.sessionId,
-            subSessionId: `${r2SubSessionId}-default`,
-            role: arbiterSpec.role,
-            harness: activeArbHarness,
-            model: "default",
-            taskId: logTaskId,
-            prompt: r2Prompt,
-            allowedFiles: [],
-            command: defaultR2Cmd.command,
-            args: defaultR2Cmd.args,
-            commandRunner: options.commandRunner,
-            signal: options.signal,
-            timeoutMs: effectiveTimeoutMs,
-            idleTimeoutMs: effectiveIdleTimeoutMs,
-          });
-          if (retryArb.exitCode === 0) {
-            arbResult = retryArb;
-            activeArbModel = "default";
-          }
-        }
+            return false;
+          },
+          attempt: (route, sid) => {
+            const cmdModel = route.model === "default" ? "" : route.model;
+            const cmdInfo = options.commandBuilder
+              ? options.commandBuilder(route.harness, r2Prompt, cmdModel)
+              : buildDefaultHarnessCommand(route.harness, r2Prompt, cmdModel);
+            return spawnSubagent({
+              projectRoot: options.projectRoot,
+              homeDir: options.homeDir,
+              mainSessionId: options.sessionId,
+              subSessionId: sid,
+              role: arbiterSpec.role,
+              harness: route.harness,
+              model: route.model,
+              taskId: logTaskId,
+              prompt: r2Prompt,
+              allowedFiles: [],
+              command: cmdInfo.command,
+              args: cmdInfo.args,
+              commandRunner: options.commandRunner,
+              signal: options.signal,
+              timeoutMs: effectiveTimeoutMs,
+              idleTimeoutMs: effectiveIdleTimeoutMs,
+            });
+          },
+        });
+        const arbResult = arbRun.result;
 
         if (arbResult.exitCode !== 0) {
           const snippet = extractLogErrorSnippet(arbResult.metaPath);
@@ -1244,9 +1128,9 @@ export async function runDebateBroker(
         arbiterOpening = {
           reviewerId: "r2-arbiter",
           role: arbiterSpec.role,
-          harness: activeArbHarness,
-          model: activeArbModel,
-          modelFamily: activeArbFamily,
+          harness: arbRun.harness,
+          model: arbRun.model,
+          modelFamily: arbRun.modelFamily,
           verdict: parsedArb.verdict,
           hard_constraints: parsedArb.hard_constraints,
           decisions: parsedArb.decisions,

@@ -10,8 +10,8 @@
  */
 
 import * as child_process from "node:child_process";
-import * as fs from "node:fs";
 import * as path from "node:path";
+import { resolveBinaryOnPath } from "../core/router.ts";
 import { AGENT_ROLES, type HarnessAdapter, type HarnessId } from "../core/types.ts";
 import { ASD_SKILLS } from "./claude-code.ts";
 
@@ -22,25 +22,8 @@ import { ASD_SKILLS } from "./claude-code.ts";
 export function resolveCursorBinaryName(
   env: Record<string, string | undefined> = process.env
 ): string {
-  const pathEnv = env.PATH || env.Path || process.env.PATH || process.env.Path || "";
-  const dirs = pathEnv.split(path.delimiter).filter(Boolean);
-  const extensions =
-    process.platform === "win32" ? [".cmd", ".exe", ".ps1", ".bat", ""] : [""];
-
-  for (const candidate of ["cursor-agent", "agent"]) {
-    for (const dir of dirs) {
-      for (const ext of extensions) {
-        const fullPath = path.join(dir, candidate + ext);
-        try {
-          if (fs.existsSync(fullPath) && fs.statSync(fullPath).isFile()) {
-            return candidate;
-          }
-        } catch {
-          // ignore
-        }
-      }
-    }
-  }
+  if (resolveBinaryOnPath("cursor-agent", env)) return "cursor-agent";
+  if (resolveBinaryOnPath("agent", env)) return "agent";
   return "agent";
 }
 
@@ -134,4 +117,3 @@ export class CursorAdapter implements HarnessAdapter {
 }
 
 export const cursorAdapter: HarnessAdapter = new CursorAdapter();
-export default cursorAdapter;
