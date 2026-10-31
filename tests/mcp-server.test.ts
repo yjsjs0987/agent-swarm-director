@@ -451,6 +451,39 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
       assert.equal(resp.sessionId, "session-tools-call");
       assert.ok(resp.progressBoard.includes("### 📊 ASD TODO 진행 현황"));
     });
+
+    test("implicit 'create' never mutates a completed latest session", async () => {
+      const projectRoot = makeProjectRoot();
+      const server = new AsdMcpServer({ projectRoot, autoSync: false });
+      openServers.push(server);
+
+      await server.handleRequest("asd_plan", {
+        action: "create",
+        sessionId: "sess-guard-done",
+        tasks: [
+          { taskId: "T1.1", turn: 1, title: "Original done work", track: "LIGHT", targetFiles: ["a.ts"] },
+        ],
+      });
+      const db = openProjectDb(projectRoot);
+      db.updateSessionPhase("sess-guard-done", "done");
+      db.close();
+
+      const resp = (await server.handleRequest("asd_plan", {
+        action: "create",
+        tasks: [
+          { taskId: "T1.1", turn: 1, title: "Fresh probe work", track: "HEAVY", targetFiles: ["b.ts"] },
+        ],
+      })) as AsdPlanOutput;
+
+      assert.notEqual(resp.sessionId, "sess-guard-done");
+      const dbAfter = openProjectDb(projectRoot);
+      const oldTask = dbAfter.getTask("sess-guard-done", "T1.1");
+      assert.equal(oldTask?.title, "Original done work");
+      const newSession = dbAfter.getSession(resp.sessionId);
+      assert.ok(newSession);
+      assert.notEqual(newSession.phase, "done");
+      dbAfter.close();
+    });
   });
 
   describe("4. asd_dispatch Tool", () => {

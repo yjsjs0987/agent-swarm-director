@@ -657,9 +657,17 @@ export class AsdMcpServer {
     let sessionId = input.sessionId;
 
     if (!sessionId || sessionId.trim() === "") {
-      // Find latest session or generate a default ID
+      // Implicit session selection: mutating actions must never touch a
+      // completed session — start a fresh one instead (read-only 'get' may
+      // still reuse the latest session for status display).
       const latest = this.db.getLatestSession();
-      sessionId = latest?.session_id || `${Date.now()}-main`;
+      const mutating =
+        action === "create" || action === "update" || action === "sync_from_md";
+      if (latest && mutating && latest.phase === "done") {
+        sessionId = `${Date.now()}-main`;
+      } else {
+        sessionId = latest?.session_id || `${Date.now()}-main`;
+      }
     }
 
     // Ensure session exists
