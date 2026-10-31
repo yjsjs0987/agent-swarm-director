@@ -176,54 +176,10 @@ export function resolveSpawnCommand(
 // Default runner: real child_process.spawn
 // ============================================================================
 
-function ensureClaudeRuntimeEnv(
-  baseEnv: Record<string, string | undefined>
-): Record<string, string | undefined> {
-  const merged: Record<string, string | undefined> = { ...baseEnv };
-  try {
-    const homeDir =
-      baseEnv.HOME || baseEnv.USERPROFILE || process.env.HOME || process.env.USERPROFILE || "";
-    if (!homeDir) return merged;
-    const settingsPath = path.join(homeDir, ".claude", "settings.json");
-    if (fs.existsSync(settingsPath)) {
-      const cfg = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as {
-        env?: Record<string, unknown>;
-      };
-      if (cfg.env && typeof cfg.env === "object") {
-        for (const [k, v] of Object.entries(cfg.env)) {
-          if (v !== undefined && v !== null && !merged[k]) {
-            merged[k] = String(v);
-          }
-        }
-      }
-    }
-    const baseUrl = merged.ANTHROPIC_BASE_URL || "";
-    if (baseUrl.includes("127.0.0.1:4000") || baseUrl.includes("localhost:4000")) {
-      const proxyScript = path.join(homeDir, ".claude", "nim-proxy.mjs");
-      if (fs.existsSync(proxyScript)) {
-        try {
-          const p = child_process.spawn(process.execPath, [proxyScript], {
-            detached: true,
-            stdio: "ignore",
-            windowsHide: true,
-          });
-          p.unref();
-        } catch {
-          // ignore if already running
-        }
-      }
-    }
-  } catch {
-    // ignore settings parse errors
-  }
-  return merged;
-}
-
 const defaultCommandRunner: CommandRunner = {
   run(cmd, args, opts) {
     return new Promise((resolve) => {
-      const effectiveEnv = cmd === "claude" ? ensureClaudeRuntimeEnv(opts.env) : opts.env;
-      const resolved = resolveSpawnCommand(cmd, args, effectiveEnv);
+      const resolved = resolveSpawnCommand(cmd, args, opts.env);
       let finalArgs = resolved.args;
       let stdinPayload: string | undefined;
       if (cmd === "claude") {
@@ -239,7 +195,7 @@ const defaultCommandRunner: CommandRunner = {
       }
       const child = child_process.spawn(resolved.command, finalArgs, {
         cwd: opts.cwd,
-        env: effectiveEnv,
+        env: opts.env,
         stdio: [stdinPayload !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
         windowsHide: true,
         shell: resolved.shell,
