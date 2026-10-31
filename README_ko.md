@@ -130,18 +130,11 @@ node --no-warnings src/cli/index.ts ui
 
 ---
 
-## 내장 코드 인텔리전스 및 Gap-Filling MCP 서버
+## Gap-Filling MCP 서버
 
 시간이 오래 걸리는 오케스트레이션 작업(`plan`, `dispatch`, `verify`, `debate`)은 MCP의 60초 타임아웃(`-32001`)을 원천 배제하기 위해 모두 **`asd` CLI를 통해 직접 실행**됩니다. 단발성 조회용 MCP 서버들은 각 하네스에 내장되어 있지 않은 기능만 골라서 자동 등록됩니다:
 
-### 1. `lsp` (`src/mcp/lsp-server.ts`)
-자체 CLI LSP가 없는 하네스에 자동으로 채워지는 내장 코드 인텔리전스 서버입니다 (자체 LSP가 내장된 OpenCode에서는 자동 생략):
-- `lsp_diagnostics`: 정적 타입 및 문법 오류 진단 (`tsc`, `node --check`, 병합 충돌 마커 감지)
-- `lsp_symbols`: 파일/디렉토리 내 심볼 선언 추출 (`function`, `class`, `interface`, `type`, `variable`, `struct`)
-- `lsp_definition`: 심볼 정의부 위치(`file`, `line`, `column`) 정밀 탐색
-- `lsp_references`: 프로젝트 전체에서 특정 심볼의 참조 위치(`file`, `line`, `column`, `isDefinition`) 탐색
-
-### 2. 지식 검색용 Gap-Filling MCP (`presets/default-mcp.jsonc`)
+### 지식 검색용 Gap-Filling MCP (`presets/default-mcp.jsonc`)
 - `context7` (`https://mcp.context7.com/mcp`): 외부 라이브러리 및 프레임워크의 최신 공식 문서/코드 예제 조회
 - `grep_app` (`https://mcp.grep.app/mcp`): GitHub 공개 오픈소스 저장소 대상 초고속 정규식/코드 검색
 - `websearch` (`https://mcp.exa.ai/mcp`): Exa 기반 실시간 웹 검색 (Claude Code, Codex, Antigravity처럼 자체 웹 검색이 내장된 하네스에서는 중복 등록 생략)

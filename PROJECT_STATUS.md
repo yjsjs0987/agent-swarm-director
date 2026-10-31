@@ -31,10 +31,10 @@ asd-multiagent/
 ├── PROJECT_STATUS.md            # 현재 프로젝트 상태 및 아키텍처 상세 보고서 (본 문서)
 ├── presets/
 │   ├── default-routing.jsonc    # 10대 전문 역할 및 카테고리/난이도별 기본 모델 라우팅 + 다중 폴백 체인
-│   └── default-mcp.jsonc        # Gap-filling MCP 서버 카탈로그 (lsp, context7, grep_app, websearch)
+│   └── default-mcp.jsonc        # Gap-filling MCP 서버 카탈로그 (context7, grep_app, websearch)
 ├── src/
 │   ├── core/                    # 코어 오케스트레이션 엔진 (어댑터 의존성 0)
-│   │   ├── types.ts             # 전체 인터페이스, 역할(10개), 카테고리, 난이도, 입출력 스키마 정의
+│   │   ├── types.ts             # 전체 인터페이스, 역할(5개), 카테고리, 난이도, 입출력 스키마 정의
 │   │   ├── config.ts            # 2-Path 레이아웃 해석 (~/.asd 및 <project>/.asd), 대소문자 정규화 경로 해시
 │   │   ├── db.ts                # node:sqlite WAL 모드 3-테이블 SSOT 드라이버 (sessions, tasks, debates)
 │   │   ├── router.ts            # 4단계 모델 라우팅, 미설치 하네스 감지, 다양성 리뷰어 선택, 자동 폴백 체인
@@ -43,7 +43,6 @@ asd-multiagent/
 │   │   ├── debate.ts            # 블라인드 교차 모델 적대적 토론 브로커 (Round 1 병렬 비평 + Round 2 심판)
 │   │   ├── policy.ts            # 1ms PreToolUse 경로/명령 가드 및 Stop 훅 3회 무진전 서킷 브레이커
 │   │   ├── render.ts            # .asd/PLAN.md 양방향 파서/렌더러, 실시간 progressBoard, summary.md 생성
-│   │   ├── lsp.ts               # TS/JS/Python/Go/Rust 심볼 추출, 정의/참조 탐색, 정적 진단 엔진
 │   │   ├── redact.ts            # API 키/JWT/PEM/비밀번호 자동 마스킹 ([REDACTED])
 │   │   └── jsonc.ts             # 주석/후행 쉼표 안전 JSONC 파서 및 TOML 펜스 블록 매니저
 │   ├── adapters/                # 4대 AI 하네스 어댑터 및 글로벌 인스톨러
@@ -54,7 +53,6 @@ asd-multiagent/
 │   │   └── installer.ts         # 글로벌 동기화(sync), 외과적 제거(uninstall), 100ms 헬스체크(doctor)
 │   ├── mcp/                     # MCP 프로토콜 및 인프로세스 오케스트레이션 핸들러
 │   │   ├── server.ts            # plan, dispatch, verify, debate 코어 핸들러 및 Subagent Isolation Guard
-│   │   ├── lsp-server.ts        # 내장 LSP 기능이 없는 하네스에 주입되는 독립형 LSP MCP 서버
 │   │   └── stdio-rpc.ts         # 비동기 JSON-RPC 2.0 stdio 트랜스포트 (start 시점에만 console.log 리다이렉트)
 │   ├── cli/                     # 통합 터미널 CLI 및 로컬 웹 대시보드
 │   │   ├── index.ts             # 11개 CLI 명령어 엔트리포인트
@@ -130,6 +128,6 @@ ASD v2.2는 프로젝트 폴더 오염을 막고 멀티 프로세스 동시성�
 ## 5. 테스트 및 동기화 검증 현황
 
 - **자동화 테스트 스위트 (`npm test`)**:
-  - 총 **14개 테스트 스위트 / 231개 테스트 케이스 100% 통과 (실패 0건)**.
+  - 총 **14개 테스트 스위트 / 237개 테스트 케이스 100% 통과 (실패 0건)**.
 - **4대 하네스 글로벌 동기화 (`asd sync`)**:
-  - Claude Code, OpenCode, Codex CLI, Antigravity의 글로벌 설정에 7개 스킬 엔트리(`/asd`, `/asd-plan`, `/asd-run`, `/asd-debug`, `/asd-debate`, `/asd-handoff`, `/handoff`), 10개 에이전트 페르소나, 보안 훅, Gap-Filling MCP(`lsp`, `context7`, `grep_app`, `websearch`), 전역 `asd` CLI 심(shim)이 정상 배포되어 있습니다.
+  - Claude Code, OpenCode, Codex CLI, Antigravity의 글로벌 설정에 7개 스킬 엔트리(`/asd`, `/asd-plan`, `/asd-run`, `/asd-debug`, `/asd-debate`, `/asd-handoff`, `/handoff`), 5개 에이전트 페르소나, 보안 훅, Gap-Filling MCP(`context7`, `grep_app`, `websearch`), 전역 `asd` CLI 심(shim)이 정상 배포되어 있습니다.

@@ -126,18 +126,11 @@ Once `asd sync` has been run, you can invoke these slash skills directly inside 
 
 ---
 
-## Built-in Code Intelligence & Gap-Filling MCP Servers
+## Gap-Filling MCP Servers
 
 All long-running orchestration actions (`plan`, `dispatch`, `verify`, `debate`) run directly via the `asd` CLI to eliminate 60-second MCP RPC timeouts (`-32001`). For fast read-only lookups, `asd sync` automatically fills in only the MCP servers missing from each harness:
 
-### 1. `lsp` (`src/mcp/lsp-server.ts`)
-Automatically provided to harnesses without native CLI LSP (skipped on OpenCode, which has native LSP):
-- `lsp_diagnostics`: Structured static type and syntax diagnostics (`tsc`, `node --check`, conflict marker detection).
-- `lsp_symbols`: Symbol declaration extraction (`function`, `class`, `interface`, `type`, `variable`, `struct`).
-- `lsp_definition`: Exact symbol definition lookup (`file`, `line`, `column`).
-- `lsp_references`: Project-wide symbol reference search (`file`, `line`, `column`, `isDefinition`).
-
-### 2. Gap-Filling Knowledge MCPs (`presets/default-mcp.jsonc`)
+### Gap-Filling Knowledge MCPs (`presets/default-mcp.jsonc`)
 - `context7` (`https://mcp.context7.com/mcp`): Up-to-date official library and framework documentation lookup.
 - `grep_app` (`https://mcp.grep.app/mcp`): Fast regex and code search across public GitHub repositories.
 - `websearch` (`https://mcp.exa.ai/mcp`): Real-time Exa web search (automatically skipped on harnesses with native web search such as Claude Code, Codex, and Antigravity).
