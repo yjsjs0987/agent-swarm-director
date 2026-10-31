@@ -42,6 +42,36 @@ export class OpencodeAdapter implements HarnessAdapter {
     return { cmd: "opencode", args };
   }
 
+  buildResumeCommand(
+    harnessSessionId: string,
+    prompt: string,
+    model?: string
+  ): { cmd: string; args: string[] } {
+    const args: string[] = [
+      "run",
+      prompt,
+      "--session",
+      harnessSessionId,
+      "--format",
+      "json",
+    ];
+    if (model) {
+      args.push("--model", model);
+    }
+    return { cmd: "opencode", args };
+  }
+
+  buildInteractiveResumeCommand(
+    harnessSessionId: string,
+    model?: string
+  ): { cmd: string; args: string[] } {
+    const args: string[] = ["--session", harnessSessionId];
+    if (model) {
+      args.push("--model", model);
+    }
+    return { cmd: "opencode", args };
+  }
+
   formatPreToolUseDeny(reason: string): {
     exitCode: number;
     stdout?: string;

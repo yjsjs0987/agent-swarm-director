@@ -75,6 +75,37 @@ export class CursorAdapter implements HarnessAdapter {
     return { cmd: this.binaryName, args };
   }
 
+  buildResumeCommand(
+    harnessSessionId: string,
+    prompt: string,
+    model?: string
+  ): { cmd: string; args: string[] } {
+    const args: string[] = [
+      "-p",
+      prompt,
+      "--resume",
+      harnessSessionId,
+      "--force",
+      "--output-format",
+      "json",
+    ];
+    if (model) {
+      args.push("--model", model);
+    }
+    return { cmd: this.binaryName, args };
+  }
+
+  buildInteractiveResumeCommand(
+    harnessSessionId: string,
+    model?: string
+  ): { cmd: string; args: string[] } {
+    const args: string[] = ["--resume", harnessSessionId];
+    if (model) {
+      args.push("--model", model);
+    }
+    return { cmd: this.binaryName, args };
+  }
+
   formatPreToolUseDeny(reason: string): {
     exitCode: number;
     stdout?: string;

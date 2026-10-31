@@ -20,6 +20,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { resolveAsdPaths } from "./config.ts";
 import { redactSecrets } from "./redact.ts";
+import { extractHarnessSessionIdFromOutput } from "./session-tracker.ts";
 import type { AgentRole, HarnessId, SubagentSessionMeta } from "./types.ts";
 
 // ============================================================================
@@ -56,6 +57,7 @@ export interface SpawnSubagentOptions {
   role: AgentRole;
   harness: HarnessId;
   model: string;
+  harnessSessionId?: string | null;
   taskId: string;
   prompt: string;
   allowedFiles: string[];
@@ -84,6 +86,7 @@ export interface SpawnSubagentResult {
   exitCode: number;
   durationMs: number;
   metaPath: string;
+  harnessSessionId?: string | null;
   timedOut?: boolean;
 }
 
@@ -301,6 +304,8 @@ export function spawnSubagent(
   fs.writeFileSync(path.join(sessionDir, "prompt.md"), options.prompt);
 
   const startedAt = Date.now();
+  let detectedHarnessSessionId: string | null =
+    options.harnessSessionId ?? null;
   let meta: SubagentSessionMeta = {
     subSessionId: options.subSessionId,
     parentSessionId: options.mainSessionId,
@@ -308,6 +313,7 @@ export function spawnSubagent(
     role: options.role,
     harness: options.harness,
     model: options.model,
+    harnessSessionId: detectedHarnessSessionId,
     taskId: options.taskId,
     pid: 0,
     worktreePath: options.worktreePath ?? null,
@@ -353,6 +359,7 @@ export function spawnSubagent(
       meta = {
         ...meta,
         pid,
+        harnessSessionId: detectedHarnessSessionId,
         status,
         startedAt,
         finishedAt,
@@ -361,7 +368,13 @@ export function spawnSubagent(
       writeMeta();
       // Resolve only after the log stream has flushed to disk.
       logStream.end(() => {
-        resolve({ exitCode, durationMs: meta.durationMs ?? 0, metaPath, timedOut });
+        resolve({
+          exitCode,
+          durationMs: meta.durationMs ?? 0,
+          metaPath,
+          harnessSessionId: detectedHarnessSessionId,
+          timedOut,
+        });
       });
     };
 
@@ -405,13 +418,39 @@ export function spawnSubagent(
         signal: options.signal,
         onStdout: (chunk) => {
           if (!settled) {
-            if (chunk && chunk.length > 0) resetIdleTimer();
+            if (chunk && chunk.length > 0) {
+              resetIdleTimer();
+              if (!detectedHarnessSessionId) {
+                const extracted = extractHarnessSessionIdFromOutput(
+                  chunk,
+                  options.harness
+                );
+                if (extracted) {
+                  detectedHarnessSessionId = extracted;
+                  meta = { ...meta, harnessSessionId: extracted };
+                  writeMeta();
+                }
+              }
+            }
             logStream.write(redactSecrets(chunk));
           }
         },
         onStderr: (chunk) => {
           if (!settled) {
-            if (chunk && chunk.length > 0) resetIdleTimer();
+            if (chunk && chunk.length > 0) {
+              resetIdleTimer();
+              if (!detectedHarnessSessionId) {
+                const extracted = extractHarnessSessionIdFromOutput(
+                  chunk,
+                  options.harness
+                );
+                if (extracted) {
+                  detectedHarnessSessionId = extracted;
+                  meta = { ...meta, harnessSessionId: extracted };
+                  writeMeta();
+                }
+              }
+            }
             logStream.write(redactSecrets(chunk));
           }
         },

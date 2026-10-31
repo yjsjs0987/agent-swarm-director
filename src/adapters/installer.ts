@@ -1136,10 +1136,72 @@ export async function syncHarnessConfigs(
           _asdManaged: true,
         });
 
+        existingHooks.SessionStart = [
+          ...(Array.isArray(existingHooks.SessionStart)
+            ? existingHooks.SessionStart.filter(
+                (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+              )
+            : []),
+          {
+            command: `node --no-warnings "${asdCliPath}" hook session-start --harness antigravity`,
+            _asdManaged: true,
+          },
+        ];
         existingHooks.PreToolUse = preHooks;
         existingHooks.Stop = stopHooks;
         safeWriteJson(hooksJsonPath, existingHooks);
         written.push(hooksJsonPath);
+
+        const configHooksJsonPath = path.join(geminiDir, "config", "hooks.json");
+        let existingConfigHooks: Record<string, unknown> = {};
+        if (fs.existsSync(configHooksJsonPath)) {
+          backupUserFile(configHooksJsonPath);
+          try {
+            existingConfigHooks = JSON.parse(
+              fs.readFileSync(configHooksJsonPath, "utf8").replace(/^\uFEFF/, "")
+            ) as Record<string, unknown>;
+          } catch {
+            existingConfigHooks = {};
+          }
+        }
+        const posixCliPath = asdCliPath.replaceAll("\\", "/");
+        existingConfigHooks["asd-session-tracker"] = {
+          SessionStart: [
+            {
+              type: "command",
+              command: `node --no-warnings ${posixCliPath} hook session-start --harness antigravity`,
+              timeout: 10,
+            },
+          ],
+          PreInvocation: [
+            {
+              type: "command",
+              command: `node --no-warnings ${posixCliPath} hook pre-invocation --harness antigravity`,
+              timeout: 10,
+            },
+          ],
+          PreToolUse: [
+            {
+              matcher: "",
+              hooks: [
+                {
+                  type: "command",
+                  command: `node --no-warnings ${posixCliPath} hook pre-tool-use --harness antigravity`,
+                  timeout: 10,
+                },
+              ],
+            },
+          ],
+          Stop: [
+            {
+              type: "command",
+              command: `node --no-warnings ${posixCliPath} hook stop --harness antigravity`,
+              timeout: 10,
+            },
+          ],
+        };
+        safeWriteJson(configHooksJsonPath, existingConfigHooks);
+        written.push(configHooksJsonPath);
 
         // Check external Antigravity MCP config files (e.g., ~/.gemini/config/mcp_config.json or ~/.gemini/antigravity-cli/mcp_config.json)
         // so we never inject duplicates of tools already configured by the user or OMO-for-AGY.
@@ -1225,6 +1287,17 @@ export async function syncHarnessConfigs(
           command: `node --no-warnings "${asdCliPath}" hook stop --harness cursor`,
           _asdManaged: true,
         });
+        existingHooks.SessionStart = [
+          ...(Array.isArray(existingHooks.SessionStart)
+            ? existingHooks.SessionStart.filter(
+                (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+              )
+            : []),
+          {
+            command: `node --no-warnings "${asdCliPath}" hook session-start --harness cursor`,
+            _asdManaged: true,
+          },
+        ];
         existingHooks.PreToolUse = preHooks;
         existingHooks.Stop = stopHooks;
         safeWriteJson(hooksJsonPath, existingHooks);
@@ -1390,6 +1463,12 @@ export async function uninstallHarnessConfigs(
       const cfg = JSON.parse(fs.readFileSync(claudeSettings, "utf8")) as Record<string, unknown>;
       if (cfg.hooks && typeof cfg.hooks === "object") {
         const hooks = cfg.hooks as Record<string, unknown[]>;
+        if (Array.isArray(hooks.SessionStart)) {
+          hooks.SessionStart = hooks.SessionStart.filter(
+            (h: unknown) => !isAsdManagedClaudeHook(h)
+          );
+          if (hooks.SessionStart.length === 0) delete hooks.SessionStart;
+        }
         if (Array.isArray(hooks.PreToolUse)) {
           hooks.PreToolUse = hooks.PreToolUse.filter(
             (h: unknown) => !isAsdManagedClaudeHook(h)
@@ -1538,6 +1617,12 @@ export async function uninstallHarnessConfigs(
   if (fs.existsSync(hooksJson)) {
     try {
       const hJson = JSON.parse(fs.readFileSync(hooksJson, "utf8")) as Record<string, unknown>;
+      if (Array.isArray(hJson.SessionStart)) {
+        hJson.SessionStart = hJson.SessionStart.filter(
+          (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+        );
+        if ((hJson.SessionStart as unknown[]).length === 0) delete hJson.SessionStart;
+      }
       if (Array.isArray(hJson.PreToolUse)) {
         hJson.PreToolUse = hJson.PreToolUse.filter(
           (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
@@ -1570,6 +1655,31 @@ export async function uninstallHarnessConfigs(
     removeBackupFile(hooksJson);
   }
 
+  const configHooksJson = path.join(geminiDir, "config", "hooks.json");
+  if (fs.existsSync(configHooksJson)) {
+    try {
+      const chJson = JSON.parse(fs.readFileSync(configHooksJson, "utf8")) as Record<string, unknown>;
+      delete chJson["asd-session-tracker"];
+      removeBackupFile(configHooksJson);
+      if (Object.keys(chJson).length === 0) {
+        removeFile(configHooksJson, "antigravity");
+      } else {
+        safeWriteJson(configHooksJson, chJson);
+        restoredFiles.push(configHooksJson);
+        harnessStatus.antigravity.restored.push(configHooksJson);
+      }
+    } catch {
+      if (restoreUserBackup(configHooksJson)) {
+        restoredFiles.push(configHooksJson);
+        harnessStatus.antigravity.restored.push(configHooksJson);
+      } else {
+        removeFile(configHooksJson, "antigravity");
+      }
+    }
+  } else {
+    removeBackupFile(configHooksJson);
+  }
+
   cleanupJsonMcpFile(path.join(geminiDir, "mcp_config.json"), "antigravity");
   cleanupJsonMcpFile(path.join(geminiDir, "config", "mcp_config.json"), "antigravity");
   removeDirIfEmpty(path.join(geminiDir, "config"));
@@ -1590,6 +1700,12 @@ export async function uninstallHarnessConfigs(
   if (fs.existsSync(cursorHooksJson)) {
     try {
       const hJson = JSON.parse(fs.readFileSync(cursorHooksJson, "utf8")) as Record<string, unknown>;
+      if (Array.isArray(hJson.SessionStart)) {
+        hJson.SessionStart = hJson.SessionStart.filter(
+          (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+        );
+        if ((hJson.SessionStart as unknown[]).length === 0) delete hJson.SessionStart;
+      }
       if (Array.isArray(hJson.PreToolUse)) {
         hJson.PreToolUse = hJson.PreToolUse.filter(
           (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)

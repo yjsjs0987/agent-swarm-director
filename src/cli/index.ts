@@ -68,6 +68,12 @@ import {
   type HarnessAdapter,
   type HarnessId,
 } from "../core/types.ts";
+import {
+  extractHookProjectRoot,
+  extractHookSessionInfo,
+  linkHarnessSessionToAsdSession,
+  recordCliRecentSession,
+} from "../core/session-tracker.ts";
 import { cleanupWorktree, runGit } from "../core/workspace.ts";
 
 // ============================================================================
@@ -218,8 +224,51 @@ export function readStdin(): string {
   try {
     return fs.readFileSync(0, "utf8");
   } catch {
+    // Fallback to chunked read
+  }
+  const chunks: Buffer[] = [];
+  const buf = Buffer.alloc(8192);
+  while (true) {
+    try {
+      const bytesRead = fs.readSync(0, buf, 0, buf.length, null);
+      if (bytesRead <= 0) break;
+      chunks.push(Buffer.from(buf.subarray(0, bytesRead)));
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code;
+      if (code === "EOF" || code === "EAGAIN" || code === "EWOULDBLOCK") {
+        break;
+      }
+      break;
+    }
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+export async function readStdinAsync(): Promise<string> {
+  if (process.stdin.isTTY) {
     return "";
   }
+  return await new Promise<string>((resolve) => {
+    let data = "";
+    const timer = setTimeout(() => {
+      process.stdin.removeAllListeners();
+      process.stdin.pause();
+      resolve(data);
+    }, 500);
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      data += chunk;
+    });
+    process.stdin.on("end", () => {
+      clearTimeout(timer);
+      resolve(data);
+    });
+    process.stdin.on("error", () => {
+      clearTimeout(timer);
+      resolve(data);
+    });
+    process.stdin.resume();
+  });
 }
 
 // ============================================================================
@@ -262,6 +311,7 @@ export interface SubagentLogRecord {
   role: string;
   harness: string;
   model: string;
+  harnessSessionId?: string | null;
   status: string;
   pid?: number;
   worktreePath?: string | null;
@@ -313,6 +363,10 @@ export function scanSubagentLogs(projectRoot: string): SubagentLogRecord[] {
             role: String(meta.role ?? ""),
             harness: String(meta.harness ?? ""),
             model: String(meta.model ?? ""),
+            harnessSessionId:
+              typeof meta.harnessSessionId === "string" && meta.harnessSessionId.trim()
+                ? meta.harnessSessionId.trim()
+                : null,
             status: String(meta.status ?? "unknown"),
             pid: typeof meta.pid === "number" ? meta.pid : undefined,
             worktreePath: typeof meta.worktreePath === "string" ? meta.worktreePath : null,
@@ -922,13 +976,21 @@ export async function main(
       case "hook": {
         if (
           !subcommand ||
-          (subcommand !== "pre-tool-use" && subcommand !== "stop")
+          (subcommand !== "pre-tool-use" &&
+            subcommand !== "stop" &&
+            subcommand !== "session-start" &&
+            subcommand !== "pre-invocation")
         ) {
-          console.error("Usage: asd hook <pre-tool-use|stop> [--harness <id>]");
+          console.error(
+            "Usage: asd hook <pre-tool-use|stop|session-start|pre-invocation> [--harness <id>]"
+          );
           return 1;
         }
 
         let rawPayload = readStdin();
+        if (!rawPayload) {
+          rawPayload = await readStdinAsync();
+        }
         if (!rawPayload && options.payload) {
           rawPayload = options.payload;
         }
@@ -936,7 +998,7 @@ export async function main(
         let payload: Record<string, unknown> = {};
         if (rawPayload && rawPayload.trim()) {
           try {
-            payload = JSON.parse(rawPayload);
+            payload = JSON.parse(rawPayload.replace(/^\uFEFF/, "").trim());
           } catch {
             // Fail-closed on malformed JSON for pre-tool-use
             if (subcommand === "pre-tool-use") {
@@ -958,12 +1020,31 @@ export async function main(
 
         const harnessId = (options.harness ||
           payload.harness ||
+          (Array.isArray(payload.workspacePaths) ? "antigravity" : undefined) ||
           "claude-code") as HarnessId;
         if (!payload.harness) {
           payload.harness = harnessId;
         }
-        if (!payload.projectRoot && projectRoot) {
-          payload.projectRoot = projectRoot;
+
+        // Resolve actual workspace root from hook payload (`workspacePaths[0]`, `workspace_roots[0]`, `cwd`)
+        // before falling back to --project-root or process.cwd()
+        const resolvedHookRoot =
+          options.projectRoot
+            ? path.resolve(options.projectRoot)
+            : extractHookProjectRoot(payload, projectRoot) || projectRoot;
+        payload.projectRoot = resolvedHookRoot;
+
+        // Normalize Antigravity toolCall.{name,args} into tool_name and tool_input
+        if (payload.toolCall && typeof payload.toolCall === "object") {
+          const tc = payload.toolCall as Record<string, unknown>;
+          if (typeof tc.name === "string" && !payload.tool_name && !payload.toolName) {
+            payload.tool_name = tc.name;
+            payload.toolName = tc.name;
+          }
+          if (tc.args && typeof tc.args === "object" && !payload.tool_input && !payload.input) {
+            payload.tool_input = tc.args;
+            payload.input = tc.args;
+          }
         }
 
         // Normalize target file keys across camelCase and snake_case
@@ -979,8 +1060,63 @@ export async function main(
         }
 
         const adapter = getAdapter(harnessId);
+        const rootDir = resolvedHookRoot;
 
-        if (subcommand === "pre-tool-use") {
+        // Track native CLI/harness session in <projectRoot>/.asd/sessions/cli-recent.json
+        // when running as main session and a native session ID is present in hook payload.
+        if (
+          process.env.ASD_SESSION_ROLE !== "subagent" &&
+          payload.roleType !== "subagent"
+        ) {
+          const hookInfo = extractHookSessionInfo(payload, harnessId);
+          if (hookInfo.harnessSessionId) {
+            recordCliRecentSession(
+              rootDir,
+              {
+                harnessSessionId: hookInfo.harnessSessionId,
+                harness: hookInfo.harness,
+                model: hookInfo.model,
+                summary: hookInfo.summary,
+                transcriptPath: hookInfo.transcriptPath,
+              },
+              { forceCreateDir: true }
+            );
+          }
+        }
+
+        if (subcommand === "session-start" || subcommand === "pre-invocation") {
+          // Link to active ASD session if one exists in SQLite
+          try {
+            const paths = resolveAsdPaths(rootDir, homeDir);
+            if (fs.existsSync(paths.dbPath)) {
+              const db = openProjectDb(rootDir, homeDir);
+              try {
+                const hookInfo = extractHookSessionInfo(payload, harnessId);
+                const latestSess = db.getLatestSession();
+                if (
+                  hookInfo.harnessSessionId &&
+                  latestSess &&
+                  latestSess.phase !== "done"
+                ) {
+                  linkHarnessSessionToAsdSession({
+                    projectRoot: rootDir,
+                    homeDir,
+                    asdSessionId: latestSess.session_id,
+                    harness: harnessId,
+                    harnessSessionId: hookInfo.harnessSessionId,
+                    mainModel: hookInfo.model,
+                    db,
+                  });
+                }
+              } finally {
+                db.close();
+              }
+            }
+          } catch {
+            // Ignore session-start link errors
+          }
+          return 0;
+        } else if (subcommand === "pre-tool-use") {
           const decision = evaluatePreToolUse(
             payload as PreToolUsePayload,
             DEFAULT_HARNESS_TOOL_MANIFEST,
@@ -998,6 +1134,9 @@ export async function main(
             }
             return formatted.exitCode;
           }
+          if (harnessId === "antigravity") {
+            process.stdout.write(JSON.stringify({ decision: "allow" }) + "\n");
+          }
           return 0;
         } else if (subcommand === "stop") {
           let db: SqliteDriver | undefined;
@@ -1006,6 +1145,28 @@ export async function main(
             const paths = resolveAsdPaths(rootDir, homeDir);
             if (fs.existsSync(paths.dbPath)) {
               db = openProjectDb(rootDir, homeDir);
+              if (
+                process.env.ASD_SESSION_ROLE !== "subagent" &&
+                payload.roleType !== "subagent"
+              ) {
+                const hookInfo = extractHookSessionInfo(payload, harnessId);
+                const latestSess = db.getLatestSession();
+                if (
+                  hookInfo.harnessSessionId &&
+                  latestSess &&
+                  latestSess.phase !== "done"
+                ) {
+                  linkHarnessSessionToAsdSession({
+                    projectRoot: rootDir,
+                    homeDir,
+                    asdSessionId: latestSess.session_id,
+                    harness: harnessId,
+                    harnessSessionId: hookInfo.harnessSessionId,
+                    mainModel: hookInfo.model,
+                    db,
+                  });
+                }
+              }
             }
             const decision = evaluateStopHook(
               payload as StopHookPayload,

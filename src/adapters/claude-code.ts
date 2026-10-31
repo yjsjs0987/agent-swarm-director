@@ -42,7 +42,9 @@ export function isAsdManagedClaudeHook(entry: unknown): boolean {
   if (obj._asdManaged === true) return true;
   if (
     typeof obj.command === "string" &&
-    (obj.command.includes("hook pre-tool-use") || obj.command.includes("hook stop"))
+    (obj.command.includes("hook pre-tool-use") ||
+      obj.command.includes("hook stop") ||
+      obj.command.includes("hook session-start"))
   ) {
     return true;
   }
@@ -52,7 +54,11 @@ export function isAsdManagedClaudeHook(entry: unknown): boolean {
       const hObj = h as Record<string, unknown>;
       if (hObj._asdManaged === true) return true;
       const cmd = typeof hObj.command === "string" ? hObj.command : "";
-      return cmd.includes("hook pre-tool-use") || cmd.includes("hook stop");
+      return (
+        cmd.includes("hook pre-tool-use") ||
+        cmd.includes("hook stop") ||
+        cmd.includes("hook session-start")
+      );
     });
   }
   return false;
@@ -63,17 +69,29 @@ export function isAsdManagedClaudeHook(entry: unknown): boolean {
  * using the official `{ matcher, hooks: [{ type: "command", command }] }` schema.
  */
 export function createClaudeHookConfig(asdCliPath: string): {
+  SessionStart: ClaudeHookMatcherEntry[];
   PreToolUse: ClaudeHookMatcherEntry[];
   Stop: ClaudeHookMatcherEntry[];
 } {
   return {
+    SessionStart: [
+      {
+        matcher: "",
+        hooks: [
+          {
+            type: "command",
+            command: `node --no-warnings "${asdCliPath}" hook session-start --harness claude-code`,
+          },
+        ],
+      },
+    ],
     PreToolUse: [
       {
         matcher: "",
         hooks: [
           {
             type: "command",
-            command: `node --no-warnings "${asdCliPath}" hook pre-tool-use`,
+            command: `node --no-warnings "${asdCliPath}" hook pre-tool-use --harness claude-code`,
           },
         ],
       },
@@ -84,7 +102,7 @@ export function createClaudeHookConfig(asdCliPath: string): {
         hooks: [
           {
             type: "command",
-            command: `node --no-warnings "${asdCliPath}" hook stop`,
+            command: `node --no-warnings "${asdCliPath}" hook stop --harness claude-code`,
           },
         ],
       },
@@ -108,6 +126,14 @@ export function mergeClaudeSettings(
   ) as Record<string, unknown>;
 
   const managed = createClaudeHookConfig(asdCliPath);
+
+  const existingSessionStart = Array.isArray(hooks.SessionStart)
+    ? hooks.SessionStart
+    : [];
+  hooks.SessionStart = [
+    ...existingSessionStart.filter((h: unknown) => !isAsdManagedClaudeHook(h)),
+    ...managed.SessionStart,
+  ];
 
   const existingPre = Array.isArray(hooks.PreToolUse) ? hooks.PreToolUse : [];
   hooks.PreToolUse = [
@@ -135,6 +161,36 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
     _opts?: { reasoningEffort?: string }
   ): { cmd: string; args: string[] } {
     const args: string[] = ["-p", prompt, "--output-format", "json"];
+    if (model) {
+      args.push("--model", model);
+    }
+    return { cmd: "claude", args };
+  }
+
+  buildResumeCommand(
+    harnessSessionId: string,
+    prompt: string,
+    model?: string
+  ): { cmd: string; args: string[] } {
+    const args: string[] = [
+      "-p",
+      prompt,
+      "--resume",
+      harnessSessionId,
+      "--output-format",
+      "json",
+    ];
+    if (model) {
+      args.push("--model", model);
+    }
+    return { cmd: "claude", args };
+  }
+
+  buildInteractiveResumeCommand(
+    harnessSessionId: string,
+    model?: string
+  ): { cmd: string; args: string[] } {
+    const args: string[] = ["--resume", harnessSessionId];
     if (model) {
       args.push("--model", model);
     }

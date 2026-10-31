@@ -37,6 +37,7 @@ import { fileURLToPath } from "node:url";
 import { autoSyncIfNeeded } from "../adapters/installer.ts";
 import { loadRoutingConfig, resolveAsdPaths } from "../core/config.ts";
 import { openProjectDb, type SessionRow, type SqliteDriver, type TaskRow } from "../core/db.ts";
+import { linkHarnessSessionToAsdSession } from "../core/session-tracker.ts";
 import { buildDefaultHarnessCommand, runDebateBroker } from "../core/debate.ts";
 import { checkProtectedPath, isPathAllowed } from "../core/policy.ts";
 import {
@@ -681,6 +682,9 @@ export class AsdMcpServer {
         projectRoot: this.projectRoot,
         mainHarness: input.mainHarness || "claude-code",
         mainPid: process.pid,
+        mainModel: input.mainModel ?? null,
+        harnessSessionId: input.harnessSessionId ?? null,
+        autoApprove: input.autoApprove,
       });
     }
 
@@ -752,6 +756,9 @@ export class AsdMcpServer {
       phase: sessionRow.phase as SessionPhase,
       pid: sessionRow.main_pid ?? process.pid,
       startedAt: new Date(sessionRow.created_at).toISOString(),
+      ...(sessionRow.main_model ? { model: sessionRow.main_model } : {}),
+      ...(sessionRow.harness_session_id ? { harnessSessionId: sessionRow.harness_session_id } : {}),
+      autoApprove: sessionRow.auto_approve !== 0,
       ...(sessionRow.memo ? { memo: sessionRow.memo } : {}),
     };
     atomicWriteFileSync(
@@ -759,7 +766,18 @@ export class AsdMcpServer {
       JSON.stringify(mainMeta, null, 2) + "\n"
     );
 
-    // Retrieve fresh tasks
+    // Retrieve fresh tasks & link any active CLI harnessSessionId to this ASD session
+    linkHarnessSessionToAsdSession({
+      projectRoot: this.projectRoot,
+      homeDir: this.homeDir,
+      asdSessionId: sessionId,
+      harness: (input.mainHarness || sessionRow.main_harness) as HarnessId,
+      harnessSessionId: input.harnessSessionId ?? sessionRow.harness_session_id ?? null,
+      mainModel: input.mainModel ?? sessionRow.main_model ?? null,
+      autoApprove: input.autoApprove,
+      db: this.db,
+    });
+    sessionRow = this.db.getSession(sessionId) ?? sessionRow;
     const taskRows = this.db.getSessionTasks(sessionId);
 
     // Renders .asd/PLAN.md
@@ -1177,6 +1195,10 @@ export class AsdMcpServer {
         };
 
         // Verification
+        const effectiveAutoApprove =
+          input.autoApprove !== undefined
+            ? input.autoApprove
+            : session.auto_approve !== 0;
         let verifyResult: { verified: boolean; commitSha?: string; error?: string; status?: TaskStatus; changedFiles?: string[] };
         if (t.track === "LIGHT") {
           verifyResult = verifyAndCommitLightTask({
@@ -1185,6 +1207,7 @@ export class AsdMcpServer {
             title: t.title,
             allowedFiles,
             verifyCmd: t.verify_cmd,
+            autoApprove: effectiveAutoApprove,
             sessionId,
             db: this.db,
           });
@@ -1198,6 +1221,7 @@ export class AsdMcpServer {
             branchName: wtInfo?.branchName,
             allowedFiles,
             verifyCmd: t.verify_cmd,
+            autoApprove: effectiveAutoApprove,
             sessionId,
             db: this.db,
           });
@@ -1205,6 +1229,18 @@ export class AsdMcpServer {
 
         if (verifyResult.verified) {
           const parsedReport = parseSubagentReport(readSpawnOutput(spawnResult.metaPath));
+          if (verifyResult.status === "verifying") {
+            const currentTasks = this.db.getSessionTasks(sessionId);
+            renderPlanMd(session, currentTasks);
+            finalResult = {
+              taskId: t.task_id,
+              status: "verifying",
+              harness: activeRoute.harness,
+              model: activeRoute.model,
+              durationMs: spawnResult.durationMs,
+            };
+            break;
+          }
           const effectiveChangedFiles = verifyResult.changedFiles ?? allowedFiles;
           const claim: DoneClaim = {
             summary: parsedReport?.summary || `Completed task ${t.task_id}: ${t.title}`,
@@ -1802,6 +1838,13 @@ export class AsdMcpServer {
       }
     }
     let progressStep = 0;
+    linkHarnessSessionToAsdSession({
+      projectRoot: this.projectRoot,
+      homeDir: this.homeDir,
+      asdSessionId: sessionId,
+      harness: input.harness,
+      db: this.db,
+    });
     const brokerResult = await runDebateBroker({
       projectRoot: this.projectRoot,
       homeDir: this.homeDir,
@@ -1839,6 +1882,57 @@ export class AsdMcpServer {
 }
 
 // ============================================================================
+export async function handlePlan(
+  input: AsdPlanInput,
+  options?: AsdMcpServerOptions
+): Promise<AsdPlanOutput> {
+  const srv = new AsdMcpServer({ autoSync: false, ...options });
+  try {
+    return await srv.handlePlan(input);
+  } finally {
+    srv.close();
+  }
+}
+
+export async function handleDispatch(
+  input: AsdDispatchInput,
+  options?: AsdMcpServerOptions & { signal?: AbortSignal }
+): Promise<Awaited<ReturnType<AsdMcpServer["handleDispatch"]>>> {
+  const srv = new AsdMcpServer({ autoSync: false, ...options });
+  try {
+    return await srv.handleDispatch(input, options?.signal);
+  } finally {
+    srv.close();
+  }
+}
+
+export async function handleVerify(
+  input: AsdVerifyInput,
+  options?: AsdMcpServerOptions
+): Promise<AsdVerifyOutput> {
+  const srv = new AsdMcpServer({ autoSync: false, ...options });
+  try {
+    return await srv.handleVerify(input);
+  } finally {
+    srv.close();
+  }
+}
+
+export async function handleDebate(
+  input: AsdDebateInput,
+  options?: AsdMcpServerOptions & {
+    signal?: AbortSignal;
+    onProgress?: (message: string) => void;
+  }
+): Promise<AsdDebateOutput> {
+  const srv = new AsdMcpServer({ autoSync: false, ...options });
+  try {
+    return await srv.handleDebate(input, options?.signal, options?.onProgress);
+  } finally {
+    srv.close();
+  }
+}
+
 // CLI Auto-Start Guard
 // ============================================================================
 

@@ -120,6 +120,9 @@ export interface MainSessionMeta {
   sessionId: string;
   roleType: "main";
   harness: HarnessId;
+  model?: string;
+  harnessSessionId?: string | null;
+  autoApprove?: boolean;
   role: "director";
   phase: SessionPhase;
   pid: number;
@@ -134,6 +137,7 @@ export interface SubagentSessionMeta {
   role: AgentRole;
   harness: HarnessId;
   model: string;
+  harnessSessionId?: string | null;
   taskId: string;
   pid: number;
   worktreePath: string | null;
@@ -142,6 +146,30 @@ export interface SubagentSessionMeta {
   startedAt?: number;
   finishedAt?: number;
   durationMs?: number;
+}
+
+export interface CliRecentSessionEntry {
+  harnessSessionId: string;
+  harness: HarnessId;
+  model?: string | null;
+  summary: string;
+  transcriptPath?: string | null;
+  asdSessionId?: string | null;
+  projectRoot: string;
+  startedAt: number;
+  updatedAt: number;
+}
+
+export interface KnownProjectSummary {
+  projectHash: string;
+  projectRoot: string;
+  dbPath: string;
+  existsOnDisk: boolean;
+  sessionCount: number;
+  latestSessionId: string | null;
+  latestHarness: string | null;
+  latestMemo: string | null;
+  updatedAt: number;
 }
 
 // ============================================================================
@@ -175,6 +203,9 @@ export interface AsdPlanInput {
   action: "create" | "get" | "update" | "sync_from_md";
   sessionId?: string;
   mainHarness?: HarnessId;
+  mainModel?: string;
+  harnessSessionId?: string;
+  autoApprove?: boolean;
   tasks?: Array<{
     taskId: string;
     turn: number;
@@ -222,6 +253,7 @@ export interface AsdDispatchInput {
   taskIds?: string[];
   mode?: "parallel_spawn" | "claim_only";
   harness?: HarnessId;
+  autoApprove?: boolean;
 }
 
 export interface AutoCreatedCrossScopeTask {
@@ -323,6 +355,16 @@ export interface HarnessAdapter {
     prompt: string,
     model: string,
     opts?: { reasoningEffort?: string }
+  ): { cmd: string; args: string[] };
+  buildResumeCommand?(
+    harnessSessionId: string,
+    prompt: string,
+    model?: string,
+    opts?: { reasoningEffort?: string }
+  ): { cmd: string; args: string[] };
+  buildInteractiveResumeCommand?(
+    harnessSessionId: string,
+    model?: string
   ): { cmd: string; args: string[] };
   formatPreToolUseDeny(reason: string): {
     exitCode: number;

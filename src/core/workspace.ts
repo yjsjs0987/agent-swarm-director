@@ -69,10 +69,13 @@ export interface VerifyLightTaskOptions {
   verifyCmd?: string | null;
   sessionId?: string;
   db?: SqliteDriver;
+  autoApprove?: boolean;
 }
 
 export interface VerifyTaskResult {
   verified: boolean;
+  status?: TaskStatus;
+  pendingApproval?: boolean;
   commitSha?: string;
   rollbackPerformed?: boolean;
   violations?: string[];
@@ -93,11 +96,13 @@ export interface VerifyHeavyTaskOptions {
   smokeCmd?: string | null;
   sessionId?: string;
   db?: SqliteDriver;
+  autoApprove?: boolean;
 }
 
 export interface VerifyHeavyTaskResult {
   verified: boolean;
   status: TaskStatus;
+  pendingApproval?: boolean;
   commitSha?: string;
   violations?: string[];
   testOutput?: string;
@@ -467,8 +472,16 @@ export function rollbackLightChanges(projectRoot: string): void {
 export function verifyAndCommitLightTask(
   options: VerifyLightTaskOptions
 ): VerifyTaskResult {
-  const { projectRoot, taskId, title, allowedFiles, verifyCmd, sessionId, db } =
-    options;
+  const {
+    projectRoot,
+    taskId,
+    title,
+    allowedFiles,
+    verifyCmd,
+    sessionId,
+    db,
+    autoApprove = true,
+  } = options;
 
   ensureGitUserIdentity(projectRoot);
 
@@ -487,6 +500,7 @@ export function verifyAndCommitLightTask(
     }
     return {
       verified: false,
+      status: "failed",
       rollbackPerformed: true,
       violations: check.violations,
       error: "Boundary or secret check failed",
@@ -505,12 +519,27 @@ export function verifyAndCommitLightTask(
       }
       return {
         verified: false,
+        status: "failed",
         rollbackPerformed: true,
         testOutput: cmdRes.output,
         error: `Verification command failed with exit code ${cmdRes.exitCode}: ${resolvedCmd}`,
         changedFiles,
       };
     }
+  }
+
+  // 2b. Manual Approval Gate: if autoApprove is false, pause at 'verifying' before committing
+  if (autoApprove === false) {
+    if (db && sessionId) {
+      db.updateTaskStatus(sessionId, taskId, "verifying");
+    }
+    return {
+      verified: true,
+      status: "verifying",
+      pendingApproval: true,
+      rollbackPerformed: false,
+      changedFiles,
+    };
   }
 
   // 3. Pass: create checkpoint commit
@@ -525,6 +554,7 @@ export function verifyAndCommitLightTask(
       const commitErr = commitRes.stderr || commitRes.stdout;
       return {
         verified: false,
+        status: "failed",
         rollbackPerformed: false,
         error: `Checkpoint commit failed: ${commitErr}`,
         changedFiles,
@@ -542,6 +572,7 @@ export function verifyAndCommitLightTask(
 
   return {
     verified: true,
+    status: "done",
     commitSha,
     rollbackPerformed: false,
     changedFiles,
@@ -720,6 +751,7 @@ export async function verifyAndMergeHeavyTask(
     smokeCmd,
     sessionId,
     db,
+    autoApprove = true,
   } = options;
 
   const wtPath =
@@ -768,6 +800,21 @@ export async function verifyAndMergeHeavyTask(
         error: `Verification command failed with exit code ${cmdRes.exitCode}: ${resolvedCmd}`,
       };
     }
+  }
+
+  // 2b. Manual Approval Gate: if autoApprove is false, pause at 'verifying' and preserve worktree for GUI diff inspection
+  if (autoApprove === false) {
+    if (db && sessionId) {
+      db.updateTaskStatus(sessionId, taskId, "verifying", {
+        worktreePath: wtPath,
+      });
+    }
+    return {
+      verified: true,
+      status: "verifying",
+      pendingApproval: true,
+      changedFiles,
+    };
   }
 
   // 3. Remove node_modules junction immediately before git add -A
@@ -861,4 +908,233 @@ export async function verifyAndMergeHeavyTask(
       changedFiles,
     };
   });
+}
+
+// ============================================================================
+// 9. Worktree Diff Inspection & Manual Approval / Rejection Helpers (GUI Gate)
+// ============================================================================
+
+export interface WorktreeDiffSnapshot {
+  targetDir: string;
+  exists: boolean;
+  changedFiles: string[];
+  statusShort: string;
+  diff: string;
+}
+
+/**
+ * Collects changed files, `git status --short`, and unified `git diff HEAD`
+ * (including untracked file contents) for either a task worktree or projectRoot.
+ */
+export function getWorktreeDiff(
+  projectRoot: string,
+  options?: { wtPath?: string | null; turn?: number; taskId?: string }
+): WorktreeDiffSnapshot {
+  const inferredWt =
+    options?.wtPath ||
+    (options?.turn !== undefined && options?.taskId
+      ? path.join(projectRoot, ".asd", "wt", `${options.turn}-${options.taskId}`)
+      : null);
+  const targetDir =
+    inferredWt && fs.existsSync(inferredWt)
+      ? path.resolve(inferredWt)
+      : path.resolve(projectRoot);
+
+  if (!fs.existsSync(targetDir)) {
+    return {
+      targetDir,
+      exists: false,
+      changedFiles: [],
+      statusShort: "",
+      diff: "",
+    };
+  }
+
+  const changedFiles = getChangedFiles(targetDir);
+  const statusRes = runGit(["status", "--short", "-uall"], { cwd: targetDir });
+  const diffRes = runGit(["diff", "HEAD"], { cwd: targetDir });
+
+  // Also include diffs for newly created untracked files so GUI diff viewer sees new files
+  const untrackedDiffs: string[] = [];
+  const statusLines = statusRes.stdout.split(/\r?\n/);
+  for (const line of statusLines) {
+    if (!line.startsWith("?? ")) continue;
+    const relPath = line.slice(3).trim().replace(/^"(.*)"$/, "$1");
+    const norm = relPath.replaceAll("\\", "/");
+    if (
+      norm === ".asd" ||
+      norm.startsWith(".asd/") ||
+      norm === "node_modules" ||
+      norm.startsWith("node_modules/")
+    ) {
+      continue;
+    }
+    const absFile = path.join(targetDir, relPath);
+    try {
+      if (fs.existsSync(absFile) && fs.statSync(absFile).isFile()) {
+        const content = fs.readFileSync(absFile, "utf8");
+        const contentLines = content.split(/\r?\n/);
+        untrackedDiffs.push(
+          [
+            `diff --git a/${norm} b/${norm}`,
+            `new file mode 100644`,
+            `--- /dev/null`,
+            `+++ b/${norm}`,
+            `@@ -0,0 +1,${contentLines.length} @@`,
+            ...contentLines.map((l) => `+${l}`),
+          ].join("\n")
+        );
+      }
+    } catch {
+      // Ignore binary/unreadable untracked file
+    }
+  }
+
+  const combinedDiff = [diffRes.stdout.trim(), ...untrackedDiffs]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return {
+    targetDir,
+    exists: true,
+    changedFiles,
+    statusShort: statusRes.stdout.trim(),
+    diff: combinedDiff,
+  };
+}
+
+/**
+ * Approves and merges/commits a task that was paused at `'verifying'` status
+ * when `autoApprove` was disabled.
+ */
+export async function approvePendingTask(options: {
+  projectRoot: string;
+  sessionId: string;
+  taskId: string;
+  db: SqliteDriver;
+  smokeCmd?: string | null;
+}): Promise<{
+  ok: boolean;
+  status: TaskStatus;
+  commitSha?: string;
+  changedFiles?: string[];
+  error?: string;
+}> {
+  const { projectRoot, sessionId, taskId, db, smokeCmd } = options;
+  const task = db.getTask(sessionId, taskId);
+  if (!task) {
+    throw new Error(`Task not found: ${sessionId}/${taskId}`);
+  }
+
+  let allowedFiles: string[] = [];
+  try {
+    allowedFiles = JSON.parse(task.target_files_json || "[]");
+  } catch {
+    allowedFiles = [];
+  }
+  if (allowedFiles.length > 0 && !allowedFiles.includes("tests/**")) {
+    allowedFiles = [...allowedFiles, "tests/**", "**/*.test.ts", "**/*.spec.ts"];
+  }
+
+  if (task.track === "HEAVY" || (task.worktree_path && fs.existsSync(task.worktree_path))) {
+    const res = await verifyAndMergeHeavyTask({
+      projectRoot,
+      turn: task.turn,
+      taskId: task.task_id,
+      title: task.title,
+      wtPath: task.worktree_path ?? undefined,
+      allowedFiles,
+      verifyCmd: task.verify_cmd,
+      smokeCmd,
+      sessionId,
+      db,
+      autoApprove: true,
+    });
+    if (res.verified) {
+      db.recordTaskVerified(
+        sessionId,
+        taskId,
+        res.commitSha || "",
+        {
+          summary: `Approved and merged task ${task.task_id}: ${task.title}`,
+          changed_files: res.changedFiles ?? allowedFiles,
+          key_decisions: ["Approved via manual review gate"],
+          risks: [],
+        },
+        task.duration_ms ?? 0
+      );
+    }
+    return {
+      ok: res.verified,
+      status: res.status,
+      commitSha: res.commitSha,
+      changedFiles: res.changedFiles,
+      error: res.error,
+    };
+  }
+
+  const res = verifyAndCommitLightTask({
+    projectRoot,
+    taskId: task.task_id,
+    title: task.title,
+    allowedFiles,
+    verifyCmd: task.verify_cmd,
+    sessionId,
+    db,
+    autoApprove: true,
+  });
+  if (res.verified) {
+    db.recordTaskVerified(
+      sessionId,
+      taskId,
+      res.commitSha || "",
+      {
+        summary: `Approved and committed task ${task.task_id}: ${task.title}`,
+        changed_files: res.changedFiles ?? allowedFiles,
+        key_decisions: ["Approved via manual review gate"],
+        risks: [],
+      },
+      task.duration_ms ?? 0
+    );
+  }
+  return {
+    ok: res.verified,
+    status: res.status ?? (res.verified ? "done" : "failed"),
+    commitSha: res.commitSha,
+    changedFiles: res.changedFiles,
+    error: res.error,
+  };
+}
+
+/**
+ * Rejects and rolls back a task paused at `'verifying'` (or `'merge_conflict'`),
+ * cleaning up its worktree or uncommitted changes and marking it `'failed'`.
+ */
+export function rejectPendingTask(options: {
+  projectRoot: string;
+  sessionId: string;
+  taskId: string;
+  db: SqliteDriver;
+}): { ok: boolean; status: TaskStatus } {
+  const { projectRoot, sessionId, taskId, db } = options;
+  const task = db.getTask(sessionId, taskId);
+  if (!task) {
+    throw new Error(`Task not found: ${sessionId}/${taskId}`);
+  }
+
+  const wtPath =
+    task.worktree_path ||
+    path.join(projectRoot, ".asd", "wt", `${task.turn}-${task.task_id}`);
+  const branchName = `asd/wt-${task.turn}-${task.task_id}`;
+
+  if (task.track === "HEAVY" || fs.existsSync(wtPath)) {
+    cleanupWorktree(projectRoot, wtPath, branchName, {
+      forceBranchDelete: true,
+    });
+  } else {
+    rollbackLightChanges(projectRoot);
+  }
+
+  db.updateTaskStatus(sessionId, taskId, "failed");
+  return { ok: true, status: "failed" };
 }

@@ -28,6 +28,9 @@ export interface SessionRow {
   session_id: string;
   project_root: string;
   main_harness: string;
+  main_model?: string | null;
+  harness_session_id?: string | null;
+  auto_approve?: number;
   main_pid: number | null;
   phase: string;
   state_version: number;
@@ -43,6 +46,9 @@ export interface SessionInput {
   sessionId: string;
   projectRoot: string;
   mainHarness: HarnessId;
+  mainModel?: string | null;
+  harnessSessionId?: string | null;
+  autoApprove?: boolean;
   mainPid?: number | null;
   baseSha?: string | null;
   memo?: string | null;
@@ -137,7 +143,10 @@ const DDL = `
 CREATE TABLE IF NOT EXISTS sessions (
   session_id TEXT PRIMARY KEY,            -- 예: '20261026-0300-main'
   project_root TEXT NOT NULL,
-  main_harness TEXT NOT NULL,             -- 'claude-code' | 'opencode' | 'codex' | 'antigravity'
+  main_harness TEXT NOT NULL,             -- 'claude-code' | 'opencode' | 'codex' | 'antigravity' | 'cursor'
+  main_model TEXT DEFAULT NULL,           -- 메인 하네스 사용 모델 ID
+  harness_session_id TEXT DEFAULT NULL,   -- 하네스 자체 고유 세션 ID (CLI <-> GUI 양방향 Resume용)
+  auto_approve INTEGER NOT NULL DEFAULT 1,-- 태스크 검증 통과 시 자동 승인/병합 여부 (1: 자동, 0: 수동 승인 대기)
   main_pid INTEGER,
   phase TEXT NOT NULL DEFAULT 'planning', -- 'planning' | 'running' | 'paused' | 'done'
   state_version INTEGER NOT NULL DEFAULT 1,
@@ -216,6 +225,19 @@ export class SqliteDriver {
       if (!cols.some((c) => c.name === "memo")) {
         this.db.exec("ALTER TABLE sessions ADD COLUMN memo TEXT DEFAULT ''");
       }
+      if (!cols.some((c) => c.name === "main_model")) {
+        this.db.exec("ALTER TABLE sessions ADD COLUMN main_model TEXT DEFAULT NULL");
+      }
+      if (!cols.some((c) => c.name === "harness_session_id")) {
+        this.db.exec(
+          "ALTER TABLE sessions ADD COLUMN harness_session_id TEXT DEFAULT NULL"
+        );
+      }
+      if (!cols.some((c) => c.name === "auto_approve")) {
+        this.db.exec(
+          "ALTER TABLE sessions ADD COLUMN auto_approve INTEGER NOT NULL DEFAULT 1"
+        );
+      }
       const taskCols = this.db
         .prepare("PRAGMA table_info(tasks)")
         .all() as Array<{ name?: string }>;
@@ -292,6 +314,44 @@ export class SqliteDriver {
     });
   }
 
+  /** Update main harness metadata (native harnessSessionId, mainModel, mainHarness, autoApprove). */
+  updateSessionHarnessInfo(
+    sessionId: string,
+    info: {
+      harnessSessionId?: string | null;
+      mainModel?: string | null;
+      mainHarness?: HarnessId;
+      autoApprove?: boolean;
+    }
+  ): void {
+    this.withImmediateTx(() => {
+      const sets: string[] = [];
+      const vals: Array<string | number | null> = [];
+      if (info.harnessSessionId !== undefined) {
+        sets.push("harness_session_id = ?");
+        vals.push(info.harnessSessionId);
+      }
+      if (info.mainModel !== undefined) {
+        sets.push("main_model = ?");
+        vals.push(info.mainModel);
+      }
+      if (info.mainHarness !== undefined) {
+        sets.push("main_harness = ?");
+        vals.push(info.mainHarness);
+      }
+      if (info.autoApprove !== undefined) {
+        sets.push("auto_approve = ?");
+        vals.push(info.autoApprove ? 1 : 0);
+      }
+      if (sets.length === 0) return;
+      sets.push("updated_at = ?");
+      vals.push(Date.now());
+      this.db
+        .prepare(`UPDATE sessions SET ${sets.join(", ")} WHERE session_id = ?`)
+        .run(...vals, sessionId);
+    });
+  }
+
   /** Insert the session if absent; return the stored row either way. */
   createOrGetSession(session: SessionInput): SessionRow {
     return this.withImmediateTx(() => {
@@ -299,20 +359,33 @@ export class SqliteDriver {
       if (existing) {
         if (session.memo !== undefined && session.memo !== null && !existing.memo) {
           this.updateSessionMemo(session.sessionId, session.memo);
-          return this.getSession(session.sessionId) ?? existing;
         }
-        return existing;
+        if (
+          session.harnessSessionId !== undefined ||
+          session.mainModel !== undefined ||
+          session.autoApprove !== undefined
+        ) {
+          this.updateSessionHarnessInfo(session.sessionId, {
+            harnessSessionId: session.harnessSessionId,
+            mainModel: session.mainModel,
+            autoApprove: session.autoApprove,
+          });
+        }
+        return this.getSession(session.sessionId) ?? existing;
       }
       const now = Date.now();
       this.db
         .prepare(
-          `INSERT INTO sessions (session_id, project_root, main_harness, main_pid, phase, state_version, base_sha, no_progress_count, memo, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'planning', 1, ?, 0, ?, ?, ?)`
+          `INSERT INTO sessions (session_id, project_root, main_harness, main_model, harness_session_id, auto_approve, main_pid, phase, state_version, base_sha, no_progress_count, memo, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'planning', 1, ?, 0, ?, ?, ?)`
         )
         .run(
           session.sessionId,
           session.projectRoot,
           session.mainHarness,
+          session.mainModel ?? null,
+          session.harnessSessionId ?? null,
+          session.autoApprove === false ? 0 : 1,
           session.mainPid ?? null,
           session.baseSha ?? null,
           session.memo ?? "",

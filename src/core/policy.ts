@@ -690,7 +690,9 @@ export function evaluateStopHook(
   }
 
   try {
-    const session = driver.getSession(sessionId);
+    const session =
+      driver.getSession(sessionId) ??
+      driver.listSessions().find((s) => s.harness_session_id === sessionId);
     if (!session) {
       return { decision: "allow", reason: `Session not found: ${sessionId}` };
     }
@@ -699,7 +701,7 @@ export function evaluateStopHook(
       return { decision: "allow", reason: "Session phase is done" };
     }
 
-    const tasks = driver.getSessionTasks(sessionId);
+    const tasks = driver.getSessionTasks(session.session_id);
     const unfinishedTasks = tasks.filter(
       (t) =>
         t.status === "pending" ||
@@ -720,7 +722,7 @@ export function evaluateStopHook(
       };
     }
 
-    driver.incrementNoProgress(sessionId);
+    driver.incrementNoProgress(session.session_id);
     const newCount = session.no_progress_count + 1;
     return {
       decision: "block",

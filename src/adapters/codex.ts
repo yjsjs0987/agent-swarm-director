@@ -32,6 +32,33 @@ export class CodexAdapter implements HarnessAdapter {
     return { cmd: "codex", args };
   }
 
+  buildResumeCommand(
+    harnessSessionId: string,
+    prompt: string,
+    model?: string,
+    opts?: { reasoningEffort?: string }
+  ): { cmd: string; args: string[] } {
+    const args: string[] = ["exec", "resume", harnessSessionId, prompt, "--json"];
+    if (model) {
+      args.push("-m", model);
+    }
+    if (opts?.reasoningEffort) {
+      args.push("-c", `model_reasoning_effort=${opts.reasoningEffort}`);
+    }
+    return { cmd: "codex", args };
+  }
+
+  buildInteractiveResumeCommand(
+    harnessSessionId: string,
+    model?: string
+  ): { cmd: string; args: string[] } {
+    const args: string[] = ["resume", harnessSessionId];
+    if (model) {
+      args.push("-m", model);
+    }
+    return { cmd: "codex", args };
+  }
+
   formatPreToolUseDeny(reason: string): {
     exitCode: number;
     stdout?: string;

@@ -4,6 +4,17 @@
   "description": "Agent Swarm Director (ASD v2.3.1) — Zero-dependency universal multi-agent orchestration harness",
   "license": "FSL-1.1-ALv2",
   "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./core/plan": "./src/core/render.ts",
+    "./core/plan.ts": "./src/core/render.ts",
+    "./core/*": "./src/core/*",
+    "./adapters/*": "./src/adapters/*",
+    "./cli/*": "./src/cli/*",
+    "./mcp/*": "./src/mcp/*",
+    "./package.json": "./package.json"
+  },
   "engines": {
     "node": ">=22.13.0"
   },

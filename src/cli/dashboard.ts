@@ -61,8 +61,15 @@ import {
   type RoutingConfig,
 } from "../core/types.ts";
 import { scanSubagentLogs, type SubagentLogRecord } from "./index.ts";
+import {
+  buildResumeHarnessCommand,
+  readCliRecentSessions,
+} from "../core/session-tracker.ts";
+import type { CliRecentSessionEntry } from "../core/types.ts";
 
 export type HarnessModelCatalog = Record<HarnessId, string[]>;
+
+export type DashboardStateSnapshot = DashboardSnapshot;
 
 export interface DashboardSnapshot {
   version: string;
@@ -76,6 +83,7 @@ export interface DashboardSnapshot {
   debates: DebateRow[];
   allDebates: DebateRow[];
   subagentLogs: SubagentLogRecord[];
+  cliRecentSessions?: CliRecentSessionEntry[];
   routingConfig: RoutingConfig;
   hasLocalRouting: boolean;
   localRoutingPath: string;
@@ -588,7 +596,8 @@ export async function runSubagentControlAction(options: {
   homeDir?: string;
   sessionId: string;
   subSessionId: string;
-  action: "kill" | "retry" | "fallback" | "custom";
+  action: "kill" | "retry" | "fallback" | "custom" | "resume";
+  prompt?: string;
   harness?: HarnessId;
   model?: string;
   commandRunner?: CommandRunner;
@@ -717,10 +726,24 @@ export async function runSubagentControlAction(options: {
           : "";
   }
 
-  const baseSubId = target.subSessionId.replace(/-(?:retry|fb|custom)-[a-z0-9]+$/i, "");
+  const baseSubId = target.subSessionId.replace(/-(?:retry|fb|custom|resume)-[a-z0-9]+$/i, "");
+  if (options.action === "resume") {
+    suffix = `resume-${Date.now().toString(36).slice(-4)}`;
+  }
   const newSubSessionId = `${baseSubId}-${suffix}`;
-  const promptText = target.prompt || "Continue task.";
-  const cmdInfo = buildDefaultHarnessCommand(nextHarness, promptText, nextModel);
+  const promptText =
+    options.prompt && options.prompt.trim()
+      ? options.prompt.trim()
+      : target.prompt || "Continue task.";
+  const cmdInfo =
+    options.action === "resume" && target.harnessSessionId
+      ? buildResumeHarnessCommand(
+          nextHarness,
+          target.harnessSessionId,
+          promptText,
+          nextModel
+        )
+      : buildDefaultHarnessCommand(nextHarness, promptText, nextModel);
 
   const debMatch = target.subSessionId.match(/-deb-(D-[A-Za-z0-9-]+)-/);
   const effectiveTaskId = target.taskId || debMatch?.[1] || normRole;
@@ -894,7 +917,15 @@ export async function collectDashboardSnapshot(options?: {
         "";
       sessionMap.set(s.session_id, {
         ...s,
-        memo: effectiveMemo,
+    memo: effectiveMemo,
+        main_model:
+          s.main_model ??
+          (typeof mainMeta?.model === "string" ? mainMeta.model : null),
+        harness_session_id:
+          s.harness_session_id ??
+          (typeof mainMeta?.harnessSessionId === "string"
+            ? mainMeta.harnessSessionId
+            : null),
       });
       allDebates.push(...sDebates);
     }
@@ -981,6 +1012,10 @@ export async function collectDashboardSnapshot(options?: {
     debates,
     allDebates,
     subagentLogs,
+    cliRecentSessions: readCliRecentSessions(projectRoot, {
+      syncLocalTranscripts: true,
+      homeDir,
+    }),
     routingConfig,
     hasLocalRouting,
     localRoutingPath: paths.localRoutingPath,
