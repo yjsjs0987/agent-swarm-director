@@ -21,6 +21,56 @@ import type {
 } from "./types.ts";
 
 // ============================================================================
+// ASD Session ID Generation & Validation (CR-15 / CR-17.4)
+// Lives here (leaf module) so db/spawner/server share it without cycles;
+// session-tracker.ts re-exports for the public surface.
+// ============================================================================
+
+const ASD_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const ASD_SESSION_ID_RANDOM_CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
+// ponytail: in-memory per-second suffix set guarantees 0 collisions between
+// same-second generations (spec requires 1000 rapid calls to never collide);
+// add a DB-backed uniqueness check if multi-process generation is ever needed.
+const usedSessionIdSuffixes = new Map<string, Set<string>>();
+
+/**
+ * True when `id` is a safe ASD session ID: path-segment safe (1-64 chars from
+ * [A-Za-z0-9._-], starting alphanumeric) and never "." or "..".
+ */
+export function isValidAsdSessionId(id: string): boolean {
+  if (typeof id !== "string") return false;
+  if (id === "." || id === "..") return false;
+  return ASD_SESSION_ID_PATTERN.test(id);
+}
+
+/**
+ * Generates a unique ASD session ID in local time:
+ * `asd-YYYYMMDD-HHmmss-<4 random [a-z0-9]>`, e.g. `asd-20261101-143005-9f2k`.
+ */
+export function generateAsdSessionId(now?: Date): string {
+  const d = now ?? new Date();
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  if (!usedSessionIdSuffixes.has(stamp)) {
+    usedSessionIdSuffixes.clear();
+    usedSessionIdSuffixes.set(stamp, new Set());
+  }
+  const used = usedSessionIdSuffixes.get(stamp)!;
+  let suffix = "";
+  do {
+    suffix = "";
+    for (let i = 0; i < 4; i++) {
+      suffix +=
+        ASD_SESSION_ID_RANDOM_CHARS[
+          Math.floor(Math.random() * ASD_SESSION_ID_RANDOM_CHARS.length)
+        ];
+    }
+  } while (used.has(suffix));
+  used.add(suffix);
+  return `asd-${stamp}-${suffix}`;
+}
+
+// ============================================================================
 // Row / input types (snake_case mirrors the DDL exactly)
 // ============================================================================
 
@@ -354,6 +404,9 @@ export class SqliteDriver {
 
   /** Insert the session if absent; return the stored row either way. */
   createOrGetSession(session: SessionInput): SessionRow {
+    if (!isValidAsdSessionId(session.sessionId)) {
+      throw new Error("INVALID_SESSION_ID");
+    }
     return this.withImmediateTx(() => {
       const existing = this.getSession(session.sessionId);
       if (existing) {

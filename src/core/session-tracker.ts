@@ -29,6 +29,11 @@ import type {
   KnownProjectSummary,
 } from "./types.ts";
 
+export {
+  generateAsdSessionId,
+  isValidAsdSessionId,
+} from "./db.ts";
+
 const MAX_RECENT_CLI_SESSIONS = 100;
 
 export interface ResumeHarnessCommandOptions {
