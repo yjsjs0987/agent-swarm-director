@@ -285,9 +285,10 @@ describe("LIGHT Track Lifecycle", () => {
     const t1Content = fs.readFileSync(t1Path, "utf8");
     assert.equal(t1Content, "export const t1 = 'checkpoint 1';");
 
-    // T1.2 uncommitted edits must be completely rolled back
-    assert.ok(!fs.existsSync(illegalPath), "Illegal file must be removed by rollback");
-    assert.ok(!fs.existsSync(t2Path), "Failed task file must be removed by rollback");
+    // CR-07: Scoped LIGHT rollback removes in-scope t2.ts while preserving out-of-scope files in untouchedFiles
+    assert.ok(!fs.existsSync(t2Path), "Failed task in-scope file must be removed by rollback");
+    assert.ok(fs.existsSync(illegalPath), "Out-of-scope file is preserved by CR-07 scoped rollback");
+    assert.ok(t2Result.untouchedFiles?.includes("outside.ts"), "untouchedFiles must report outside.ts");
 
     // Git HEAD still points to T1.1 checkpoint commit
     const headLog = runGit(["log", "-1", "--format=%s"], { cwd: root });
