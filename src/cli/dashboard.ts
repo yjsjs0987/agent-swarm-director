@@ -33,11 +33,13 @@ import {
   type DriverRow,
   openProjectDb,
   type SessionRow,
-  type SqliteDriver,
+  SqliteDriver,
   type TaskRow,
 } from "../core/db.ts";
 import {
   buildDefaultHarnessCommand,
+  buildRound1Prompt,
+  buildRound2Prompt,
   parseReviewerOpening,
   synthesizeInsightVerdict,
 } from "../core/debate.ts";
@@ -53,8 +55,10 @@ import {
   DEFAULT_IDLE_TIMEOUT_MS,
   killProcessTree,
   resolveSpawnCommand,
+  finalizeSubagentArtifacts,
   spawnSubagent,
 } from "../core/spawner.ts";
+import { buildPromptForTask } from "../mcp/server.ts";
 import {
   type AgentRole,
   ASD_VERSION,
@@ -650,6 +654,11 @@ export async function runSubagentControlAction(options: {
     } catch {
       // Ignore
     }
+    finalizeSubagentArtifacts({
+      projectRoot,
+      sessionId: target.sessionId,
+      subSessionId: target.subSessionId,
+    });
     return {
       ok: true,
       action: "kill",
@@ -733,10 +742,72 @@ export async function runSubagentControlAction(options: {
     suffix = `resume-${Date.now().toString(36).slice(-4)}`;
   }
   const newSubSessionId = `${baseSubId}-${suffix}`;
+  let reconstructedPrompt = "";
+  if (!(options.prompt && options.prompt.trim()) && !target.prompt) {
+    let db: SqliteDriver | undefined;
+    try {
+      const paths = resolveAsdPaths(projectRoot, options.homeDir);
+      const coreDbFallback = path.join(projectRoot, ".asd", "core.db");
+      if (fs.existsSync(paths.dbPath) || fs.existsSync(coreDbFallback)) {
+        db = fs.existsSync(paths.dbPath)
+          ? openProjectDb(projectRoot, options.homeDir)
+          : new SqliteDriver(coreDbFallback);
+        const debMatchInfo = target.subSessionId.match(/-deb-(D-[A-Za-z0-9-]+)-(r1|r2)/);
+        if (debMatchInfo) {
+          const debId = debMatchInfo[1]!;
+          const roundTag = debMatchInfo[2]!;
+          const debRow = db.getAllDebates().find((d) => d.debate_id === debId);
+          if (debRow) {
+            if (roundTag === "r2" && debRow.round1_bundle_json) {
+              try {
+                const r1Bundle = JSON.parse(debRow.round1_bundle_json);
+                reconstructedPrompt = buildRound2Prompt(
+                  debRow.topic,
+                  debRow.proposal,
+                  r1Bundle,
+                  debRow.task_id ?? undefined
+                );
+              } catch {
+                reconstructedPrompt = buildRound1Prompt(
+                  debRow.topic,
+                  debRow.proposal,
+                  debRow.task_id ?? undefined
+                );
+              }
+            } else {
+              reconstructedPrompt = buildRound1Prompt(
+                debRow.topic,
+                debRow.proposal,
+                debRow.task_id ?? undefined
+              );
+            }
+          }
+        } else if (target.taskId) {
+          const taskRow = db.getTask(target.sessionId, target.taskId);
+          if (taskRow) {
+            reconstructedPrompt = buildPromptForTask(taskRow, [], []);
+          }
+        }
+      }
+    } catch {
+      // ignore reconstruction read errors
+    } finally {
+      try {
+        db?.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
   const promptText =
     options.prompt && options.prompt.trim()
       ? options.prompt.trim()
-      : target.prompt || "Continue task.";
+      : target.prompt ||
+        reconstructedPrompt ||
+        (options.action === "resume" ? "Continue task." : "");
+  if (!promptText) {
+    throw new Error("Missing prompt: prompt.md was purged and task/debate record was not found in DB");
+  }
   const cmdInfo =
     options.action === "resume" && target.harnessSessionId
       ? buildResumeHarnessCommand(
@@ -791,6 +862,16 @@ export async function runSubagentControlAction(options: {
     } catch {
       // Ignore post-processing errors
     }
+    finalizeSubagentArtifacts({
+      projectRoot,
+      sessionId: target.sessionId,
+      subSessionId: newSubSessionId,
+    });
+    finalizeSubagentArtifacts({
+      projectRoot,
+      sessionId: target.sessionId,
+      subSessionId: target.subSessionId,
+    });
     return res;
   });
 

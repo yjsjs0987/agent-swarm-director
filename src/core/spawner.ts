@@ -482,3 +482,55 @@ export function spawnSubagent(
       );
   });
 }
+
+// ============================================================================
+// CR-09: Subagent Artifact Lifecycle (finalizeSubagentArtifacts)
+// ============================================================================
+
+/**
+ * Purges prompt.md and output.log (or keeps last 8KB of output.log when keep === 'tail')
+ * once a subagent reaches a terminal state (done / failed), while preserving meta.json.
+ */
+export function finalizeSubagentArtifacts(input: {
+  projectRoot: string;
+  sessionId: string;
+  subSessionId: string;
+  keep?: "none" | "tail";
+}): void {
+  if (!input.sessionId || !input.subSessionId) return;
+  const paths = resolveAsdPaths(input.projectRoot);
+  const subDir = path.join(
+    paths.sessionsDir,
+    input.sessionId,
+    "subagents",
+    input.subSessionId
+  );
+  if (!fs.existsSync(subDir)) return;
+
+  const promptPath = path.join(subDir, "prompt.md");
+  const logPath = path.join(subDir, "output.log");
+
+  try {
+    if (fs.existsSync(promptPath)) {
+      fs.unlinkSync(promptPath);
+    }
+  } catch {
+    // Best-effort cleanup
+  }
+
+  try {
+    if (fs.existsSync(logPath)) {
+      if (input.keep === "tail") {
+        const buf = fs.readFileSync(logPath);
+        const tailBytes = 8 * 1024;
+        if (buf.length > tailBytes) {
+          fs.writeFileSync(logPath, buf.subarray(buf.length - tailBytes));
+        }
+      } else {
+        fs.unlinkSync(logPath);
+      }
+    }
+  } catch {
+    // Best-effort cleanup
+  }
+}

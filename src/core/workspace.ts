@@ -30,6 +30,7 @@ import { ensureGitExclude, ensureProjectInitialized, getGitExcludePath } from ".
 import type { SqliteDriver } from "./db.ts";
 import { verifyChangedFilesBoundary } from "./policy.ts";
 import { hasLeakedSecrets } from "./redact.ts";
+import { finalizeSubagentArtifacts } from "./spawner.ts";
 import type { TaskStatus } from "./types.ts";
 
 export { ensureGitExclude, getGitExcludePath };
@@ -1447,6 +1448,13 @@ export async function approvePendingTask(options: {
         task.duration_ms ?? 0
       );
     }
+    if ((res.status === "done" || res.status === "failed") && task.sub_session_id) {
+      finalizeSubagentArtifacts({
+        projectRoot,
+        sessionId,
+        subSessionId: task.sub_session_id,
+      });
+    }
     return {
       ok: res.verified,
       status: res.status,
@@ -1480,9 +1488,17 @@ export async function approvePendingTask(options: {
       task.duration_ms ?? 0
     );
   }
+  const finalLightStatus = res.status ?? (res.verified ? "done" : "failed");
+  if ((finalLightStatus === "done" || finalLightStatus === "failed") && task.sub_session_id) {
+    finalizeSubagentArtifacts({
+      projectRoot,
+      sessionId,
+      subSessionId: task.sub_session_id,
+    });
+  }
   return {
     ok: res.verified,
-    status: res.status ?? (res.verified ? "done" : "failed"),
+    status: finalLightStatus,
     commitSha: res.commitSha,
     changedFiles: res.changedFiles,
     error: res.error,
@@ -1521,5 +1537,12 @@ export function rejectPendingTask(options: {
   });
 
   db.updateTaskStatus(sessionId, taskId, "failed");
+  if (task.sub_session_id) {
+    finalizeSubagentArtifacts({
+      projectRoot,
+      sessionId,
+      subSessionId: task.sub_session_id,
+    });
+  }
   return { ok: true, status: "failed" };
 }

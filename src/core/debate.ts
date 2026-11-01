@@ -43,6 +43,7 @@ import type {
 import {
   DEFAULT_DEBATE_TIMEOUT_MS,
   DEFAULT_IDLE_TIMEOUT_MS,
+  finalizeSubagentArtifacts,
   spawnSubagent,
 } from "./spawner.ts";
 import type { CommandRunner } from "./spawner.ts";
@@ -816,6 +817,7 @@ export async function runDebateBroker(
     const effectiveIdleTimeoutMs =
       options.timeoutMs !== undefined ? undefined : DEFAULT_IDLE_TIMEOUT_MS;
     const logTaskId = options.taskId || debateId;
+    const spawnedDebateSubIds: string[] = [];
 
     const round1Promises = reviewers.map(async (reviewer, index) => {
       const subSessionId = `${options.sessionId}-deb-${debateId}-r1-${index + 1}`;
@@ -847,6 +849,7 @@ export async function runDebateBroker(
           return false;
         },
         attempt: (route, sid) => {
+          spawnedDebateSubIds.push(sid);
           const cmdModel = route.model === "default" ? "" : route.model;
           const cmdInfo = options.commandBuilder
             ? options.commandBuilder(route.harness, round1Prompt, cmdModel)
@@ -1074,6 +1077,7 @@ export async function runDebateBroker(
             return false;
           },
           attempt: (route, sid) => {
+            spawnedDebateSubIds.push(sid);
             const cmdModel = route.model === "default" ? "" : route.model;
             const cmdInfo = options.commandBuilder
               ? options.commandBuilder(route.harness, r2Prompt, cmdModel)
@@ -1234,6 +1238,15 @@ export async function runDebateBroker(
       } catch {
         // Ignore PLAN.md rendering errors when running in isolated test DBs
       }
+    }
+
+    // Finalize all debate reviewer subagent artifacts now that debate is done
+    for (const sid of spawnedDebateSubIds) {
+      finalizeSubagentArtifacts({
+        projectRoot: options.projectRoot,
+        sessionId: options.sessionId,
+        subSessionId: sid,
+      });
     }
 
     // 6. Generate Progress Board markdown

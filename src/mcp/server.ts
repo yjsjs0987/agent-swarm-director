@@ -64,6 +64,7 @@ import {
 import {
   DEFAULT_DISPATCH_TIMEOUT_MS,
   DEFAULT_IDLE_TIMEOUT_MS,
+  finalizeSubagentArtifacts,
   spawnSubagent,
   type CommandRunner,
 } from "../core/spawner.ts";
@@ -286,7 +287,7 @@ export interface AsdMcpServerOptions {
 // Helper Functions
 // ============================================================================
 
-function buildPromptForTask(
+export function buildPromptForTask(
   task: TaskRow,
   upstreamDecisions: string[],
   upstreamFiles: string[]
@@ -1097,6 +1098,7 @@ export class AsdMcpServer {
           ? { availableHarnesses: detectAvailableCliHarnesses() }
           : undefined;
       const routingCfg = loadRoutingConfig(this.projectRoot, this.homeDir);
+      const attemptedSubIds: string[] = [];
       while (currentAttempts < 3) {
         const esc = escalateTaskRoute(
           {
@@ -1175,6 +1177,7 @@ export class AsdMcpServer {
           allowDefaultModelRetry: !this.commandRunner,
           shouldRetry: needsFallbackRetry,
           attempt: (r, sid) => {
+            attemptedSubIds.push(sid);
             this.db.updateTaskStatus(sessionId, t.task_id, "running", {
               assignedHarness: r.harness,
               assignedModel: r.model,
@@ -1283,6 +1286,13 @@ export class AsdMcpServer {
             claim,
             spawnResult.durationMs
           );
+          for (const sid of attemptedSubIds) {
+            finalizeSubagentArtifacts({
+              projectRoot: this.projectRoot,
+              sessionId,
+              subSessionId: sid,
+            });
+          }
 
           completedCount++;
           this.sendProgress(
@@ -1311,7 +1321,25 @@ export class AsdMcpServer {
         } else {
           const updated = this.db.recordTaskAttemptFailure(sessionId, t.task_id);
           currentAttempts = updated.attempts;
+          if (verifyResult.status === "merge_conflict") {
+            finalResult = {
+              taskId: t.task_id,
+              status: "merge_conflict",
+              harness: activeRoute.harness,
+              model: activeRoute.model,
+              durationMs: spawnResult.durationMs,
+              error: verifyResult.error || "Merge conflict",
+            };
+            break;
+          }
           if (currentAttempts >= 3) {
+            for (const sid of attemptedSubIds) {
+              finalizeSubagentArtifacts({
+                projectRoot: this.projectRoot,
+                sessionId,
+                subSessionId: sid,
+              });
+            }
             finalResult = {
               taskId: t.task_id,
               status: "failed",
@@ -1825,6 +1853,14 @@ export class AsdMcpServer {
     const finalStatus: TaskStatus = verifyResult.verified
       ? "done"
       : verifyResult.status ?? (this.db.getTask(sessionId, taskId)?.status as TaskStatus) ?? "failed";
+
+    if ((finalStatus === "done" || finalStatus === "failed") && task.sub_session_id) {
+      finalizeSubagentArtifacts({
+        projectRoot: this.projectRoot,
+        sessionId,
+        subSessionId: task.sub_session_id,
+      });
+    }
 
     return {
       verified: verifyResult.verified,
