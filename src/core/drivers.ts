@@ -14,7 +14,13 @@ import {
 import { resolveAsdPaths } from "./config.ts";
 import { redactSecrets } from "./redact.ts";
 import { atomicWriteFileSync, renderProgressBoard } from "./render.ts";
-import { recordCliRecentSession } from "./session-tracker.ts";
+import { getAdapter } from "../adapters/registry.ts";
+import {
+  buildResumeHarnessCommand,
+  isValidAsdSessionId,
+  recordCliRecentSession,
+} from "./session-tracker.ts";
+import { type CommandRunner, executeHarnessProcess } from "./spawner.ts";
 import type {
   HarnessId,
   MainSessionDriverMeta,
@@ -454,4 +460,340 @@ export function buildDriverBriefing(input: {
   }
 
   return redactSecrets(full);
+}
+
+
+// ============================================================================
+// CR-03: GUI Headless Driver Turn Runner (runDriverTurn)
+// ============================================================================
+
+export interface DriverRunResult {
+  runId: string;
+  driverId: string;
+  exitCode: number;
+  timedOut: boolean;
+  harnessSessionId: string | null;
+  durationMs: number;
+  metaPath: string;
+}
+
+const activeDriverRuns = new Set<string>();
+
+function isProcessAliveForDriver(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === "EPERM";
+  }
+}
+
+function getDefaultModelForHarness(harness: HarnessId): string {
+  switch (harness) {
+    case "claude-code":
+      return "claude-sonnet-4-6";
+    case "codex":
+      return "gpt-5.4";
+    case "opencode":
+      return "glm-5";
+    case "antigravity":
+      return "gemini-3.1-pro-high";
+    case "cursor":
+      return "claude-4.5-sonnet";
+    default:
+      return "claude-sonnet-4-6";
+  }
+}
+
+function generateDriverRunId(now = Date.now()): string {
+  const ts = Math.max(0, Math.floor(now)).toString(36);
+  const rand = Math.random().toString(36).slice(2, 6).padEnd(4, "0");
+  return `run-${ts}-${rand}`;
+}
+
+function pruneDriverRuns(runsDir: string, maxRuns = 50): void {
+  if (!fs.existsSync(runsDir)) return;
+  try {
+    const entries = fs
+      .readdirSync(runsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory());
+    if (entries.length <= maxRuns) return;
+
+    const withTimes = entries.map((e) => {
+      const dirPath = path.join(runsDir, e.name);
+      const metaPath = path.join(dirPath, "meta.json");
+      let startedAt = 0;
+      try {
+        if (fs.existsSync(metaPath)) {
+          const parsed = JSON.parse(fs.readFileSync(metaPath, "utf8")) as {
+            startedAt?: number;
+          };
+          if (typeof parsed.startedAt === "number") {
+            startedAt = parsed.startedAt;
+          }
+        }
+        if (!startedAt) {
+          startedAt = fs.statSync(dirPath).mtimeMs;
+        }
+      } catch {
+        startedAt = 0;
+      }
+      return { name: e.name, dirPath, startedAt };
+    });
+
+    withTimes.sort((a, b) => b.startedAt - a.startedAt);
+    for (const old of withTimes.slice(maxRuns)) {
+      try {
+        fs.rmSync(old.dirPath, { recursive: true, force: true });
+      } catch {
+        // best-effort
+      }
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+export async function runDriverTurn(input: {
+  projectRoot: string;
+  homeDir?: string;
+  db: SqliteDriver;
+  sessionId: string;
+  prompt: string;
+  driverId?: string;
+  injectBriefing?: "auto" | "always" | "never";
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
+  signal?: AbortSignal;
+  onOutput?: (chunk: string) => void;
+  commandRunner?: CommandRunner;
+}): Promise<DriverRunResult> {
+  if (!isValidAsdSessionId(input.sessionId)) {
+    throw new Error("INVALID_SESSION_ID");
+  }
+
+  const projectRoot = path.resolve(input.projectRoot);
+  const driver = input.driverId
+    ? input.db.getDriver(input.driverId)
+    : input.db.getActiveDriver(input.sessionId);
+
+  if (
+    !driver ||
+    driver.session_id !== input.sessionId ||
+    driver.detached_at !== null
+  ) {
+    throw new Error("NO_ACTIVE_DRIVER");
+  }
+
+  const busyKey = `${projectRoot.toLowerCase()}::${driver.driver_id}`;
+  if (activeDriverRuns.has(busyKey)) {
+    throw new Error("DRIVER_BUSY");
+  }
+
+  const runsBaseDir = path.join(
+    projectRoot,
+    ".asd",
+    "sessions",
+    input.sessionId,
+    "drivers",
+    driver.driver_id,
+    "runs"
+  );
+  if (fs.existsSync(runsBaseDir)) {
+    try {
+      for (const entry of fs.readdirSync(runsBaseDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const mPath = path.join(runsBaseDir, entry.name, "meta.json");
+        if (!fs.existsSync(mPath)) continue;
+        const parsed = JSON.parse(fs.readFileSync(mPath, "utf8")) as {
+          status?: string;
+          pid?: number;
+        };
+        if (
+          parsed.status === "running" &&
+          typeof parsed.pid === "number" &&
+          parsed.pid > 0 &&
+          isProcessAliveForDriver(parsed.pid)
+        ) {
+          throw new Error("DRIVER_BUSY");
+        }
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message === "DRIVER_BUSY") {
+        throw err;
+      }
+    }
+  }
+
+  activeDriverRuns.add(busyKey);
+  try {
+    const injectMode = input.injectBriefing ?? "auto";
+    let shouldInject = false;
+    if (injectMode === "always") {
+      shouldInject = true;
+    } else if (injectMode === "auto" && driver.briefing_injected === 0) {
+      const allDrivers = input.db.listDrivers(input.sessionId);
+      const hasPrevDriver = allDrivers.some(
+        (d) => d.driver_id !== driver.driver_id
+      );
+      const hasTasks = input.db.getSessionTasks(input.sessionId).length >= 1;
+      if (hasPrevDriver || hasTasks) {
+        shouldInject = true;
+      }
+    }
+
+    let effectivePrompt = input.prompt;
+    if (shouldInject) {
+      const briefing = buildDriverBriefing({
+        db: input.db,
+        projectRoot,
+        sessionId: input.sessionId,
+      });
+      effectivePrompt = `${briefing}\n\n---\n\n${input.prompt}`;
+    }
+
+    const effectiveModel =
+      driver.model && driver.model.trim().length > 0
+        ? driver.model.trim()
+        : getDefaultModelForHarness(driver.harness);
+
+    let command: string;
+    let args: string[];
+    if (!driver.harness_session_id) {
+      const built = getAdapter(driver.harness).buildHeadlessCommand(
+        effectivePrompt,
+        effectiveModel
+      );
+      command = built.cmd;
+      args = built.args;
+    } else {
+      const built = buildResumeHarnessCommand({
+        harness: driver.harness,
+        harnessSessionId: driver.harness_session_id,
+        prompt: effectivePrompt,
+        model: driver.model ?? effectiveModel,
+      });
+      command = built.command;
+      args = built.args;
+    }
+
+    const runId = generateDriverRunId();
+    const runDir = path.join(runsBaseDir, runId);
+    fs.mkdirSync(runDir, { recursive: true });
+    const metaPath = path.join(runDir, "meta.json");
+    const logPath = path.join(runDir, "output.log");
+
+    const startedAt = Date.now();
+    let currentSid: string | null = driver.harness_session_id ?? null;
+    let meta: Record<string, unknown> = {
+      runId,
+      sessionId: input.sessionId,
+      driverId: driver.driver_id,
+      harness: driver.harness,
+      model: effectiveModel,
+      harnessSessionId: currentSid,
+      pid: 0,
+      status: "running",
+      startedAt,
+    };
+    const writeMeta = (): void => {
+      atomicWriteFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+    };
+    writeMeta();
+
+    if (shouldInject) {
+      input.db.markDriverBriefingInjected(driver.driver_id);
+    }
+
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      ASD_SESSION_ROLE: "driver",
+      ASD_MAIN_SESSION_ID: input.sessionId,
+      ASD_DRIVER_ID: driver.driver_id,
+      NODE_NO_WARNINGS: "1",
+    };
+
+    const recordDetectedSid = (extracted: string): void => {
+      if (!extracted) return;
+      if (!currentSid) {
+        try {
+          const updated = setDriverHarnessSessionId(input.db, {
+            projectRoot,
+            driverId: driver.driver_id,
+            harnessSessionId: extracted,
+          });
+          currentSid = updated.harness_session_id ?? extracted;
+        } catch {
+          const fresh = input.db.getDriver(driver.driver_id);
+          currentSid = fresh?.harness_session_id ?? extracted;
+        }
+      }
+      meta = { ...meta, harnessSessionId: currentSid };
+      writeMeta();
+    };
+
+    const execRes = await executeHarnessProcess({
+      command,
+      args,
+      cwd: projectRoot,
+      env,
+      harness: driver.harness,
+      initialHarnessSessionId: currentSid,
+      logPath,
+      signal: input.signal,
+      timeoutMs: input.timeoutMs,
+      idleTimeoutMs: input.idleTimeoutMs,
+      commandRunner: input.commandRunner,
+      onOutput: input.onOutput,
+      onSpawn: (pid) => {
+        meta = { ...meta, pid };
+        writeMeta();
+      },
+      onSessionIdDetected: (extracted) => {
+        recordDetectedSid(extracted);
+      },
+      onBeforeStreamEnd: (res) => {
+        if (res.harnessSessionId && !currentSid) {
+          recordDetectedSid(res.harnessSessionId);
+        }
+        meta = {
+          ...meta,
+          pid: res.pid,
+          exitCode: res.exitCode,
+          timedOut: res.timedOut,
+          harnessSessionId: currentSid ?? res.harnessSessionId ?? null,
+          status: res.status,
+          startedAt: res.startedAt,
+          finishedAt: res.finishedAt,
+          durationMs: res.durationMs,
+        };
+        writeMeta();
+      },
+    });
+
+    try {
+      if (fs.existsSync(logPath)) {
+        fs.unlinkSync(logPath);
+      }
+    } catch {
+      // best-effort
+    }
+
+    pruneDriverRuns(runsBaseDir, 50);
+
+    return {
+      runId,
+      driverId: driver.driver_id,
+      exitCode: execRes.exitCode,
+      timedOut: execRes.timedOut,
+      harnessSessionId: currentSid ?? execRes.harnessSessionId ?? null,
+      durationMs: execRes.durationMs,
+      metaPath,
+    };
+  } finally {
+    activeDriverRuns.delete(busyKey);
+  }
 }

@@ -291,67 +291,60 @@ export function killProcessTree(pid: number): void {
  * is aborted via options.signal, or exceeds options.timeoutMs.
  * Aborted/timed-out children are tree-killed and marked "failed" in meta.json.
  */
-export function spawnSubagent(
-  options: SpawnSubagentOptions
-): Promise<SpawnSubagentResult> {
-  if (!isValidAsdSessionId(options.mainSessionId)) {
-    return Promise.reject(new Error("INVALID_SESSION_ID"));
-  }
-  const paths = resolveAsdPaths(options.projectRoot, options.homeDir);
-  const sessionDir = path.join(
-    paths.sessionsDir,
-    options.mainSessionId,
-    "subagents",
-    options.subSessionId
-  );
-  fs.mkdirSync(sessionDir, { recursive: true });
+export interface ExecuteHarnessProcessOptions {
+  command: string;
+  args: string[];
+  cwd?: string;
+  env: Record<string, string>;
+  harness: HarnessId;
+  initialHarnessSessionId?: string | null;
+  logPath: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  idleTimeoutMs?: number;
+  commandRunner?: CommandRunner;
+  onSpawn?: (pid: number) => void;
+  onSessionIdDetected?: (harnessSessionId: string) => void;
+  onOutput?: (redactedChunk: string) => void;
+  onBeforeStreamEnd?: (res: {
+    exitCode: number;
+    pid: number;
+    startedAt: number;
+    finishedAt: number;
+    durationMs: number;
+    harnessSessionId: string | null;
+    timedOut: boolean;
+    status: "done" | "failed";
+  }) => void;
+}
 
-  const metaPath = path.join(sessionDir, "meta.json");
-  const logPath = path.join(sessionDir, "output.log");
+export interface ExecuteHarnessProcessResult {
+  exitCode: number;
+  pid: number;
+  startedAt: number;
+  finishedAt: number;
+  durationMs: number;
+  harnessSessionId: string | null;
+  timedOut: boolean;
+  status: "done" | "failed";
+}
 
-  fs.writeFileSync(path.join(sessionDir, "prompt.md"), options.prompt);
-
+/**
+ * Shared headless process execution helper used by both spawnSubagent and runDriverTurn.
+ */
+export function executeHarnessProcess(
+  options: ExecuteHarnessProcessOptions
+): Promise<ExecuteHarnessProcessResult> {
   const startedAt = Date.now();
   let detectedHarnessSessionId: string | null =
-    options.harnessSessionId ?? null;
-  let meta: SubagentSessionMeta = {
-    subSessionId: options.subSessionId,
-    parentSessionId: options.mainSessionId,
-    roleType: "subagent",
-    role: options.role,
-    harness: options.harness,
-    model: options.model,
-    harnessSessionId: detectedHarnessSessionId,
-    taskId: options.taskId,
-    pid: 0,
-    ownerPid: options.ownerPid ?? process.pid,
-    dispatchMode: options.dispatchMode ?? "parallel_spawn",
-    worktreePath: options.worktreePath ?? null,
-    allowedFiles: options.allowedFiles,
-    status: "running",
-    startedAt,
-  };
-  const writeMeta = (): void => {
-    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
-  };
-  writeMeta();
+    options.initialHarnessSessionId ?? null;
 
-  // Secret-redacted streaming log. Error handler swallows writes that race
-  // a post-settle close.
-  const logStream = fs.createWriteStream(logPath, { flags: "a" });
+  const logStream = fs.createWriteStream(options.logPath, { flags: "a" });
   logStream.on("error", () => {});
-
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-  };
-  env.NODE_NO_WARNINGS = "1";
-  env.ASD_MAIN_SESSION_ID = options.mainSessionId;
-  env.ASD_SESSION_ROLE = "subagent";
-  env.ASD_SUBAGENT_META = metaPath;
 
   const runner = options.commandRunner ?? defaultCommandRunner;
 
-  return new Promise<SpawnSubagentResult>((resolve) => {
+  return new Promise<ExecuteHarnessProcessResult>((resolve) => {
     let pid = 0;
     let settled = false;
     let killRequested = false;
@@ -366,26 +359,20 @@ export function spawnSubagent(
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       if (options.signal) options.signal.removeEventListener("abort", onAbort);
       const finishedAt = Date.now();
-      meta = {
-        ...meta,
-        pid,
+      const durationMs = finishedAt - startedAt;
+      const result: ExecuteHarnessProcessResult = {
         exitCode,
-        harnessSessionId: detectedHarnessSessionId,
-        status,
+        pid,
         startedAt,
         finishedAt,
-        durationMs: finishedAt - startedAt,
+        durationMs,
+        harnessSessionId: detectedHarnessSessionId,
+        timedOut,
+        status,
       };
-      writeMeta();
-      // Resolve only after the log stream has flushed to disk.
+      options.onBeforeStreamEnd?.(result);
       logStream.end(() => {
-        resolve({
-          exitCode,
-          durationMs: meta.durationMs ?? 0,
-          metaPath,
-          harnessSessionId: detectedHarnessSessionId,
-          timedOut,
-        });
+        resolve(result);
       });
     };
 
@@ -413,7 +400,6 @@ export function spawnSubagent(
 
     if (options.signal) {
       options.signal.addEventListener("abort", onAbort, { once: true });
-      // Insurance: an already-aborted signal must not skip the kill path.
       if (options.signal.aborted && !settled) onAbort();
     }
     if (options.timeoutMs !== undefined) {
@@ -422,54 +408,38 @@ export function spawnSubagent(
     }
     resetIdleTimer();
 
+    const handleChunk = (chunk: string): void => {
+      if (settled) return;
+      if (chunk && chunk.length > 0) {
+        resetIdleTimer();
+        if (!detectedHarnessSessionId) {
+          const extracted = extractHarnessSessionIdFromOutput(
+            chunk,
+            options.harness
+          );
+          if (extracted) {
+            detectedHarnessSessionId = extracted;
+            options.onSessionIdDetected?.(extracted);
+          }
+        }
+      }
+      const redacted = redactSecrets(chunk);
+      logStream.write(redacted);
+      if (redacted.length > 0) {
+        options.onOutput?.(redacted);
+      }
+    };
+
     void runner
       .run(options.command, options.args, {
         cwd: options.cwd,
-        env,
+        env: options.env,
         signal: options.signal,
-        onStdout: (chunk) => {
-          if (!settled) {
-            if (chunk && chunk.length > 0) {
-              resetIdleTimer();
-              if (!detectedHarnessSessionId) {
-                const extracted = extractHarnessSessionIdFromOutput(
-                  chunk,
-                  options.harness
-                );
-                if (extracted) {
-                  detectedHarnessSessionId = extracted;
-                  meta = { ...meta, harnessSessionId: extracted };
-                  writeMeta();
-                }
-              }
-            }
-            logStream.write(redactSecrets(chunk));
-          }
-        },
-        onStderr: (chunk) => {
-          if (!settled) {
-            if (chunk && chunk.length > 0) {
-              resetIdleTimer();
-              if (!detectedHarnessSessionId) {
-                const extracted = extractHarnessSessionIdFromOutput(
-                  chunk,
-                  options.harness
-                );
-                if (extracted) {
-                  detectedHarnessSessionId = extracted;
-                  meta = { ...meta, harnessSessionId: extracted };
-                  writeMeta();
-                }
-              }
-            }
-            logStream.write(redactSecrets(chunk));
-          }
-        },
+        onStdout: handleChunk,
+        onStderr: handleChunk,
         onSpawn: (p) => {
           pid = p;
-          meta = { ...meta, pid };
-          writeMeta();
-          // Abort/timeout fired before the pid existed — kill now.
+          options.onSpawn?.(pid);
           if (killRequested) killProcessTree(pid);
         },
       })
@@ -477,7 +447,6 @@ export function spawnSubagent(
         (result) => {
           if (pid === 0 && result.pid > 0) {
             pid = result.pid;
-            meta = { ...meta, pid };
           }
           finish(result.exitCode, result.exitCode === 0 ? "done" : "failed");
         },
@@ -486,6 +455,99 @@ export function spawnSubagent(
         }
       );
   });
+}
+
+export function spawnSubagent(
+  options: SpawnSubagentOptions
+): Promise<SpawnSubagentResult> {
+  if (!isValidAsdSessionId(options.mainSessionId)) {
+    return Promise.reject(new Error("INVALID_SESSION_ID"));
+  }
+  const paths = resolveAsdPaths(options.projectRoot, options.homeDir);
+  const sessionDir = path.join(
+    paths.sessionsDir,
+    options.mainSessionId,
+    "subagents",
+    options.subSessionId
+  );
+  fs.mkdirSync(sessionDir, { recursive: true });
+
+  const metaPath = path.join(sessionDir, "meta.json");
+  const logPath = path.join(sessionDir, "output.log");
+
+  fs.writeFileSync(path.join(sessionDir, "prompt.md"), options.prompt);
+
+  const startedAt = Date.now();
+  let meta: SubagentSessionMeta = {
+    subSessionId: options.subSessionId,
+    parentSessionId: options.mainSessionId,
+    roleType: "subagent",
+    role: options.role,
+    harness: options.harness,
+    model: options.model,
+    harnessSessionId: options.harnessSessionId ?? null,
+    taskId: options.taskId,
+    pid: 0,
+    ownerPid: options.ownerPid ?? process.pid,
+    dispatchMode: options.dispatchMode ?? "parallel_spawn",
+    worktreePath: options.worktreePath ?? null,
+    allowedFiles: options.allowedFiles,
+    status: "running",
+    startedAt,
+  };
+  const writeMeta = (): void => {
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+  };
+  writeMeta();
+
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+  };
+  env.NODE_NO_WARNINGS = "1";
+  env.ASD_MAIN_SESSION_ID = options.mainSessionId;
+  env.ASD_SESSION_ROLE = "subagent";
+  env.ASD_SUBAGENT_META = metaPath;
+
+  return executeHarnessProcess({
+    command: options.command,
+    args: options.args,
+    cwd: options.cwd,
+    env,
+    harness: options.harness,
+    initialHarnessSessionId: options.harnessSessionId ?? null,
+    logPath,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs,
+    idleTimeoutMs: options.idleTimeoutMs,
+    commandRunner: options.commandRunner,
+    onSpawn: (pid) => {
+      meta = { ...meta, pid };
+      writeMeta();
+    },
+    onSessionIdDetected: (extracted) => {
+      meta = { ...meta, harnessSessionId: extracted };
+      writeMeta();
+    },
+    onBeforeStreamEnd: (res) => {
+      meta = {
+        ...meta,
+        pid: res.pid,
+        exitCode: res.exitCode,
+        harnessSessionId: res.harnessSessionId,
+        status: res.status,
+        startedAt: res.startedAt,
+        finishedAt: res.finishedAt,
+        durationMs: res.durationMs,
+      };
+      writeMeta();
+    },
+  }).then((res) => ({
+    exitCode: res.exitCode,
+    durationMs: res.durationMs,
+    metaPath,
+    harnessSessionId: res.harnessSessionId,
+    timedOut: res.timedOut,
+  }));
 }
 
 // ============================================================================
