@@ -37,7 +37,11 @@ import { fileURLToPath } from "node:url";
 import { autoSyncIfNeeded } from "../adapters/installer.ts";
 import { loadRoutingConfig, resolveAsdPaths } from "../core/config.ts";
 import { openProjectDb, type SessionRow, type SqliteDriver, type TaskRow } from "../core/db.ts";
-import { linkHarnessSessionToAsdSession } from "../core/session-tracker.ts";
+import {
+  generateAsdSessionId,
+  isValidAsdSessionId,
+  linkHarnessSessionToAsdSession,
+} from "../core/session-tracker.ts";
 import { buildDefaultHarnessCommand, runDebateBroker } from "../core/debate.ts";
 import { checkProtectedPath, isPathAllowed } from "../core/policy.ts";
 import {
@@ -668,10 +672,12 @@ export class AsdMcpServer {
       const mutating =
         action === "create" || action === "update" || action === "sync_from_md";
       if (latest && mutating && latest.phase === "done") {
-        sessionId = `${Date.now()}-main`;
+        sessionId = generateAsdSessionId();
       } else {
-        sessionId = latest?.session_id || `${Date.now()}-main`;
+        sessionId = latest?.session_id || generateAsdSessionId();
       }
+    } else if (!isValidAsdSessionId(sessionId)) {
+      throw new Error("INVALID_SESSION_ID");
     }
 
     // Ensure session exists

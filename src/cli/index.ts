@@ -33,17 +33,13 @@ import * as path from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
-import { antigravityAdapter } from "../adapters/antigravity.ts";
-import { claudeCodeAdapter } from "../adapters/claude-code.ts";
-import { codexAdapter } from "../adapters/codex.ts";
-import { cursorAdapter } from "../adapters/cursor.ts";
 import {
   runAsdDoctor,
   runAsdSync,
   runAsdUninstall,
   runAsdUpdate,
 } from "../adapters/installer.ts";
-import { opencodeAdapter } from "../adapters/opencode.ts";
+import { getAdapter } from "../adapters/registry.ts";
 import {
   checkForRemoteUpdate,
   formatTerminalUpdateBanner,
@@ -65,7 +61,6 @@ import {
 import { renderProgressBoard } from "../core/render.ts";
 import {
   ASD_VERSION,
-  type HarnessAdapter,
   type HarnessId,
 } from "../core/types.ts";
 import {
@@ -275,22 +270,7 @@ export async function readStdinAsync(): Promise<string> {
 // Adapter Resolver Helper
 // ============================================================================
 
-export function getAdapter(harnessId?: string): HarnessAdapter {
-  switch (harnessId) {
-    case "claude-code":
-      return claudeCodeAdapter;
-    case "opencode":
-      return opencodeAdapter;
-    case "codex":
-      return codexAdapter;
-    case "antigravity":
-      return antigravityAdapter;
-    case "cursor":
-      return cursorAdapter;
-    default:
-      return claudeCodeAdapter;
-  }
-}
+export { getAdapter };
 
 // ============================================================================
 // Latest Session Query Helper

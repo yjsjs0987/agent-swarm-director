@@ -20,7 +20,10 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { resolveAsdPaths } from "./config.ts";
 import { redactSecrets } from "./redact.ts";
-import { extractHarnessSessionIdFromOutput } from "./session-tracker.ts";
+import {
+  extractHarnessSessionIdFromOutput,
+  isValidAsdSessionId,
+} from "./session-tracker.ts";
 import type { AgentRole, HarnessId, SubagentSessionMeta } from "./types.ts";
 
 // ============================================================================
@@ -289,6 +292,9 @@ export function killProcessTree(pid: number): void {
 export function spawnSubagent(
   options: SpawnSubagentOptions
 ): Promise<SpawnSubagentResult> {
+  if (!isValidAsdSessionId(options.mainSessionId)) {
+    return Promise.reject(new Error("INVALID_SESSION_ID"));
+  }
   const paths = resolveAsdPaths(options.projectRoot, options.homeDir);
   const sessionDir = path.join(
     paths.sessionsDir,
