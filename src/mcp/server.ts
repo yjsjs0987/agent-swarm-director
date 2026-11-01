@@ -774,17 +774,27 @@ export class AsdMcpServer {
       JSON.stringify(mainMeta, null, 2) + "\n"
     );
 
-    // Retrieve fresh tasks & link any active CLI harnessSessionId to this ASD session
-    linkHarnessSessionToAsdSession({
-      projectRoot: this.projectRoot,
-      homeDir: this.homeDir,
-      asdSessionId: sessionId,
-      harness: (input.mainHarness || sessionRow.main_harness) as HarnessId,
-      harnessSessionId: input.harnessSessionId ?? sessionRow.harness_session_id ?? null,
-      mainModel: input.mainModel ?? sessionRow.main_model ?? null,
-      autoApprove: input.autoApprove,
-      db: this.db,
-    });
+    // CR-04: Attach/switch CLI driver on create/update unless called by GUI driver or subagent
+    if (
+      (action === "create" || action === "update") &&
+      this.sessionRole !== "driver" &&
+      process.env.ASD_SESSION_ROLE !== "driver" &&
+      !this.isSubagent()
+    ) {
+      linkHarnessSessionToAsdSession({
+        projectRoot: this.projectRoot,
+        homeDir: this.homeDir,
+        asdSessionId: sessionId,
+        harness: (input.mainHarness || sessionRow.main_harness) as HarnessId,
+        ...(input.harnessSessionId !== undefined
+          ? { harnessSessionId: input.harnessSessionId }
+          : {}),
+        mainModel: input.mainModel ?? sessionRow.main_model ?? null,
+        autoApprove: input.autoApprove,
+        source: "cli-asd",
+        db: this.db,
+      });
+    }
     sessionRow = this.db.getSession(sessionId) ?? sessionRow;
     const taskRows = this.db.getSessionTasks(sessionId);
 
@@ -834,6 +844,23 @@ export class AsdMcpServer {
     let session = this.db.getSession(sessionId);
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    // CR-04: Attach/switch CLI driver on dispatch when called from CLI (not driver / subagent)
+    if (
+      this.sessionRole !== "driver" &&
+      process.env.ASD_SESSION_ROLE !== "driver" &&
+      !this.isSubagent()
+    ) {
+      linkHarnessSessionToAsdSession({
+        projectRoot: this.projectRoot,
+        homeDir: this.homeDir,
+        asdSessionId: sessionId,
+        harness: (input.harness || session.main_harness) as HarnessId,
+        source: "cli-asd",
+        db: this.db,
+      });
+      session = this.db.getSession(sessionId) ?? session;
     }
 
     // Baseline prep: ensure git baseline exists

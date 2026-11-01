@@ -22,6 +22,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ensureGitExclude, resolveAsdPaths } from "./config.ts";
 import { openProjectDb, SqliteDriver } from "./db.ts";
+import { attachDriver, type DriverSource } from "./drivers.ts";
 import { atomicWriteFileSync } from "./render.ts";
 import type {
   CliRecentSessionEntry,
@@ -815,10 +816,15 @@ export function linkHarnessSessionToAsdSession(options: {
   mainModel?: string | null;
   model?: string | null;
   autoApprove?: boolean;
+  source?: DriverSource;
+  now?: number;
   db?: SqliteDriver;
 }): { harnessSessionId: string | null; mainModel: string | null } {
   const projectRoot = path.resolve(options.projectRoot);
   const asdSessionId = options.asdSessionId.trim();
+  const now = options.now ?? Date.now();
+  const tenMinutesMs = 10 * 60 * 1000;
+
   let recentList = readCliRecentSessionsRaw(projectRoot);
   if (recentList.length === 0 && !options.harnessSessionId?.trim()) {
     recentList = syncLocalHarnessTranscripts(projectRoot, {
@@ -826,23 +832,39 @@ export function linkHarnessSessionToAsdSession(options: {
     });
   }
 
-  // Determine effective harnessSessionId: explicit -> env -> recent entry for same harness
+  const isSubagentEnv = process.env.ASD_SESSION_ROLE === "subagent";
+
+  // Determine effective harnessSessionId: explicit -> env (if not subagent) -> recent entry within 10 minutes
   let effectiveHarnessSessionId =
-    options.harnessSessionId?.trim() ||
-    process.env.ASD_HARNESS_SESSION_ID?.trim() ||
-    process.env.CLAUDE_SESSION_ID?.trim() ||
-    null;
+    options.harnessSessionId !== undefined
+      ? options.harnessSessionId?.trim() || null
+      : (!isSubagentEnv
+          ? process.env.ASD_HARNESS_SESSION_ID?.trim() ||
+            process.env.CLAUDE_SESSION_ID?.trim() ||
+            null
+          : null);
 
   let matchedRecent = effectiveHarnessSessionId
     ? recentList.find((r) => r.harnessSessionId === effectiveHarnessSessionId)
     : undefined;
 
-  if (!effectiveHarnessSessionId && recentList.length > 0) {
-    matchedRecent = options.harness
+  if (
+    options.harnessSessionId === undefined &&
+    !effectiveHarnessSessionId &&
+    recentList.length > 0
+  ) {
+    const recentCandidate = options.harness
       ? recentList.find((r) => r.harness === options.harness)
       : recentList[0];
-    if (matchedRecent) {
-      effectiveHarnessSessionId = matchedRecent.harnessSessionId;
+    if (
+      recentCandidate &&
+      typeof recentCandidate.updatedAt === "number" &&
+      now - recentCandidate.updatedAt <= tenMinutesMs
+    ) {
+      matchedRecent = recentCandidate;
+      effectiveHarnessSessionId = recentCandidate.harnessSessionId;
+    } else {
+      effectiveHarnessSessionId = null;
     }
   }
 
@@ -852,9 +874,10 @@ export function linkHarnessSessionToAsdSession(options: {
     matchedRecent?.model ||
     null;
 
-  // 1. Update SQLite core.db
+  // 1. Delegate to attachDriver in SQLite DB when session exists
   let db = options.db;
   let ownsDb = false;
+  let attachedViaDriver = false;
   try {
     if (!db) {
       const paths = resolveAsdPaths(projectRoot, options.homeDir);
@@ -864,16 +887,28 @@ export function linkHarnessSessionToAsdSession(options: {
       }
     }
     if (db) {
-      db.updateSessionHarnessInfo(asdSessionId, {
-        ...(effectiveHarnessSessionId !== null
-          ? { harnessSessionId: effectiveHarnessSessionId }
-          : {}),
-        ...(effectiveModel !== null ? { mainModel: effectiveModel } : {}),
-        ...(options.harness ? { mainHarness: options.harness } : {}),
-        ...(options.autoApprove !== undefined
-          ? { autoApprove: options.autoApprove }
-          : {}),
-      });
+      const existingSession = db.getSession(asdSessionId);
+      if (existingSession) {
+        const effectiveHarness = (options.harness ||
+          matchedRecent?.harness ||
+          existingSession.main_harness ||
+          "claude-code") as HarnessId;
+        attachDriver(db, {
+          projectRoot,
+          sessionId: asdSessionId,
+          harness: effectiveHarness,
+          model: effectiveModel ?? existingSession.main_model ?? null,
+          harnessSessionId: effectiveHarnessSessionId,
+          source: options.source ?? "cli-asd",
+          now,
+        });
+        if (options.autoApprove !== undefined) {
+          db.updateSessionHarnessInfo(asdSessionId, {
+            autoApprove: options.autoApprove,
+          });
+        }
+        attachedViaDriver = true;
+      }
     }
   } catch {
     // Ignore DB errors
@@ -885,7 +920,7 @@ export function linkHarnessSessionToAsdSession(options: {
     }
   }
 
-  // 2. Update `<projectRoot>/.asd/sessions/<asdSessionId>/main.json` if directory exists
+  // 2. Fallback update for <projectRoot>/.asd/sessions/<asdSessionId>/main.json (or autoApprove sync)
   try {
     const mainJsonPath = path.join(
       projectRoot,
@@ -899,11 +934,13 @@ export function linkHarnessSessionToAsdSession(options: {
         string,
         unknown
       >;
-      if (effectiveHarnessSessionId) {
-        current.harnessSessionId = effectiveHarnessSessionId;
-      }
-      if (effectiveModel) {
-        current.model = effectiveModel;
+      if (!attachedViaDriver) {
+        if (effectiveHarnessSessionId) {
+          current.harnessSessionId = effectiveHarnessSessionId;
+        }
+        if (effectiveModel) {
+          current.model = effectiveModel;
+        }
       }
       if (options.autoApprove !== undefined) {
         current.autoApprove = options.autoApprove;
@@ -914,7 +951,7 @@ export function linkHarnessSessionToAsdSession(options: {
     // Ignore main.json update errors
   }
 
-  // 3. Link `asdSessionId` back into `cli-recent.json`
+  // 3. Link asdSessionId back into cli-recent.json
   if (effectiveHarnessSessionId) {
     try {
       recordCliRecentSession(
