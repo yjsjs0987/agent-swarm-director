@@ -17,6 +17,7 @@ export * from "./core/workspace.ts";
 export * from "./core/render.ts";
 export * from "./core/policy.ts";
 export * from "./core/redact.ts";
+export * from "./core/transcripts.ts";
 export * from "./core/jsonc.ts";
 export * from "./core/debate.ts";
 
