@@ -928,6 +928,17 @@ export function createTaskWorktree(
 
   fs.mkdirSync(path.dirname(wtPath), { recursive: true });
 
+  // CR-12: If a preserved/orphaned worktree or branch from a prior attempt exists, clean it up before recreating
+  const branchCheck = runGit(["rev-parse", "--verify", `refs/heads/${branchName}`], {
+    cwd: projectRoot,
+  });
+  if (fs.existsSync(wtPath) || branchCheck.exitCode === 0) {
+    cleanupWorktree(projectRoot, wtPath, branchName, {
+      forceBranchDelete: true,
+    });
+    runGit(["worktree", "prune"], { cwd: projectRoot });
+  }
+
   // Add worktree branching from HEAD
   const addRes = runGit(
     ["worktree", "add", "-b", branchName, wtPath, "HEAD"],
@@ -1545,4 +1556,158 @@ export function rejectPendingTask(options: {
     });
   }
   return { ok: true, status: "failed" };
+}
+
+// ============================================================================
+// CR-12: Orphaned Task Recovery (recoverOrphanedTasks)
+// ============================================================================
+
+/**
+ * Recovers running tasks whose subagent and owner processes have died:
+ * - parallel_spawn / control_action: if both sub pid and ownerPid are dead -> failed (reason='orphaned'),
+ *   updating meta.json.status='failed' and preserving worktree.
+ * - claim_only: untouched (main AI may still be working on it).
+ * - legacy / missing meta or dispatchMode: failed only if pid is dead and startedAt > 24 hours ago.
+ */
+export function recoverOrphanedTasks(input: {
+  db: SqliteDriver;
+  projectRoot: string;
+  sessionId?: string;
+  now?: number;
+}): Array<{
+  sessionId: string;
+  taskId: string;
+  from: TaskStatus;
+  to: TaskStatus;
+  reason: string;
+}> {
+  const now = input.now ?? Date.now();
+  const projectRoot = path.resolve(input.projectRoot);
+  const runningTasks = (
+    input.sessionId
+      ? input.db.getSessionTasks(input.sessionId)
+      : input.db.getAllTasks()
+  ).filter((t) => t.status === "running");
+
+  const recovered: Array<{
+    sessionId: string;
+    taskId: string;
+    from: TaskStatus;
+    to: TaskStatus;
+    reason: string;
+  }> = [];
+
+  for (const t of runningTasks) {
+    const subagentsDir = path.join(
+      projectRoot,
+      ".asd",
+      "sessions",
+      t.session_id,
+      "subagents"
+    );
+    let metaPath: string | null = null;
+    if (t.sub_session_id) {
+      const candidate = path.join(subagentsDir, t.sub_session_id, "meta.json");
+      if (fs.existsSync(candidate)) {
+        metaPath = candidate;
+      }
+    }
+    if (!metaPath && fs.existsSync(subagentsDir)) {
+      try {
+        let bestStarted = -1;
+        for (const entry of fs.readdirSync(subagentsDir, { withFileTypes: true })) {
+          if (!entry.isDirectory()) continue;
+          const p = path.join(subagentsDir, entry.name, "meta.json");
+          if (!fs.existsSync(p)) continue;
+          try {
+            const parsed = JSON.parse(fs.readFileSync(p, "utf8")) as Record<string, unknown>;
+            if (parsed.taskId === t.task_id) {
+              const s = typeof parsed.startedAt === "number" ? parsed.startedAt : 0;
+              if (s >= bestStarted) {
+                bestStarted = s;
+                metaPath = p;
+              }
+            }
+          } catch {
+            // ignore
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    let meta: Record<string, unknown> | null = null;
+    if (metaPath && fs.existsSync(metaPath)) {
+      try {
+        meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+      } catch {
+        meta = null;
+      }
+    }
+
+    const dispatchMode =
+      typeof meta?.dispatchMode === "string" ? meta.dispatchMode : undefined;
+
+    if (dispatchMode === "claim_only") {
+      continue;
+    }
+
+    const subPid = typeof meta?.pid === "number" ? meta.pid : undefined;
+    const ownerPid = typeof meta?.ownerPid === "number" ? meta.ownerPid : undefined;
+    const subAlive = subPid !== undefined && subPid > 0 ? isPidAlive(subPid) : false;
+    const ownerAlive =
+      ownerPid !== undefined && ownerPid > 0 ? isPidAlive(ownerPid) : false;
+
+    let shouldFail = false;
+    if (
+      dispatchMode === "parallel_spawn" ||
+      dispatchMode === "control_action" ||
+      dispatchMode === "debate"
+    ) {
+      if (!subAlive && !ownerAlive) {
+        shouldFail = true;
+      }
+    } else {
+      // Legacy or missing meta / dispatchMode: fail only if pid is dead and startedAt > 24h ago
+      const startedAt = typeof meta?.startedAt === "number" ? meta.startedAt : 0;
+      const twentyFourHoursMs = 24 * 60 * 60 * 1000;
+      if (!subAlive && now - startedAt > twentyFourHoursMs) {
+        shouldFail = true;
+      }
+    }
+
+    if (shouldFail) {
+      if (meta && metaPath) {
+        try {
+          meta.status = "failed";
+          meta.finishedAt = now;
+          fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n", "utf8");
+          const subId =
+            typeof meta.subSessionId === "string"
+              ? meta.subSessionId
+              : path.basename(path.dirname(metaPath));
+          finalizeSubagentArtifacts({
+            projectRoot,
+            sessionId: t.session_id,
+            subSessionId: subId,
+          });
+        } catch {
+          // ignore
+        }
+      }
+
+      input.db.updateTaskStatus(t.session_id, t.task_id, "failed");
+      input.db.incrementStateVersion(t.session_id);
+      recovered.push({
+        sessionId: t.session_id,
+        taskId: t.task_id,
+        from: "running",
+        to: "failed",
+        reason: "orphaned",
+      });
+    }
+  }
+
+  return recovered;
 }

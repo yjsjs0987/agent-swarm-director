@@ -701,6 +701,21 @@ export class SqliteDriver {
     });
   }
 
+  /**
+   * Atomically claims a single task if its status is 'pending', 'escalated', or 'failed'.
+   * Returns true if claimed by this caller, false if already running/done/verifying/etc.
+   */
+  tryClaimTask(sessionId: string, taskId: string): boolean {
+    return this.withImmediateTx(() => {
+      const res = this.db
+        .prepare(
+          "UPDATE tasks SET status = 'running' WHERE session_id = ? AND task_id = ? AND status IN ('pending', 'escalated', 'failed')"
+        )
+        .run(sessionId, taskId);
+      return Number(res.changes ?? 0) > 0;
+    });
+  }
+
   /** Claim all pending tasks of a wave: status -> 'running'; returns the claimed rows. */
   claimWaveTasks(sessionId: string, turn: number): TaskRow[] {
     return this.withImmediateTx(() => {

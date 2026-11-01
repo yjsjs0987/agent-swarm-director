@@ -941,6 +941,9 @@ export class AsdMcpServer {
           });
           continue;
         }
+        if (!this.db.tryClaimTask(sessionId, t.task_id)) {
+          continue;
+        }
 
         const preferredHarness =
           input.harness ??
@@ -995,6 +998,8 @@ export class AsdMcpServer {
             model: effectiveModel,
             taskId: t.task_id,
             pid: process.pid,
+            ownerPid: process.pid,
+            dispatchMode: "claim_only",
             worktreePath: wtPath ?? null,
             allowedFiles,
             status: "running",
@@ -1052,6 +1057,9 @@ export class AsdMcpServer {
           durationMs: 0,
           error: `Upstream dependencies not satisfied: ${upCtx.missingDeps.join(", ")}`,
         };
+      }
+      if (!this.db.tryClaimTask(sessionId, t.task_id)) {
+        return null;
       }
 
       // If mode was not explicitly forced to parallel_spawn, LIGHT tasks in a mixed turn
@@ -1204,6 +1212,8 @@ export class AsdMcpServer {
               allowedFiles,
               command: cmdInfo.command,
               args: cmdInfo.args,
+              dispatchMode: "parallel_spawn",
+              ownerPid: process.pid,
               commandRunner: this.commandRunner,
               timeoutMs: DEFAULT_DISPATCH_TIMEOUT_MS,
               idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
@@ -1357,7 +1367,8 @@ export class AsdMcpServer {
     });
 
     // Execute concurrently with Promise.all
-    const results = await Promise.all(spawnPromises);
+    const rawResults = await Promise.all(spawnPromises);
+    const results = rawResults.filter((r): r is NonNullable<typeof r> => r !== null);
 
     // Process Cross-Scope modification requests (max 2 auto-scheduled per task; excess deferred to Main Agent)
     const { autoCreatedTasks, deferredCrossScopeRequests } = this.processCrossScopeRequests(
