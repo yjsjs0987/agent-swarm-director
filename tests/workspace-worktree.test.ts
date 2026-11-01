@@ -35,6 +35,8 @@ import {
   rollbackLightChanges,
   createTaskWorktree,
   verifyAndMergeHeavyTask,
+  getWorktreeDiff,
+  approvePendingTask,
   cleanupWorktree,
   withMergeLock,
   AsyncMutex,
@@ -642,5 +644,194 @@ describe("Secret Scan False-Positive Guard (P0 Issue 6a)", () => {
     assert.equal(res.verified, true, `Should pass without false-positive secret rollback: ${res.error}`);
     assert.equal(res.rollbackPerformed, false);
     assert.ok(fs.existsSync(path.join(root, "src", "auth.ts")));
+  });
+});
+
+
+// ============================================================================
+// CR-08: Committed Worktree Diff & Boundary Inspection on Approve
+// ============================================================================
+
+describe("CR-08: Committed Worktree Diff & Merge Conflict Approval Boundary Check", () => {
+  test("1. merge_conflict worktree returns mode:'committed' with non-empty diff, and approvePendingTask succeeds after resolving conflict in worktree", async () => {
+    const repoDir = makeTmpDir("asd-cr08-"); initGitRepo(repoDir); prepareBaseline(repoDir);
+    try {
+      const sharedPath = path.join(repoDir, "src", "shared.ts");
+      fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+      fs.writeFileSync(sharedPath, "export const v = 0;\n", "utf8");
+      fs.writeFileSync(path.join(repoDir, "src", "main-only.ts"), "export const m = 1;\n", "utf8");
+      runGit(["add", "-A"], { cwd: repoDir });
+      runGit(["commit", "-m", "initial shared"], { cwd: repoDir });
+
+      const db = new SqliteDriver(path.join(repoDir, ".asd", "core.db"));
+      try {
+        const sid = "asd-20261101-131500-cr08";
+        db.createOrGetSession({
+          sessionId: sid,
+          projectRoot: repoDir,
+          mainHarness: "claude-code",
+        });
+        db.upsertTasks(sid, [
+          {
+            taskId: "T1.1",
+            turn: 1,
+            title: "Update shared.ts",
+            track: "HEAVY",
+            targetFiles: ["src/shared.ts"],
+          },
+        ]);
+
+        const wt = createTaskWorktree(repoDir, 1, "T1.1");
+        db.updateTaskStatus(sid, "T1.1", "running", { worktreePath: wt.wtPath });
+
+        // Advance main branch on both shared.ts (conflict) and main-only.ts (unrelated main change)
+        fs.writeFileSync(sharedPath, "export const v = 100; // main change\n", "utf8");
+        fs.writeFileSync(path.join(repoDir, "src", "main-only.ts"), "export const m = 2;\n", "utf8");
+        runGit(["add", "-A"], { cwd: repoDir });
+        runGit(["commit", "-m", "main advances"], { cwd: repoDir });
+
+        // Modify shared.ts in worktree
+        fs.writeFileSync(
+          path.join(wt.wtPath, "src", "shared.ts"),
+          "export const v = 200; // wt change\n",
+          "utf8"
+        );
+
+        const mergeRes = await verifyAndMergeHeavyTask({
+          projectRoot: repoDir,
+          turn: 1,
+          taskId: "T1.1",
+          title: "Update shared.ts",
+          wtPath: wt.wtPath,
+          branchName: wt.branchName,
+          allowedFiles: ["src/shared.ts"],
+          verifyCmd: "node -e \"process.exit(0)\"",
+          sessionId: sid,
+          db,
+        });
+
+        assert.equal(mergeRes.verified, false);
+        assert.equal(mergeRes.status, "merge_conflict");
+        assert.equal(db.getTask(sid, "T1.1")!.status, "merge_conflict");
+
+        // CR-08.1: getWorktreeDiff on committed merge_conflict worktree returns mode='committed' and non-empty diff
+        const diffSnap = getWorktreeDiff(repoDir, { wtPath: wt.wtPath, turn: 1, taskId: "T1.1" });
+        assert.equal(diffSnap.exists, true);
+        assert.equal(diffSnap.mode, "committed");
+        assert.ok(diffSnap.baseRef);
+        assert.ok(diffSnap.changedFiles.includes("src/shared.ts"));
+        assert.ok(diffSnap.diff.includes("export const v = 200"));
+
+        // CR-08.2: Resolve conflict in worktree by merging main and committing
+        const mainSha = runGit(["rev-parse", "HEAD"], { cwd: repoDir }).stdout.trim(); runGit(["merge", mainSha], { cwd: wt.wtPath });
+        fs.writeFileSync(
+          path.join(wt.wtPath, "src", "shared.ts"),
+          "export const v = 300; // resolved\n",
+          "utf8"
+        );
+        runGit(["add", "src/shared.ts"], { cwd: wt.wtPath });
+        runGit(["commit", "-m", "resolve conflict", "--no-verify"], { cwd: wt.wtPath });
+
+        // Approve pending task -> should pass boundary check (ignoring src/main-only.ts from main) and merge into main
+        const approveRes = await approvePendingTask({
+          projectRoot: repoDir,
+          sessionId: sid,
+          taskId: "T1.1",
+          db,
+        });
+        assert.equal(approveRes.ok, true, approveRes.error);
+        assert.equal(approveRes.status, "done");
+        assert.equal(db.getTask(sid, "T1.1")!.status, "done");
+        assert.match(fs.readFileSync(sharedPath, "utf8"), /300/);
+      } finally {
+        db.close();
+      }
+    } finally {
+      // cleaned up via tmpDirs
+    }
+  });
+
+  test("2. modifying and committing an out-of-scope file during conflict resolution fails boundary check on approvePendingTask", async () => {
+    const repoDir = makeTmpDir("asd-cr08-"); initGitRepo(repoDir); prepareBaseline(repoDir);
+    try {
+      const sharedPath = path.join(repoDir, "src", "shared.ts");
+      const forbiddenPath = path.join(repoDir, "src", "forbidden.ts");
+      fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+      fs.writeFileSync(sharedPath, "export const v = 0;\n", "utf8");
+      fs.writeFileSync(forbiddenPath, "export const secret = 1;\n", "utf8");
+      runGit(["add", "-A"], { cwd: repoDir });
+      runGit(["commit", "-m", "initial"], { cwd: repoDir });
+
+      const db = new SqliteDriver(path.join(repoDir, ".asd", "core.db"));
+      try {
+        const sid = "asd-20261101-131501-cr08";
+        db.createOrGetSession({
+          sessionId: sid,
+          projectRoot: repoDir,
+          mainHarness: "claude-code",
+        });
+        db.upsertTasks(sid, [
+          {
+            taskId: "T1.1",
+            turn: 1,
+            title: "Update shared.ts only",
+            track: "HEAVY",
+            targetFiles: ["src/shared.ts"],
+            verifyCmd: "node -e \"process.exit(0)\"",
+          },
+        ]);
+
+        const wt = createTaskWorktree(repoDir, 1, "T1.1");
+        db.updateTaskStatus(sid, "T1.1", "running", { worktreePath: wt.wtPath });
+
+        // Cause conflict on main
+        fs.writeFileSync(sharedPath, "export const v = 10;\n", "utf8");
+        runGit(["add", "-A"], { cwd: repoDir });
+        runGit(["commit", "-m", "main edit"], { cwd: repoDir });
+
+        // Edit in worktree
+        fs.writeFileSync(path.join(wt.wtPath, "src", "shared.ts"), "export const v = 20;\n", "utf8");
+        const mergeRes = await verifyAndMergeHeavyTask({
+          projectRoot: repoDir,
+          turn: 1,
+          taskId: "T1.1",
+          title: "Update shared.ts only",
+          wtPath: wt.wtPath,
+          branchName: wt.branchName,
+          allowedFiles: ["src/shared.ts"],
+          verifyCmd: "node -e \"process.exit(0)\"",
+          sessionId: sid,
+          db,
+        });
+        assert.equal(mergeRes.status, "merge_conflict");
+
+        // During conflict resolution, user also modifies and commits out-of-scope src/forbidden.ts
+        const mainSha = runGit(["rev-parse", "HEAD"], { cwd: repoDir }).stdout.trim(); runGit(["merge", mainSha], { cwd: wt.wtPath });
+        fs.writeFileSync(path.join(wt.wtPath, "src", "shared.ts"), "export const v = 30;\n", "utf8");
+        fs.writeFileSync(
+          path.join(wt.wtPath, "src", "forbidden.ts"),
+          "export const secret = 999; // unauthorized\n",
+          "utf8"
+        );
+        runGit(["add", "-A"], { cwd: wt.wtPath });
+        runGit(["commit", "-m", "resolve with unauthorized file", "--no-verify"], {
+          cwd: wt.wtPath,
+        });
+
+        const approveRes = await approvePendingTask({
+          projectRoot: repoDir,
+          sessionId: sid,
+          taskId: "T1.1",
+          db,
+        });
+        assert.equal(approveRes.ok, false);
+        assert.equal(approveRes.status, "failed");
+        assert.equal(db.getTask(sid, "T1.1")!.status, "failed");
+      } finally {
+        db.close();
+      }
+    } finally {
+      // cleaned up via tmpDirs
+    }
   });
 });
