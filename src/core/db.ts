@@ -134,6 +134,7 @@ export interface TaskRow {
   commit_sha: string | null;
   duration_ms: number | null;
   is_cross_scope?: number;
+  follow_up_of?: string | null;
   thinking_effort?: string | null;
 }
 
@@ -151,6 +152,7 @@ export interface TaskInput {
   acceptance?: string | null;
   verifyCmd?: string | null;
   isCrossScope?: boolean;
+  followUpOf?: string | null;
 }
 
 export interface TaskStatusExtra {
@@ -278,7 +280,7 @@ export function generateDriverId(nowMs = Date.now()): string {
   return `drv-${nowMs.toString(36)}-${rand}`;
 }
 
-const TASK_COLUMNS = `task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, assigned_harness, assigned_model, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, done_claim_json, worktree_path, sub_session_id, commit_sha, duration_ms, is_cross_scope`;
+const TASK_COLUMNS = `task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, assigned_harness, assigned_model, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, done_claim_json, worktree_path, sub_session_id, commit_sha, duration_ms, is_cross_scope, follow_up_of`;
 
 // ============================================================================
 // SqliteDriver
@@ -323,6 +325,11 @@ export class SqliteDriver {
       if (!taskCols.some((c) => c.name === "is_cross_scope")) {
         this.db.exec(
           "ALTER TABLE tasks ADD COLUMN is_cross_scope INTEGER NOT NULL DEFAULT 0"
+        );
+      }
+      if (!taskCols.some((c) => c.name === "follow_up_of")) {
+        this.db.exec(
+          "ALTER TABLE tasks ADD COLUMN follow_up_of TEXT DEFAULT NULL"
         );
       }
       // CR-01: Idempotent migration for existing sessions without any session_drivers rows
@@ -614,8 +621,8 @@ export class SqliteDriver {
   upsertTasks(sessionId: string, tasks: TaskInput[]): void {
     this.withImmediateTx(() => {
       const stmt = this.db.prepare(
-        `INSERT INTO tasks (task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, is_cross_scope)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO tasks (task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, is_cross_scope, follow_up_of)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id, task_id) DO UPDATE SET
            turn = excluded.turn,
            title = excluded.title,
@@ -628,7 +635,8 @@ export class SqliteDriver {
            context_hint = excluded.context_hint,
            acceptance = excluded.acceptance,
            verify_cmd = excluded.verify_cmd,
-           is_cross_scope = MAX(tasks.is_cross_scope, excluded.is_cross_scope)`
+           is_cross_scope = MAX(tasks.is_cross_scope, excluded.is_cross_scope),
+           follow_up_of = COALESCE(excluded.follow_up_of, tasks.follow_up_of)`
       );
       for (const t of tasks) {
         stmt.run(
@@ -645,7 +653,8 @@ export class SqliteDriver {
           t.contextHint ?? null,
           t.acceptance ?? null,
           t.verifyCmd ?? null,
-          t.isCrossScope ? 1 : 0
+          t.isCrossScope ? 1 : 0,
+          t.followUpOf ?? null
         );
       }
     });

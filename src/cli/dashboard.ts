@@ -43,7 +43,12 @@ import {
   parseReviewerOpening,
   synthesizeInsightVerdict,
 } from "../core/debate.ts";
-import { atomicWriteFileSync } from "../core/render.ts";
+import { atomicWriteFileSync, renderPlanMd } from "../core/render.ts";
+import {
+  createTaskWorktree,
+  verifyAndCommitLightTask,
+  verifyAndMergeHeavyTask,
+} from "../core/workspace.ts";
 import {
   inferModelFamily,
   normalizeAgentRole,
@@ -62,8 +67,10 @@ import { buildPromptForTask } from "../mcp/server.ts";
 import {
   type AgentRole,
   ASD_VERSION,
+  type DifficultyTier,
   type HarnessId,
   type RoutingConfig,
+  type TaskTrack,
 } from "../core/types.ts";
 import { scanSubagentLogs, type SubagentLogRecord } from "./index.ts";
 import {
@@ -614,6 +621,8 @@ export async function runSubagentControlAction(options: {
   sessionId: string;
   subSessionId: string;
   newSubSessionId?: string;
+  taskId?: string;
+  followUpTaskId?: string;
   harness?: string;
   model?: string;
   status: string;
@@ -664,13 +673,24 @@ export async function runSubagentControlAction(options: {
       action: "kill",
       sessionId: target.sessionId,
       subSessionId: target.subSessionId,
+      taskId: target.taskId,
       harness: target.harness,
       model: target.model,
       status: "failed",
     };
   }
 
-  // 2. Determine target harness & model for retry / fallback / custom
+  // CR-13: Validate resume preconditions immediately
+  if (options.action === "resume") {
+    if (!target.harnessSessionId || !target.harnessSessionId.trim()) {
+      throw new Error("NO_HARNESS_SESSION");
+    }
+    if (options.harness && options.harness !== target.harness) {
+      throw new Error("RESUME_HARNESS_MISMATCH");
+    }
+  }
+
+  // 2. Determine target harness & model for retry / fallback / custom / resume
   const routingCfg = loadRoutingConfig(projectRoot, options.homeDir);
   const normRole = normalizeAgentRole(target.role) ?? "worker";
   const roleRoute = routingCfg.agents[normRole];
@@ -735,12 +755,14 @@ export async function runSubagentControlAction(options: {
         : roleRoute?.harness === nextHarness
           ? roleRoute.model
           : "";
+  } else if (options.action === "resume") {
+    suffix = `resume-${Date.now().toString(36).slice(-4)}`;
+    if (options.model && options.model.trim()) {
+      nextModel = options.model.trim();
+    }
   }
 
   const baseSubId = target.subSessionId.replace(/-(?:retry|fb|custom|resume)-[a-z0-9]+$/i, "");
-  if (options.action === "resume") {
-    suffix = `resume-${Date.now().toString(36).slice(-4)}`;
-  }
   const newSubSessionId = `${baseSubId}-${suffix}`;
   let reconstructedPrompt = "";
   if (!(options.prompt && options.prompt.trim()) && !target.prompt) {
@@ -808,6 +830,138 @@ export async function runSubagentControlAction(options: {
   if (!promptText) {
     throw new Error("Missing prompt: prompt.md was purged and task/debate record was not found in DB");
   }
+
+  const debMatch = target.subSessionId.match(/-deb-(D-[A-Za-z0-9-]+)-/);
+  let effectiveTaskId = target.taskId || debMatch?.[1] || normRole;
+  let followUpTaskId: string | undefined;
+  let execWorktreePath: string | null = target.worktreePath ?? null;
+  let effectiveAllowedFiles: string[] = target.allowedFiles ?? [];
+  let origTaskStatus: string | undefined;
+  let hasDbTask = false;
+
+  // CR-13: State-dependent task setup when action === "resume"
+  if (options.action === "resume" && target.taskId) {
+    const paths = resolveAsdPaths(projectRoot, options.homeDir);
+    const coreDbFallback = path.join(projectRoot, ".asd", "core.db");
+    if (fs.existsSync(paths.dbPath) || fs.existsSync(coreDbFallback)) {
+      const db = fs.existsSync(paths.dbPath)
+        ? openProjectDb(projectRoot, options.homeDir)
+        : new SqliteDriver(coreDbFallback);
+      try {
+        const taskRow = db.getTask(target.sessionId, target.taskId);
+        if (taskRow) {
+          hasDbTask = true;
+          origTaskStatus = taskRow.status;
+          if (taskRow.status === "running") {
+            throw new Error("TASK_RUNNING");
+          }
+
+          let parsedTargetFiles: string[] = [];
+          try {
+            parsedTargetFiles = JSON.parse(taskRow.target_files_json || "[]");
+          } catch {
+            parsedTargetFiles = [];
+          }
+          effectiveAllowedFiles = [...parsedTargetFiles];
+          if (
+            effectiveAllowedFiles.length > 0 &&
+            !effectiveAllowedFiles.includes("tests/**")
+          ) {
+            effectiveAllowedFiles.push("tests/**", "**/*.test.ts", "**/*.spec.ts");
+          }
+
+          if (taskRow.status === "done") {
+            const allTasks = db.getSessionTasks(target.sessionId);
+            let maxN = 0;
+            for (const t of allTasks) {
+              if (t.turn !== taskRow.turn) continue;
+              const m = t.task_id.match(/^T\d+\.(\d+)$/i);
+              if (m) {
+                const n = Number.parseInt(m[1]!, 10);
+                if (n > maxN) maxN = n;
+              }
+            }
+            followUpTaskId = `T${taskRow.turn}.${maxN + 1}`;
+            effectiveTaskId = followUpTaskId;
+            const cleanHead = promptText.replace(/\r?\n+/g, " ").trim().slice(0, 50);
+            const followUpTitle = `[Follow-up of ${taskRow.task_id}] ${cleanHead}`;
+
+            db.upsertTasks(target.sessionId, [
+              {
+                taskId: followUpTaskId,
+                turn: taskRow.turn,
+                title: followUpTitle,
+                track: taskRow.track as TaskTrack,
+                role: taskRow.role as AgentRole,
+                category: taskRow.category,
+                difficulty: taskRow.difficulty as DifficultyTier,
+                dependsOn: [taskRow.task_id],
+                targetFiles: parsedTargetFiles,
+                contextHint: taskRow.context_hint,
+                acceptance: taskRow.acceptance,
+                verifyCmd: taskRow.verify_cmd,
+                followUpOf: taskRow.task_id,
+              },
+            ]);
+
+            if (taskRow.track === "HEAVY") {
+              const wt = createTaskWorktree(projectRoot, taskRow.turn, followUpTaskId);
+              execWorktreePath = wt.wtPath;
+            } else {
+              execWorktreePath = null;
+            }
+
+            db.updateTaskStatus(target.sessionId, followUpTaskId, "running", {
+              assignedHarness: nextHarness,
+              assignedModel: nextModel,
+              worktreePath: execWorktreePath ?? undefined,
+              subSessionId: newSubSessionId,
+            });
+
+            const sess = db.getSession(target.sessionId);
+            if (sess) {
+              renderPlanMd(sess, db.getSessionTasks(target.sessionId));
+            }
+          } else if (
+            taskRow.status === "merge_conflict" ||
+            taskRow.status === "verifying"
+          ) {
+            const candidateWt =
+              taskRow.worktree_path ||
+              (taskRow.track === "HEAVY"
+                ? path.join(projectRoot, ".asd", "wt", `${taskRow.turn}-${taskRow.task_id}`)
+                : null);
+            execWorktreePath =
+              candidateWt && fs.existsSync(candidateWt) ? candidateWt : null;
+            db.updateTaskStatus(target.sessionId, taskRow.task_id, "running", {
+              subSessionId: newSubSessionId,
+              worktreePath: execWorktreePath ?? undefined,
+            });
+          } else {
+            const existingWt =
+              taskRow.worktree_path && fs.existsSync(taskRow.worktree_path)
+                ? taskRow.worktree_path
+                : null;
+            if (existingWt) {
+              execWorktreePath = existingWt;
+            } else if (taskRow.track === "HEAVY") {
+              const wt = createTaskWorktree(projectRoot, taskRow.turn, taskRow.task_id);
+              execWorktreePath = wt.wtPath;
+            } else {
+              execWorktreePath = null;
+            }
+            db.updateTaskStatus(target.sessionId, taskRow.task_id, "running", {
+              subSessionId: newSubSessionId,
+              worktreePath: execWorktreePath ?? undefined,
+            });
+          }
+        }
+      } finally {
+        db.close();
+      }
+    }
+  }
+
   const cmdInfo =
     options.action === "resume" && target.harnessSessionId
       ? buildResumeHarnessCommand(
@@ -818,9 +972,6 @@ export async function runSubagentControlAction(options: {
         )
       : buildDefaultHarnessCommand(nextHarness, promptText, nextModel);
 
-  const debMatch = target.subSessionId.match(/-deb-(D-[A-Za-z0-9-]+)-/);
-  const effectiveTaskId = target.taskId || debMatch?.[1] || normRole;
-
   const runPromise = spawnSubagent({
     projectRoot,
     homeDir: options.homeDir,
@@ -829,13 +980,14 @@ export async function runSubagentControlAction(options: {
     role: normRole as AgentRole,
     harness: nextHarness,
     model: nextModel || "default",
+    harnessSessionId: target.harnessSessionId ?? null,
     taskId: effectiveTaskId,
     prompt: promptText,
-    allowedFiles: target.allowedFiles ?? [],
-    worktreePath: target.worktreePath ?? null,
+    allowedFiles: effectiveAllowedFiles,
+    worktreePath: execWorktreePath,
     cwd:
-      target.worktreePath && fs.existsSync(target.worktreePath)
-        ? target.worktreePath
+      execWorktreePath && fs.existsSync(execWorktreePath)
+        ? execWorktreePath
         : projectRoot,
     command: cmdInfo.command,
     args: cmdInfo.args,
@@ -844,50 +996,164 @@ export async function runSubagentControlAction(options: {
     commandRunner: options.commandRunner,
     timeoutMs: DEFAULT_DEBATE_TIMEOUT_MS,
     idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
-  }).then((res) => {
-    try {
-      const outPath = path.join(path.dirname(res.metaPath), "output.log");
-      const rawOut = fs.existsSync(outPath) ? fs.readFileSync(outPath, "utf8") : "";
-      if (res.exitCode === 0 && rawOut) {
-        tryRefreshDebateVerdictFromLog(
-          projectRoot,
-          options.homeDir,
-          target.sessionId,
-          effectiveTaskId,
-          newSubSessionId,
-          normRole,
-          nextHarness,
-          nextModel || "default",
-          rawOut
-        );
+  }).then(async (res) => {
+    let finalTaskStatus: string = res.exitCode === 0 ? "done" : "failed";
+
+    if (options.action === "resume" && hasDbTask) {
+      const paths = resolveAsdPaths(projectRoot, options.homeDir);
+      const coreDbFallback = path.join(projectRoot, ".asd", "core.db");
+      const db = fs.existsSync(paths.dbPath)
+        ? openProjectDb(projectRoot, options.homeDir)
+        : new SqliteDriver(coreDbFallback);
+      try {
+        const sess = db.getSession(target.sessionId);
+        const execTask = db.getTask(target.sessionId, effectiveTaskId);
+        const autoApprove = sess ? sess.auto_approve !== 0 : true;
+
+        if (execTask) {
+          if (res.exitCode !== 0) {
+            if (origTaskStatus === "failed" || origTaskStatus === "escalated") {
+              const bumped = db.recordTaskAttemptFailure(
+                target.sessionId,
+                execTask.task_id
+              );
+              finalTaskStatus = bumped.status;
+            } else {
+              db.updateTaskStatus(target.sessionId, execTask.task_id, "failed");
+              finalTaskStatus = "failed";
+            }
+          } else if (execTask.track === "HEAVY") {
+            const vRes = await verifyAndMergeHeavyTask({
+              projectRoot,
+              turn: execTask.turn,
+              taskId: execTask.task_id,
+              title: execTask.title,
+              wtPath: execWorktreePath ?? undefined,
+              allowedFiles: effectiveAllowedFiles,
+              verifyCmd: execTask.verify_cmd,
+              sessionId: target.sessionId,
+              db,
+              autoApprove,
+            });
+            finalTaskStatus = vRes.status;
+            if (vRes.verified && vRes.status === "done") {
+              db.recordTaskVerified(
+                target.sessionId,
+                execTask.task_id,
+                vRes.commitSha || "",
+                {
+                  summary: `Resumed and verified task ${execTask.task_id}: ${execTask.title}`,
+                  changed_files: vRes.changedFiles ?? effectiveAllowedFiles,
+                  key_decisions: ["Verified via subagent resume"],
+                  risks: [],
+                },
+                res.durationMs
+              );
+            } else if (
+              !vRes.verified &&
+              (origTaskStatus === "failed" || origTaskStatus === "escalated")
+            ) {
+              const bumped = db.recordTaskAttemptFailure(
+                target.sessionId,
+                execTask.task_id
+              );
+              finalTaskStatus = bumped.status;
+            }
+          } else {
+            const vRes = verifyAndCommitLightTask({
+              projectRoot,
+              taskId: execTask.task_id,
+              title: execTask.title,
+              allowedFiles: effectiveAllowedFiles,
+              verifyCmd: execTask.verify_cmd,
+              sessionId: target.sessionId,
+              db,
+              autoApprove,
+            });
+            finalTaskStatus = vRes.status ?? (vRes.verified ? "done" : "failed");
+            if (vRes.verified && finalTaskStatus === "done") {
+              db.recordTaskVerified(
+                target.sessionId,
+                execTask.task_id,
+                vRes.commitSha || "",
+                {
+                  summary: `Resumed and verified task ${execTask.task_id}: ${execTask.title}`,
+                  changed_files: vRes.changedFiles ?? effectiveAllowedFiles,
+                  key_decisions: ["Verified via subagent resume"],
+                  risks: [],
+                },
+                res.durationMs
+              );
+            } else if (
+              !vRes.verified &&
+              (origTaskStatus === "failed" || origTaskStatus === "escalated")
+            ) {
+              const bumped = db.recordTaskAttemptFailure(
+                target.sessionId,
+                execTask.task_id
+              );
+              finalTaskStatus = bumped.status;
+            }
+          }
+
+          if (sess) {
+            renderPlanMd(sess, db.getSessionTasks(target.sessionId));
+          }
+        }
+      } finally {
+        db.close();
       }
-    } catch {
-      // Ignore post-processing errors
+    } else {
+      try {
+        const outPath = path.join(path.dirname(res.metaPath), "output.log");
+        const rawOut = fs.existsSync(outPath) ? fs.readFileSync(outPath, "utf8") : "";
+        if (res.exitCode === 0 && rawOut) {
+          tryRefreshDebateVerdictFromLog(
+            projectRoot,
+            options.homeDir,
+            target.sessionId,
+            effectiveTaskId,
+            newSubSessionId,
+            normRole,
+            nextHarness,
+            nextModel || "default",
+            rawOut
+          );
+        }
+      } catch {
+        // Ignore post-processing errors
+      }
     }
-    finalizeSubagentArtifacts({
-      projectRoot,
-      sessionId: target.sessionId,
-      subSessionId: newSubSessionId,
-    });
-    finalizeSubagentArtifacts({
-      projectRoot,
-      sessionId: target.sessionId,
-      subSessionId: target.subSessionId,
-    });
-    return res;
+
+    if (finalTaskStatus === "done" || finalTaskStatus === "failed") {
+      finalizeSubagentArtifacts({
+        projectRoot,
+        sessionId: target.sessionId,
+        subSessionId: newSubSessionId,
+      });
+      finalizeSubagentArtifacts({
+        projectRoot,
+        sessionId: target.sessionId,
+        subSessionId: target.subSessionId,
+      });
+    }
+
+    return { ...res, finalTaskStatus };
   });
 
   if (options.waitForCompletion || options.commandRunner) {
     const completed = await runPromise;
     return {
-      ok: completed.exitCode === 0,
+      ok: completed.finalTaskStatus === "done" || completed.finalTaskStatus === "verifying",
       action: options.action,
       sessionId: options.sessionId || target.sessionId,
       subSessionId: target.subSessionId,
       newSubSessionId,
+      taskId: effectiveTaskId,
+      ...(followUpTaskId ? { followUpTaskId } : {}),
       harness: nextHarness,
       model: nextModel || "default",
-      status: completed.exitCode === 0 ? "done" : "failed",
+      status: completed.finalTaskStatus,
     };
   }
 
@@ -900,6 +1166,8 @@ export async function runSubagentControlAction(options: {
     sessionId: options.sessionId || target.sessionId,
     subSessionId: target.subSessionId,
     newSubSessionId,
+    taskId: effectiveTaskId,
+    ...(followUpTaskId ? { followUpTaskId } : {}),
     harness: nextHarness,
     model: nextModel || "default",
     status: "running",

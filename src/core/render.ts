@@ -53,6 +53,7 @@ export interface ParsedPlanTask {
   contextHint: string | null;
   acceptance: string | null;
   dependsOn: string[];
+  followUpOf?: string | null;
 }
 
 // ============================================================================
@@ -228,6 +229,12 @@ export function renderPlanMd(
       if (deps.length > 0) {
         lines.push(`  - DependsOn: ${deps.join(", ")}`);
       }
+
+      const followUpOf =
+        ("followUpOf" in t ? t.followUpOf : (t as TaskRow).follow_up_of) ?? null;
+      if (followUpOf && followUpOf.trim().length > 0) {
+        lines.push(`  - FollowUpOf: ${followUpOf.trim()}`);
+      }
     }
     lines.push("");
   }
@@ -293,6 +300,13 @@ export function parsePlanMd(markdownText: string): ParsedPlanTask[] {
           .map((s) => s.trim())
           .filter(Boolean);
         currentTask.dependsOn = deps;
+        continue;
+      }
+      const followUpMatch = line.match(
+        /^\s{2,}-\s*FollowUpOf:\s*(.*)$/i
+      );
+      if (followUpMatch) {
+        currentTask.followUpOf = followUpMatch[1]!.trim() || null;
         continue;
       }
     }
@@ -381,6 +395,7 @@ export function parsePlanMd(markdownText: string): ParsedPlanTask[] {
         status = "failed";
       }
 
+      const titleFollowUpMatch = title.match(/^\[Follow-up of ([A-Za-z0-9_.-]+)\]/i);
       currentTask = {
         taskId,
         turn,
@@ -394,6 +409,7 @@ export function parsePlanMd(markdownText: string): ParsedPlanTask[] {
         contextHint,
         acceptance: null,
         dependsOn: [],
+        followUpOf: titleFollowUpMatch ? titleFollowUpMatch[1]! : null,
       };
       tasks.push(currentTask);
       continue;
@@ -582,6 +598,7 @@ export function syncPlanFromMd(
         contextHint: parsed.contextHint,
         acceptance: parsed.acceptance ?? existing?.acceptance ?? null,
         verifyCmd: existing?.verify_cmd ?? null,
+        followUpOf: parsed.followUpOf ?? existing?.follow_up_of ?? null,
       };
 
       db.upsertTasks(sessionId, [taskInput]);
