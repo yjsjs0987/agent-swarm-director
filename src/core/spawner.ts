@@ -24,7 +24,7 @@ import {
   extractHarnessSessionIdFromOutput,
   isValidAsdSessionId,
 } from "./session-tracker.ts";
-import type { AgentRole, HarnessId, SubagentSessionMeta } from "./types.ts";
+import type { AgentRole, HarnessId, SubagentDispatchMode, SubagentSessionMeta } from "./types.ts";
 
 // ============================================================================
 // CommandRunner contract (mockable for deterministic tests)
@@ -72,6 +72,8 @@ export interface SpawnSubagentOptions {
   idleTimeoutMs?: number;
   cwd?: string;
   commandRunner?: CommandRunner;
+  dispatchMode?: SubagentDispatchMode;
+  ownerPid?: number;
 }
 
 export const DEFAULT_DISPATCH_TIMEOUT_MS =
@@ -322,6 +324,8 @@ export function spawnSubagent(
     harnessSessionId: detectedHarnessSessionId,
     taskId: options.taskId,
     pid: 0,
+    ownerPid: options.ownerPid ?? process.pid,
+    dispatchMode: options.dispatchMode ?? "parallel_spawn",
     worktreePath: options.worktreePath ?? null,
     allowedFiles: options.allowedFiles,
     status: "running",
@@ -365,6 +369,7 @@ export function spawnSubagent(
       meta = {
         ...meta,
         pid,
+        exitCode,
         harnessSessionId: detectedHarnessSessionId,
         status,
         startedAt,

@@ -130,6 +130,12 @@ export interface MainSessionMeta {
   memo?: string;
 }
 
+export type SubagentDispatchMode =
+  | "parallel_spawn"
+  | "claim_only"
+  | "control_action"
+  | "debate";
+
 export interface SubagentSessionMeta {
   subSessionId: string;
   parentSessionId: string;
@@ -140,6 +146,9 @@ export interface SubagentSessionMeta {
   harnessSessionId?: string | null;
   taskId: string;
   pid: number;
+  ownerPid?: number;
+  dispatchMode?: SubagentDispatchMode;
+  exitCode?: number;
   worktreePath: string | null;
   allowedFiles: string[];
   status: "running" | "done" | "failed";

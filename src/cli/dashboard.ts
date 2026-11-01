@@ -839,6 +839,8 @@ export async function runSubagentControlAction(options: {
         : projectRoot,
     command: cmdInfo.command,
     args: cmdInfo.args,
+    dispatchMode: "control_action",
+    ownerPid: process.pid,
     commandRunner: options.commandRunner,
     timeoutMs: DEFAULT_DEBATE_TIMEOUT_MS,
     idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
