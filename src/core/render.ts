@@ -101,10 +101,34 @@ export function atomicWriteFileSync(filePath: string, content: string): void {
  *
  * Writes atomically via temp file + fs.renameSync.
  */
+/**
+ * Reads the foreground session ID from .asd/PLAN.md ('Session: <id>' header).
+ * Returns null if PLAN.md does not exist or has no Session header.
+ */
+export function getForegroundSessionId(
+  projectRoot: string,
+  planMdPath?: string
+): string | null {
+  const targetPath = planMdPath ?? resolveAsdPaths(projectRoot).planMdPath;
+  if (!fs.existsSync(targetPath)) {
+    return null;
+  }
+  try {
+    const raw = fs.readFileSync(targetPath, "utf8");
+    const m = raw.match(/^Session:\s*(.+)$/m);
+    if (!m) return null;
+    const id = m[1]!.trim();
+    return id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 export function renderPlanMd(
   session: SessionRow | { project_root: string; session_id?: string },
   tasks: Array<TaskRow | TaskInput>,
-  planMdPath?: string
+  planMdPath?: string,
+  options?: { force?: boolean }
 ): string {
   const lines: string[] = ["# ASD PLAN", ""];
   if (session.session_id) {
@@ -211,6 +235,13 @@ export function renderPlanMd(
   const content = lines.join("\n").trimEnd() + "\n";
   const targetPath =
     planMdPath ?? resolveAsdPaths(session.project_root).planMdPath;
+
+  if (!options?.force && session.session_id) {
+    const fgId = getForegroundSessionId(session.project_root, targetPath);
+    if (fgId && fgId !== session.session_id) {
+      return content;
+    }
+  }
 
   atomicWriteFileSync(targetPath, content);
   return content;
@@ -503,6 +534,17 @@ export function syncPlanFromMd(
   }
 
   const content = fs.readFileSync(planMdPath, "utf8");
+  const sessionHeaderMatch = content.match(/^Session:\s*(.+)$/m);
+  const headerSessionId = sessionHeaderMatch ? sessionHeaderMatch[1]!.trim() : null;
+  if (headerSessionId) {
+    if (headerSessionId !== sessionId) {
+      throw new Error("PLAN_SESSION_MISMATCH");
+    }
+  } else {
+    console.warn(
+      `[ASD] PLAN.md at ${planMdPath} has no 'Session:' header; syncing into ${sessionId}.`
+    );
+  }
   const parsedTasks = parsePlanMd(content);
 
   db.withImmediateTx(() => {
@@ -573,6 +615,40 @@ export function syncPlanFromMd(
   });
 
   return parsedTasks;
+}
+
+/**
+ * Switches the foreground session owning .asd/PLAN.md.
+ * Syncs any pending manual edits in PLAN.md to the previous foreground session
+ * before rendering the new foreground session with { force: true }.
+ */
+export function setForegroundSession(input: {
+  db: SqliteDriver;
+  projectRoot: string;
+  sessionId: string;
+  planMdPath?: string;
+}): { previous: string | null } {
+  const targetPath =
+    input.planMdPath ?? resolveAsdPaths(input.projectRoot).planMdPath;
+  const targetSession = input.db.getSession(input.sessionId);
+  if (!targetSession) {
+    throw new Error(`Session not found: ${input.sessionId}`);
+  }
+
+  const previous = getForegroundSessionId(input.projectRoot, targetPath);
+  if (
+    previous &&
+    previous !== input.sessionId &&
+    fs.existsSync(targetPath) &&
+    input.db.getSession(previous)
+  ) {
+    syncPlanFromMd(input.db, previous, targetPath);
+  }
+
+  const freshTarget = input.db.getSession(input.sessionId)!;
+  const tasks = input.db.getSessionTasks(input.sessionId);
+  renderPlanMd(freshTarget, tasks, targetPath, { force: true });
+  return { previous };
 }
 
 // ============================================================================

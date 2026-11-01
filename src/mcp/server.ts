@@ -46,6 +46,7 @@ import { buildDefaultHarnessCommand, runDebateBroker } from "../core/debate.ts";
 import { checkProtectedPath, isPathAllowed } from "../core/policy.ts";
 import {
   atomicWriteFileSync,
+  getForegroundSessionId,
   renderPlanMd,
   renderProgressBoard,
   renderSessionSummaryMd,
@@ -786,8 +787,22 @@ export class AsdMcpServer {
     sessionRow = this.db.getSession(sessionId) ?? sessionRow;
     const taskRows = this.db.getSessionTasks(sessionId);
 
-    // Renders .asd/PLAN.md
-    renderPlanMd(sessionRow, taskRows, paths.planMdPath);
+    // Renders .asd/PLAN.md (only take foreground on create if no active non-done foreground session exists)
+    const existingFgId = getForegroundSessionId(this.projectRoot, paths.planMdPath);
+    let forceForeground = false;
+    if (action === "create") {
+      if (!existingFgId || existingFgId === sessionId) {
+        forceForeground = true;
+      } else {
+        const existingFgSession = this.db.getSession(existingFgId);
+        if (!existingFgSession || existingFgSession.phase === "done") {
+          forceForeground = true;
+        }
+      }
+    }
+    renderPlanMd(sessionRow, taskRows, paths.planMdPath, { force: forceForeground });
+    const currentFgId = getForegroundSessionId(this.projectRoot, paths.planMdPath);
+    const foreground = !currentFgId || currentFgId === sessionId;
 
     // Live progress board
     const progressBoard = renderProgressBoard(sessionRow, taskRows);
@@ -798,6 +813,7 @@ export class AsdMcpServer {
       phase: sessionRow.phase as SessionPhase,
       tasks: taskRows.map(formatTaskForOutput),
       planMdPath: paths.planMdPath,
+      foreground,
       progressBoard,
     };
   }
