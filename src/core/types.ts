@@ -24,7 +24,7 @@ function readPackageVersion(): string {
   } catch {
     // Fallback if package.json is unreadable
   }
-  return "2.3.0";
+  return "2.3.2";
 }
 
 export const ASD_VERSION: string = readPackageVersion();
@@ -91,6 +91,13 @@ export type TaskStatus =
   | "failed"
   | "merge_conflict";
 
+/**
+ * Session lifecycle phase (CR-17.3):
+ * - 'planning': Initial state when created via createOrGetSession / asd_plan(create) before task dispatch.
+ * - 'running': Active state set when tasks are dispatched via asd_dispatch or resumed.
+ * - 'paused': Paused state set when the Stop hook 3-strike circuit breaker trips (no_progress_count >= 3).
+ * - 'done': Terminal state set when all session tasks reach 'done' during verification/dispatch, generating .asd/summary.md.
+ */
 export type SessionPhase = "planning" | "running" | "paused" | "done";
 
 // ============================================================================

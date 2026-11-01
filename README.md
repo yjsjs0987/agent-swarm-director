@@ -1,10 +1,10 @@
-# Agent Swarm Director (`agent-swarm-director` / ASD v2.3.1)
+# Agent Swarm Director (`agent-swarm-director` / ASD v2.3.2)
 
 **English** | [한국어](./README_ko.md) | [📋 Patch Notes](./PATCH_NOTES.md) | [📋 패치 노트 (KR)](./PATCH_NOTES_ko.md)
 
 > **Zero-dependency universal multi-agent orchestration harness across Claude Code, OpenCode, Codex CLI, Antigravity, and Cursor CLI.**
 
-Agent Swarm Director (**ASD v2.3.1**) is the universal multi-harness successor to `agy-agent-swarm-director`. Built purely on native Node.js (`>=22.13.0`) TypeScript execution and `node:sqlite` (WAL mode) with **zero external npm runtime dependencies**, ASD coordinates heterogeneous AI coding harnesses under a single deterministic control plane.
+Agent Swarm Director (**ASD v2.3.2**) is the universal multi-harness successor to `agy-agent-swarm-director`. Built purely on native Node.js (`>=22.13.0`) TypeScript execution and `node:sqlite` (WAL mode) with **zero external npm runtime dependencies**, ASD coordinates heterogeneous AI coding harnesses under a single deterministic control plane.
 
 ---
 
@@ -147,3 +147,14 @@ All long-running orchestration actions (`plan`, `dispatch`, `verify`, `debate`) 
 ## License
 
 [Functional Source License, Version 1.1, Apache 2.0 Future License (FSL-1.1-ALv2)](./LICENSE) © 2026 yjsjs0987
+
+---
+
+### SessionPhase Lifecycle
+
+| Phase | Transition Trigger |
+|---|---|
+| `planning` | Initial phase when a session is created via `createOrGetSession` / `asd_plan create`. |
+| `running` | Entered when tasks in a wave are dispatched via `asd_dispatch`. |
+| `paused` | Entered when the Stop hook 3-strike circuit breaker trips (`no_progress_count >= 3`). |
+| `done` | Entered automatically when all tasks in the session complete (`status = 'done'`), writing `.asd/summary.md`. |

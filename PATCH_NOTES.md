@@ -8,6 +8,11 @@ Complete chronological patch history for **Agent Swarm Director (ASD v2.3)**, or
 
 ## 1. Latest Orchestration, Dashboard & Cross-Harness Enhancements (v2.3.0)
 
+### `v2.3.2` ? GUI Core Integration: Multi-Driver History (`session_drivers`), 0-Token Driver Briefing, Headless Driver Runner (`runDriverTurn`), 5-Harness Transcript Reader, Cross-Process Merge Lock & Orphan Task Recovery
+- Added `session_drivers` table and driver lifecycle APIs (`attachDriver`, `setDriverHarnessSessionId`, `detachDriver`, `getActiveDriver`, `listDrivers`, `buildDriverBriefing`, `runDriverTurn`).
+- Removed automatic hook session hijacking (CR-04), added `ASD_DRIVER_ID` hook binding, and enforced 10-minute TTL on `cli-recent.json` inference.
+- Added `readHarnessTranscript` & `locateHarnessTranscript` (CR-10), `finalizeSubagentArtifacts` (CR-09), cross-process `.asd/merge.lock` (CR-11), `recoverOrphanedTasks` & atomic `tryClaimTask` (CR-12), state-dependent subagent `resume` with `follow_up_of` (CR-13), `PLAN.md` foreground session guards (CR-14), and scoped LIGHT rollback (CR-07).
+
 ### `v2.3.0` — 5th Harness (`Cursor CLI` / `@cr`), Skill Modernization, Test-File Permission Rule & `asd ui` Inspector Upgrade
 - **5th Harness Support (`Cursor CLI` / `@cr`)**:
   - Added `CursorAdapter` (`src/adapters/cursor.ts`) supporting headless execution (`agent -p <prompt> --force --output-format json --model <model>`), `PreToolUse` / `Stop` hooks, and global synchronization under `~/.cursor/` (`agents/`, `skills/`, `hooks.json`, `mcp.json`, `cli-config.json`).
