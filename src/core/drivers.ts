@@ -11,7 +11,9 @@ import {
   generateDriverId,
   type SqliteDriver,
 } from "./db.ts";
-import { atomicWriteFileSync } from "./render.ts";
+import { resolveAsdPaths } from "./config.ts";
+import { redactSecrets } from "./redact.ts";
+import { atomicWriteFileSync, renderProgressBoard } from "./render.ts";
 import { recordCliRecentSession } from "./session-tracker.ts";
 import type {
   HarnessId,
@@ -266,4 +268,190 @@ export function getActiveDriver(
 
 export function listDrivers(db: SqliteDriver, sessionId: string): DriverRow[] {
   return db.listDrivers(sessionId);
+}
+
+// ============================================================================
+// CR-02: 0-Token Driver Briefing (buildDriverBriefing)
+// ============================================================================
+
+export function buildDriverBriefing(input: {
+  db: SqliteDriver;
+  projectRoot: string;
+  sessionId: string;
+  maxChars?: number;
+  locale?: "ko" | "en";
+}): string {
+  const maxChars = input.maxChars ?? 6000;
+  const sysLang = (
+    input.locale ??
+    (Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase().startsWith("ko")
+      ? "ko"
+      : "ko")
+  ) as "ko" | "en";
+
+  const session = input.db.getSession(input.sessionId);
+  const paths = resolveAsdPaths(input.projectRoot);
+  const tasks = session ? input.db.getSessionTasks(input.sessionId) : [];
+  const drivers = session ? input.db.listDrivers(input.sessionId) : [];
+  const activeDriver = session ? input.db.getActiveDriver(input.sessionId) : undefined;
+
+  // 1. Header
+  const headerLines = [
+    "# ASD Session Briefing",
+    `- Session ID: ${input.sessionId}`,
+    `- Memo: ${session?.memo ?? "(none)"}`,
+    `- Phase: ${session?.phase ?? "planning"}`,
+    `- Auto Approve: ${session ? session.auto_approve !== 0 : true}`,
+    `- Project Root: ${path.resolve(input.projectRoot)}`,
+    `- PLAN.md: ${paths.planMdPath}`,
+  ];
+  const sec1 = headerLines.join("\n");
+
+  // 2. Previous drivers (excluding current active driver)
+  const prevDrivers = drivers.filter(
+    (d) => !activeDriver || d.driver_id !== activeDriver.driver_id
+  );
+  let sec2 = "";
+  if (prevDrivers.length > 0) {
+    const lines = ["## Previous Drivers"];
+    for (const d of prevDrivers) {
+      const startIso = new Date(d.attached_at).toISOString();
+      const endIso = d.detached_at ? new Date(d.detached_at).toISOString() : "active";
+      const modelStr = d.model ? `/${d.model}` : "";
+      const sidStr = d.harness_session_id ? ` (sid: ${d.harness_session_id})` : "";
+      lines.push(`- ${d.harness}${modelStr}${sidStr} [${startIso} ~ ${endIso}]`);
+    }
+    sec2 = lines.join("\n");
+  }
+
+  // 3. Progress board (only if tasks exist)
+  let sec3 = "";
+  if (session && tasks.length > 0) {
+    sec3 = renderProgressBoard(session, tasks).trim();
+  }
+
+  // 4. Attention needed tasks (verifying, merge_conflict, failed, escalated)
+  const attentionStatuses = new Set(["verifying", "merge_conflict", "failed", "escalated"]);
+  const attentionTasks = tasks.filter((t) => attentionStatuses.has(t.status));
+  let sec4 = "";
+  if (attentionTasks.length > 0) {
+    const lines = ["## Attention Needed Tasks"];
+    for (const t of attentionTasks) {
+      const wtInfo = t.worktree_path ? ` | worktree: ${t.worktree_path}` : "";
+      lines.push(`- **${t.task_id}** [${t.status}]: ${t.title}${wtInfo}`);
+    }
+    sec4 = lines.join("\n");
+  }
+
+  // 5. Recently completed task summaries (done_claim_json.summary & key_decisions, newest first)
+  const doneTasks = tasks
+    .filter((t) => t.status === "done" && t.done_claim_json)
+    .slice()
+    .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
+  let sec5 = "";
+  if (doneTasks.length > 0) {
+    const lines = ["## Recently Completed Tasks"];
+    for (const t of doneTasks) {
+      try {
+        const claim = JSON.parse(t.done_claim_json!) as {
+          summary?: string;
+          key_decisions?: string[];
+        };
+        const summary = claim.summary ?? "";
+        const decisions =
+          Array.isArray(claim.key_decisions) && claim.key_decisions.length > 0
+            ? ` (Decisions: ${claim.key_decisions.join("; ")})`
+            : "";
+        lines.push(`- **${t.task_id}** (${t.title}): ${summary}${decisions}`);
+      } catch {
+        lines.push(`- **${t.task_id}** (${t.title})`);
+      }
+    }
+    sec5 = lines.join("\n");
+  }
+
+  // 6. summary.md first 1,500 chars if present
+  let sec6 = "";
+  const sessionSummaryPath = path.join(
+    path.resolve(input.projectRoot),
+    ".asd",
+    "sessions",
+    input.sessionId,
+    "summary.md"
+  );
+  const fallbackSummaryPath = paths.summaryMdPath;
+  const summaryPath = fs.existsSync(sessionSummaryPath)
+    ? sessionSummaryPath
+    : fs.existsSync(fallbackSummaryPath)
+      ? fallbackSummaryPath
+      : null;
+  if (summaryPath) {
+    try {
+      const rawSummary = fs.readFileSync(summaryPath, "utf8").trim();
+      if (rawSummary.length > 0) {
+        sec6 = `## Session Summary\n${rawSummary.slice(0, 1500)}`;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 7. Guidance footer
+  const sec7 =
+    sysLang === "en"
+      ? "## Guidance\nUse ASD MCP tools (asd_plan, asd_dispatch, asd_verify, asd_debate) for task planning, dispatching, and verification. Merge conflict tasks are resolved and re-merged or rejected by the user in the GUI."
+      : "## 안내\n태스크 계획/디스패치/검증은 ASD MCP 도구(asd_plan, asd_dispatch, asd_verify, asd_debate)를 사용하라. 병합 충돌 태스크는 사용자가 GUI에서 해결·재병합하거나 반려한다.";
+
+  const assemble = (s3: string, s5: string, s6: string): string =>
+    [sec1, sec2, s3, sec4, s5, s6, sec7].filter((s) => s.length > 0).join("\n\n");
+
+  const suffix = "…(truncated)";
+  let cur3 = sec3;
+  let cur5 = sec5;
+  let cur6 = sec6;
+
+  let full = assemble(cur3, cur5, cur6);
+  let truncated = false;
+
+  // Truncate in exact order: 5 -> 6 -> 3
+  const shrinkSection = (
+    current: string,
+    buildWith: (val: string) => string
+  ): string => {
+    if (!current) return current;
+    const without = buildWith("");
+    if (without.length >= maxChars) {
+      truncated = true;
+      return "";
+    }
+    const budget = Math.max(0, maxChars - without.length - 2);
+    truncated = true;
+    return budget > 0 ? current.slice(0, budget) : "";
+  };
+
+  if (full.length > maxChars && cur5.length > 0) {
+    cur5 = shrinkSection(cur5, (v) => assemble(cur3, v, cur6));
+    full = assemble(cur3, cur5, cur6);
+  }
+  if (full.length > maxChars && cur6.length > 0) {
+    cur6 = shrinkSection(cur6, (v) => assemble(cur3, cur5, v));
+    full = assemble(cur3, cur5, cur6);
+  }
+  if (full.length > maxChars && cur3.length > 0) {
+    cur3 = shrinkSection(cur3, (v) => assemble(v, cur5, cur6));
+    full = assemble(cur3, cur5, cur6);
+  }
+  if (full.length > maxChars) {
+    full = full.slice(0, maxChars);
+    truncated = true;
+  }
+
+  if (truncated) {
+    if (full.length > maxChars) {
+      full = full.slice(0, maxChars);
+    }
+    full = `${full}${suffix}`;
+  }
+
+  return redactSecrets(full);
 }
