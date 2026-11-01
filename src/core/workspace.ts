@@ -84,6 +84,7 @@ export interface VerifyTaskResult {
   testOutput?: string;
   error?: string;
   changedFiles?: string[];
+  untouchedFiles?: string[];
 }
 
 export interface VerifyHeavyTaskOptions {
@@ -772,8 +773,74 @@ export function prepareBaseline(
 /**
  * Rolls back uncommitted edits in projectRoot while preserving prior checkpoint commits.
  */
-export function rollbackLightChanges(projectRoot: string): void {
+function partitionFilesByScope(
+  changedFiles: string[],
+  allowedFiles: string[] | undefined,
+  projectRoot: string
+): { scopedFiles: string[]; untouchedFiles: string[] } {
+  if (!allowedFiles || allowedFiles.length === 0) {
+    return { scopedFiles: [...changedFiles], untouchedFiles: [] };
+  }
+  const scopedFiles: string[] = [];
+  const untouchedFiles: string[] = [];
+  for (const file of changedFiles) {
+    const check = verifyChangedFilesBoundary([file], allowedFiles, projectRoot);
+    if (check.valid) {
+      scopedFiles.push(file);
+    } else {
+      untouchedFiles.push(file);
+    }
+  }
+  return { scopedFiles, untouchedFiles };
+}
+
+/**
+ * Rolls back uncommitted edits in projectRoot while preserving prior checkpoint commits.
+ * When options.files is provided, only those specific files are restored/cleaned.
+ */
+export function rollbackLightChanges(
+  projectRoot: string,
+  options?: { files?: string[] }
+): void {
   withFileMergeLockSync(projectRoot, "rollbackLightChanges", () => {
+    if (options?.files !== undefined) {
+      const targetFiles = options.files.filter((f) => f && f.trim().length > 0);
+      if (targetFiles.length === 0) {
+        return;
+      }
+      runGit(["reset", "HEAD", "--", ...targetFiles], { cwd: projectRoot });
+      const checkoutHeadRes = runGit(["checkout", "HEAD", "--", ...targetFiles], {
+        cwd: projectRoot,
+      });
+      if (checkoutHeadRes.exitCode !== 0) {
+        for (const f of targetFiles) {
+          const resetRes = runGit(["reset", "HEAD", "--", f], { cwd: projectRoot });
+          void resetRes;
+          const coRes = runGit(["checkout", "HEAD", "--", f], { cwd: projectRoot });
+          if (coRes.exitCode !== 0) {
+            runGit(["checkout", "--", f], { cwd: projectRoot });
+          }
+        }
+      }
+      runGit(["clean", "-fd", "--", ...targetFiles], { cwd: projectRoot });
+      for (const f of targetFiles) {
+        const trackedCheck = runGit(["ls-files", "--error-unmatch", "--", f], {
+          cwd: projectRoot,
+        });
+        if (trackedCheck.exitCode !== 0) {
+          const abs = path.resolve(projectRoot, f);
+          try {
+            if (fs.existsSync(abs)) {
+              fs.rmSync(abs, { recursive: true, force: true });
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+      return;
+    }
+
     runGit(["reset", "HEAD", "--", "."], { cwd: projectRoot });
     runGit(["checkout", "--", "."], { cwd: projectRoot });
     runGit(["clean", "-fd", "-e", ".asd", "-e", ".omo"], { cwd: projectRoot });
@@ -785,7 +852,7 @@ export function rollbackLightChanges(projectRoot: string): void {
  * 1. Inspects changed files against boundary & secret scan.
  * 2. Runs verifyCmd.
  * 3. On Pass: creates local checkpoint commit `asd(<taskId>): <title>` with --no-verify.
- * 4. On Failure: rolls back only uncommitted edits, preserving prior checkpoints.
+ * 4. On Failure: rolls back only scoped uncommitted edits, preserving user edits outside scope and prior checkpoints.
  */
 export function verifyAndCommitLightTask(
   options: VerifyLightTaskOptions
@@ -804,6 +871,11 @@ export function verifyAndCommitLightTask(
   ensureGitUserIdentity(projectRoot);
 
   const changedFiles = getChangedFiles(projectRoot);
+  const { scopedFiles, untouchedFiles } = partitionFilesByScope(
+    changedFiles,
+    allowedFiles,
+    projectRoot
+  );
 
   // 1. Check boundary & secrets
   const check = checkChangedFilesAndSecrets(
@@ -812,7 +884,7 @@ export function verifyAndCommitLightTask(
     projectRoot
   );
   if (!check.valid) {
-    rollbackLightChanges(projectRoot);
+    rollbackLightChanges(projectRoot, { files: scopedFiles });
     if (db && sessionId) {
       db.updateTaskStatus(sessionId, taskId, "failed");
     }
@@ -823,6 +895,7 @@ export function verifyAndCommitLightTask(
       violations: check.violations,
       error: "Boundary or secret check failed",
       changedFiles,
+      untouchedFiles,
     };
   }
 
@@ -831,7 +904,7 @@ export function verifyAndCommitLightTask(
   if (resolvedCmd) {
     const cmdRes = runVerifyCmd(resolvedCmd, projectRoot);
     if (!cmdRes.success) {
-      rollbackLightChanges(projectRoot);
+      rollbackLightChanges(projectRoot, { files: scopedFiles });
       if (db && sessionId) {
         db.updateTaskStatus(sessionId, taskId, "failed");
       }
@@ -842,6 +915,7 @@ export function verifyAndCommitLightTask(
         testOutput: cmdRes.output,
         error: `Verification command failed with exit code ${cmdRes.exitCode}: ${resolvedCmd}`,
         changedFiles,
+        untouchedFiles,
       };
     }
   }
@@ -1525,7 +1599,7 @@ export function rejectPendingTask(options: {
   sessionId: string;
   taskId: string;
   db: SqliteDriver;
-}): { ok: boolean; status: TaskStatus } {
+}): { ok: boolean; status: TaskStatus; untouchedFiles?: string[] } {
   const { projectRoot, sessionId, taskId, db } = options;
   const task = db.getTask(sessionId, taskId);
   if (!task) {
@@ -1537,13 +1611,31 @@ export function rejectPendingTask(options: {
     path.join(projectRoot, ".asd", "wt", `${task.turn}-${task.task_id}`);
   const branchName = `asd/wt-${task.turn}-${task.task_id}`;
 
+  let untouchedFiles: string[] | undefined;
+
   withFileMergeLockSync(projectRoot, `rejectPendingTask:${taskId}`, () => {
     if (task.track === "HEAVY" || fs.existsSync(wtPath)) {
       cleanupWorktree(projectRoot, wtPath, branchName, {
         forceBranchDelete: true,
       });
     } else {
-      rollbackLightChanges(projectRoot);
+      let allowedFiles: string[] = [];
+      try {
+        allowedFiles = JSON.parse(task.target_files_json || "[]");
+      } catch {
+        allowedFiles = [];
+      }
+      if (allowedFiles.length > 0 && !allowedFiles.includes("tests/**")) {
+        allowedFiles = [...allowedFiles, "tests/**", "**/*.test.ts", "**/*.spec.ts"];
+      }
+      const allChanged = getChangedFiles(projectRoot);
+      const partitioned = partitionFilesByScope(
+        allChanged,
+        allowedFiles,
+        projectRoot
+      );
+      untouchedFiles = partitioned.untouchedFiles;
+      rollbackLightChanges(projectRoot, { files: partitioned.scopedFiles });
     }
   });
 
@@ -1555,7 +1647,11 @@ export function rejectPendingTask(options: {
       subSessionId: task.sub_session_id,
     });
   }
-  return { ok: true, status: "failed" };
+  return {
+    ok: true,
+    status: "failed",
+    ...(untouchedFiles !== undefined ? { untouchedFiles } : {}),
+  };
 }
 
 // ============================================================================
