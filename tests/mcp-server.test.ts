@@ -627,7 +627,7 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
       assert.ok(fs.existsSync(subSessionDir));
       const subDirs = fs.readdirSync(subSessionDir);
       assert.ok(subDirs.length > 0);
-      assert.ok(fs.existsSync(path.join(subSessionDir, subDirs[0]!, "prompt.md")));
+      assert.ok(!fs.existsSync(path.join(subSessionDir, subDirs[0]!, "prompt.md")), "CR-09: prompt.md is purged when parallel_spawn task reaches done");
       assert.ok(fs.existsSync(path.join(subSessionDir, subDirs[0]!, "meta.json")));
     });
 

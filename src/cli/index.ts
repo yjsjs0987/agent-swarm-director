@@ -30,6 +30,7 @@ process.env.NODE_NO_WARNINGS = "1";
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { finalizeSubagentArtifacts } from "../core/spawner.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
@@ -300,6 +301,7 @@ export interface SubagentLogRecord {
   finishedAt?: number;
   prompt: string;
   outputLog: string;
+  artifactsPurged: boolean;
   dirPath: string;
 }
 
@@ -330,8 +332,11 @@ export function scanSubagentLogs(projectRoot: string): SubagentLogRecord[] {
           const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as Record<string, unknown>;
           const promptPath = path.join(dirPath, "prompt.md");
           const outputPath = path.join(dirPath, "output.log");
-          const prompt = fs.existsSync(promptPath) ? fs.readFileSync(promptPath, "utf8") : "";
-          const outputLog = fs.existsSync(outputPath) ? fs.readFileSync(outputPath, "utf8") : "";
+          const hasPrompt = fs.existsSync(promptPath);
+          const hasOutput = fs.existsSync(outputPath);
+          const prompt = hasPrompt ? fs.readFileSync(promptPath, "utf8") : "";
+          const outputLog = hasOutput ? fs.readFileSync(outputPath, "utf8") : "";
+          const artifactsPurged = !hasPrompt && !hasOutput;
           const startedAt =
             typeof meta.startedAt === "number" && meta.startedAt > 0
               ? meta.startedAt
@@ -357,6 +362,7 @@ export function scanSubagentLogs(projectRoot: string): SubagentLogRecord[] {
             finishedAt: typeof meta.finishedAt === "number" ? meta.finishedAt : undefined,
             prompt,
             outputLog,
+            artifactsPurged,
             dirPath,
           });
         } catch {
@@ -493,6 +499,22 @@ export function runAsdClean(options?: {
             branchesDeleted.push(branchName);
           }
         }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  // 2b. CR-09: Purge remaining prompt.md / output.log on terminal subagent directories
+  try {
+    const existingLogs = scanSubagentLogs(projectRoot);
+    for (const rec of existingLogs) {
+      if ((rec.status === "done" || rec.status === "failed") && !rec.artifactsPurged) {
+        finalizeSubagentArtifacts({
+          projectRoot,
+          sessionId: rec.sessionId,
+          subSessionId: rec.subSessionId,
+        });
       }
     }
   } catch {
