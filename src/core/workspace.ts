@@ -24,6 +24,7 @@
 
 import * as child_process from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { ensureGitExclude, ensureProjectInitialized, getGitExcludePath } from "./config.ts";
 import type { SqliteDriver } from "./db.ts";
@@ -143,8 +144,255 @@ export class AsyncMutex {
 
 export const mergeMutex = new AsyncMutex();
 
-export async function withMergeLock<T>(fn: () => Promise<T>): Promise<T> {
-  return mergeMutex.runExclusive(fn);
+export interface MergeLockOptions {
+  projectRoot?: string;
+  purpose?: string;
+  timeoutMs?: number;
+}
+
+export interface MergeLockFilePayload {
+  pid: number;
+  hostname: string;
+  acquiredAt: number;
+  purpose: string;
+}
+
+const DEFAULT_MERGE_LOCK_TIMEOUT_MS = 120_000;
+const STALE_MERGE_LOCK_MAX_AGE_MS = 10 * 60 * 1000;
+const heldProjectLockDepth = new Map<string, number>();
+
+function normalizeLockKey(projectRoot: string): string {
+  const resolved = path.resolve(projectRoot).replaceAll("\\", "/");
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "EPERM") return true;
+    return false;
+  }
+}
+
+function isLockFileStale(lockPath: string, now: number): boolean {
+  let raw = "";
+  try {
+    raw = fs.readFileSync(lockPath, "utf8");
+  } catch {
+    return false;
+  }
+
+  if (!raw.trim()) {
+    try {
+      const stat = fs.statSync(lockPath);
+      return now - stat.mtimeMs > 2_000;
+    } catch {
+      return false;
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as Partial<MergeLockFilePayload>;
+    const pid = typeof parsed.pid === "number" ? parsed.pid : -1;
+    const acquiredAt = typeof parsed.acquiredAt === "number" ? parsed.acquiredAt : 0;
+    if (now - acquiredAt > STALE_MERGE_LOCK_MAX_AGE_MS) {
+      return true;
+    }
+    if (!isPidAlive(pid)) {
+      return true;
+    }
+    return false;
+  } catch {
+    try {
+      const stat = fs.statSync(lockPath);
+      return now - stat.mtimeMs > 2_000;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function tryOpenMergeLockFile(lockPath: string, purpose: string): boolean {
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(lockPath, "wx");
+    const payload: MergeLockFilePayload = {
+      pid: process.pid,
+      hostname: os.hostname(),
+      acquiredAt: Date.now(),
+      purpose,
+    };
+    fs.writeFileSync(fd, JSON.stringify(payload) + "\n", "utf8");
+    return true;
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "EEXIST" || code === "EPERM" || code === "EACCES") {
+      return false;
+    }
+    throw err;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+function releaseMergeLockFile(lockPath: string): void {
+  try {
+    if (!fs.existsSync(lockPath)) return;
+    const raw = fs.readFileSync(lockPath, "utf8");
+    const parsed = JSON.parse(raw) as Partial<MergeLockFilePayload>;
+    if (parsed.pid === process.pid) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function sleepSync(ms: number): void {
+  if (ms <= 0) return;
+  try {
+    const sab = new SharedArrayBuffer(4);
+    const view = new Int32Array(sab);
+    Atomics.wait(view, 0, 0, ms);
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      // busy-wait fallback
+    }
+  }
+}
+
+function withFileMergeLockSync<T>(
+  projectRoot: string,
+  purpose: string,
+  fn: () => T,
+  timeoutMs = DEFAULT_MERGE_LOCK_TIMEOUT_MS
+): T {
+  const key = normalizeLockKey(projectRoot);
+  const currentDepth = heldProjectLockDepth.get(key) ?? 0;
+  if (currentDepth > 0) {
+    heldProjectLockDepth.set(key, currentDepth + 1);
+    try {
+      return fn();
+    } finally {
+      heldProjectLockDepth.set(key, currentDepth);
+    }
+  }
+
+  const lockPath = path.join(projectRoot, ".asd", "merge.lock");
+  const start = Date.now();
+  let attempt = 0;
+
+  while (true) {
+    if (tryOpenMergeLockFile(lockPath, purpose)) {
+      break;
+    }
+    const now = Date.now();
+    if (isLockFileStale(lockPath, now)) {
+      try {
+        fs.unlinkSync(lockPath);
+      } catch {
+        // ignore race
+      }
+      continue;
+    }
+    const elapsed = now - start;
+    if (elapsed >= timeoutMs) {
+      throw new Error("MERGE_LOCK_TIMEOUT");
+    }
+    const backoff = Math.min(1000, 200 * Math.pow(2, attempt));
+    const waitMs = Math.min(backoff, Math.max(1, timeoutMs - elapsed));
+    attempt++;
+    sleepSync(waitMs);
+  }
+
+  heldProjectLockDepth.set(key, 1);
+  try {
+    return fn();
+  } finally {
+    heldProjectLockDepth.delete(key);
+    releaseMergeLockFile(lockPath);
+  }
+}
+
+/**
+ * 2-stage merge lock:
+ * 1. Process-internal AsyncMutex (`mergeMutex`).
+ * 2. Cross-process `.asd/merge.lock` file lock when `options.projectRoot` is provided.
+ *
+ * Known limitation: On Windows, OS PID reuse within the 10-minute stale window
+ * could theoretically match an unrelated live process.
+ */
+export async function withMergeLock<T>(
+  fn: () => Promise<T>,
+  options?: MergeLockOptions
+): Promise<T> {
+  return mergeMutex.runExclusive(async () => {
+    const projectRoot = options?.projectRoot;
+    if (!projectRoot) {
+      return await fn();
+    }
+
+    const key = normalizeLockKey(projectRoot);
+    const currentDepth = heldProjectLockDepth.get(key) ?? 0;
+    if (currentDepth > 0) {
+      heldProjectLockDepth.set(key, currentDepth + 1);
+      try {
+        return await fn();
+      } finally {
+        heldProjectLockDepth.set(key, currentDepth);
+      }
+    }
+
+    const purpose = options?.purpose ?? "merge";
+    const timeoutMs = options?.timeoutMs ?? DEFAULT_MERGE_LOCK_TIMEOUT_MS;
+    const lockPath = path.join(projectRoot, ".asd", "merge.lock");
+    const start = Date.now();
+    let attempt = 0;
+
+    while (true) {
+      if (tryOpenMergeLockFile(lockPath, purpose)) {
+        break;
+      }
+      const now = Date.now();
+      if (isLockFileStale(lockPath, now)) {
+        try {
+          fs.unlinkSync(lockPath);
+        } catch {
+          // ignore race
+        }
+        continue;
+      }
+      const elapsed = now - start;
+      if (elapsed >= timeoutMs) {
+        throw new Error("MERGE_LOCK_TIMEOUT");
+      }
+      const backoff = Math.min(1000, 200 * Math.pow(2, attempt));
+      const waitMs = Math.min(backoff, Math.max(1, timeoutMs - elapsed));
+      attempt++;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+
+    heldProjectLockDepth.set(key, 1);
+    try {
+      return await fn();
+    } finally {
+      heldProjectLockDepth.delete(key);
+      releaseMergeLockFile(lockPath);
+    }
+  });
 }
 
 // ============================================================================
@@ -457,9 +705,11 @@ export function prepareBaseline(
  * Rolls back uncommitted edits in projectRoot while preserving prior checkpoint commits.
  */
 export function rollbackLightChanges(projectRoot: string): void {
-  runGit(["reset", "HEAD", "--", "."], { cwd: projectRoot });
-  runGit(["checkout", "--", "."], { cwd: projectRoot });
-  runGit(["clean", "-fd", "-e", ".asd", "-e", ".omo"], { cwd: projectRoot });
+  withFileMergeLockSync(projectRoot, "rollbackLightChanges", () => {
+    runGit(["reset", "HEAD", "--", "."], { cwd: projectRoot });
+    runGit(["checkout", "--", "."], { cwd: projectRoot });
+    runGit(["clean", "-fd", "-e", ".asd", "-e", ".omo"], { cwd: projectRoot });
+  });
 }
 
 /**
@@ -542,24 +792,33 @@ export function verifyAndCommitLightTask(
     };
   }
 
-  // 3. Pass: create checkpoint commit
-  if (changedFiles.length > 0) {
-    runGit(["add", "--", ...changedFiles], { cwd: projectRoot });
-    const commitRes = runGit(
-      ["commit", "-m", `asd(${taskId}): ${title}`, "--no-verify"],
-      { cwd: projectRoot }
-    );
-    if (commitRes.exitCode !== 0) {
-      // If nothing staged or commit error
-      const commitErr = commitRes.stderr || commitRes.stdout;
-      return {
-        verified: false,
-        status: "failed",
-        rollbackPerformed: false,
-        error: `Checkpoint commit failed: ${commitErr}`,
-        changedFiles,
-      };
+  // 3. Pass: create checkpoint commit under cross-process merge lock
+  const lightCommitFailure = withFileMergeLockSync(
+    projectRoot,
+    `verifyAndCommitLightTask:${taskId}`,
+    (): VerifyTaskResult | null => {
+      if (changedFiles.length > 0) {
+        runGit(["add", "--", ...changedFiles], { cwd: projectRoot });
+        const commitRes = runGit(
+          ["commit", "-m", `asd(${taskId}): ${title}`, "--no-verify"],
+          { cwd: projectRoot }
+        );
+        if (commitRes.exitCode !== 0) {
+          const commitErr = commitRes.stderr || commitRes.stdout;
+          return {
+            verified: false,
+            status: "failed",
+            rollbackPerformed: false,
+            error: `Checkpoint commit failed: ${commitErr}`,
+            changedFiles,
+          };
+        }
+      }
+      return null;
     }
+  );
+  if (lightCommitFailure) {
+    return lightCommitFailure;
   }
 
   const commitSha = runGit(["rev-parse", "HEAD"], {
@@ -710,14 +969,16 @@ export function cleanupWorktree(
   // Prune worktree metadata
   runGit(["worktree", "prune"], { cwd: projectRoot });
 
-  // Delete branch
+  // Delete branch under cross-process merge lock
   if (branchName) {
-    const flag = options?.forceBranchDelete ? "-D" : "-d";
-    const delRes = runGit(["branch", flag, branchName], { cwd: projectRoot });
-    if (delRes.exitCode !== 0 && !options?.forceBranchDelete) {
-      // Fallback to -D if -d failed
-      runGit(["branch", "-D", branchName], { cwd: projectRoot });
-    }
+    withFileMergeLockSync(projectRoot, `cleanupWorktree:${branchName}`, () => {
+      const flag = options?.forceBranchDelete ? "-D" : "-d";
+      const delRes = runGit(["branch", flag, branchName], { cwd: projectRoot });
+      if (delRes.exitCode !== 0 && !options?.forceBranchDelete) {
+        // Fallback to -D if -d failed
+        runGit(["branch", "-D", branchName], { cwd: projectRoot });
+      }
+    });
   }
 }
 
@@ -841,8 +1102,9 @@ export async function verifyAndMergeHeavyTask(
     }
   }
 
-  // 6. Mutex-serialized merge into main branch
-  return await withMergeLock(async () => {
+  // 6. Mutex-serialized merge into main branch (2-stage: process mutex + .asd/merge.lock)
+  return await withMergeLock(
+    async () => {
     ensureGitUserIdentity(projectRoot);
 
     const preMergeSha = runGit(["rev-parse", "HEAD"], {
@@ -907,7 +1169,9 @@ export async function verifyAndMergeHeavyTask(
       commitSha: finalCommitSha,
       changedFiles,
     };
-  });
+  },
+  { projectRoot, purpose: `verifyAndMergeHeavyTask:${taskId}` }
+  );
 }
 
 // ============================================================================
@@ -1127,13 +1391,15 @@ export function rejectPendingTask(options: {
     path.join(projectRoot, ".asd", "wt", `${task.turn}-${task.task_id}`);
   const branchName = `asd/wt-${task.turn}-${task.task_id}`;
 
-  if (task.track === "HEAVY" || fs.existsSync(wtPath)) {
-    cleanupWorktree(projectRoot, wtPath, branchName, {
-      forceBranchDelete: true,
-    });
-  } else {
-    rollbackLightChanges(projectRoot);
-  }
+  withFileMergeLockSync(projectRoot, `rejectPendingTask:${taskId}`, () => {
+    if (task.track === "HEAVY" || fs.existsSync(wtPath)) {
+      cleanupWorktree(projectRoot, wtPath, branchName, {
+        forceBranchDelete: true,
+      });
+    } else {
+      rollbackLightChanges(projectRoot);
+    }
+  });
 
   db.updateTaskStatus(sessionId, taskId, "failed");
   return { ok: true, status: "failed" };
