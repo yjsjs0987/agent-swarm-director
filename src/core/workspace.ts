@@ -491,6 +491,73 @@ export function getChangedFiles(cwd: string): string[] {
   return files;
 }
 
+function filterIgnoredRelPaths(rawOutput: string): string[] {
+  const out: string[] = [];
+  for (const line of rawOutput.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const normalized = trimmed.replaceAll("\\", "/");
+    if (
+      normalized === ".asd" ||
+      normalized.startsWith(".asd/") ||
+      normalized === "node_modules" ||
+      normalized.startsWith("node_modules/") ||
+      normalized === ".omo" ||
+      normalized.startsWith(".omo/")
+    ) {
+      continue;
+    }
+    out.push(normalized);
+  }
+  return out;
+}
+
+/**
+ * CR-08: Computes files committed in a worktree relative to projectRoot HEAD,
+ * excluding files that came strictly from merging main into the worktree.
+ */
+export function getCommittedWorktreeChanges(
+  projectRoot: string,
+  wtPath: string
+): string[] {
+  const mainHead = runGit(["rev-parse", "HEAD"], { cwd: projectRoot }).stdout.trim();
+  const wtHead = runGit(["rev-parse", "HEAD"], { cwd: wtPath }).stdout.trim();
+  if (!mainHead || !wtHead || mainHead === wtHead) {
+    return [];
+  }
+
+  const mbRes = runGit(["merge-base", mainHead, wtHead], { cwd: wtPath });
+  const mergeBase = mbRes.exitCode === 0 ? mbRes.stdout.trim() : "";
+  if (!mergeBase || mergeBase === wtHead) {
+    return [];
+  }
+
+  // Files changed along the worktree branch since merge-base
+  const sinceMbRes = runGit(["diff", "--name-only", mergeBase, wtHead], {
+    cwd: wtPath,
+  });
+  const sinceMb = new Set(
+    sinceMbRes.exitCode === 0 ? filterIgnoredRelPaths(sinceMbRes.stdout) : []
+  );
+
+  // Files whose tree state in wtHead actually differs from current mainHead
+  const vsMainRes = runGit(["diff", "--name-only", mainHead, wtHead], {
+    cwd: wtPath,
+  });
+  const vsMain = new Set(
+    vsMainRes.exitCode === 0 ? filterIgnoredRelPaths(vsMainRes.stdout) : []
+  );
+
+  // Intersection excludes files modified only on main (whether merged into wt or not)
+  const result: string[] = [];
+  for (const f of sinceMb) {
+    if (vsMain.has(f)) {
+      result.push(f);
+    }
+  }
+  return result;
+}
+
 // ============================================================================
 // 4. Verification Command Resolution & Execution
 // ============================================================================
@@ -1022,8 +1089,10 @@ export async function verifyAndMergeHeavyTask(
 
   ensureGitUserIdentity(wtPath);
 
-  // 1. Boundary & Secret scan inside worktree
-  const changedFiles = getChangedFiles(wtPath);
+  // 1. Boundary & Secret scan inside worktree (working tree union committed worktree changes)
+  const workingChanges = getChangedFiles(wtPath);
+  const committedChanges = getCommittedWorktreeChanges(projectRoot, wtPath);
+  const changedFiles = Array.from(new Set([...workingChanges, ...committedChanges]));
   const check = checkChangedFilesAndSecrets(changedFiles, allowedFiles, wtPath);
 
   if (!check.valid) {
@@ -1184,25 +1253,34 @@ export interface WorktreeDiffSnapshot {
   changedFiles: string[];
   statusShort: string;
   diff: string;
+  mode: "working" | "committed";
+  baseRef?: string;
 }
 
 /**
- * Collects changed files, `git status --short`, and unified `git diff HEAD`
- * (including untracked file contents) for either a task worktree or projectRoot.
+ * Collects changed files, `git status --short`, and unified diff
+ * (including untracked file contents and committed worktree changes in merge-base mode)
+ * for either a task worktree or projectRoot.
  */
 export function getWorktreeDiff(
   projectRoot: string,
-  options?: { wtPath?: string | null; turn?: number; taskId?: string }
-): WorktreeDiffSnapshot {
+  options?: {
+    wtPath?: string | null;
+    turn?: number;
+    taskId?: string;
+    base?: "HEAD" | "merge-base";
+  }
+): WorktreeDiffSnapshot & { mode: "working" | "committed"; baseRef?: string } {
+  const resolvedRoot = path.resolve(projectRoot);
   const inferredWt =
     options?.wtPath ||
     (options?.turn !== undefined && options?.taskId
-      ? path.join(projectRoot, ".asd", "wt", `${options.turn}-${options.taskId}`)
+      ? path.join(resolvedRoot, ".asd", "wt", `${options.turn}-${options.taskId}`)
       : null);
   const targetDir =
     inferredWt && fs.existsSync(inferredWt)
       ? path.resolve(inferredWt)
-      : path.resolve(projectRoot);
+      : resolvedRoot;
 
   if (!fs.existsSync(targetDir)) {
     return {
@@ -1211,12 +1289,51 @@ export function getWorktreeDiff(
       changedFiles: [],
       statusShort: "",
       diff: "",
+      mode: "working",
     };
   }
 
-  const changedFiles = getChangedFiles(targetDir);
+  const mainHead = runGit(["rev-parse", "HEAD"], { cwd: resolvedRoot }).stdout.trim();
+  const wtHead = runGit(["rev-parse", "HEAD"], { cwd: targetDir }).stdout.trim();
+
+  let useMergeBase = false;
+  if (options?.base === "merge-base") {
+    useMergeBase = true;
+  } else if (options?.base === "HEAD") {
+    useMergeBase = false;
+  } else if (mainHead && wtHead && mainHead !== wtHead) {
+    const aheadRes = runGit(["rev-list", "--count", `${mainHead}..HEAD`], {
+      cwd: targetDir,
+    });
+    const aheadCount = Number.parseInt(aheadRes.stdout.trim(), 10) || 0;
+    if (aheadCount > 0) {
+      useMergeBase = true;
+    }
+  }
+
+  let mode: "working" | "committed" = "working";
+  let baseRef: string | undefined = wtHead || undefined;
+  let diffTarget = "HEAD";
+  let committedFiles: string[] = [];
+
+  if (useMergeBase && mainHead && wtHead) {
+    const mbRes = runGit(["merge-base", mainHead, "HEAD"], { cwd: targetDir });
+    const mb = mbRes.exitCode === 0 ? mbRes.stdout.trim() : "";
+    if (mb) {
+      mode = "committed";
+      baseRef = mb;
+      diffTarget = mb;
+      const nameOnlyRes = runGit(["diff", "--name-only", mb], { cwd: targetDir });
+      if (nameOnlyRes.exitCode === 0) {
+        committedFiles = filterIgnoredRelPaths(nameOnlyRes.stdout);
+      }
+    }
+  }
+
+  const workingChanged = getChangedFiles(targetDir);
+  const changedFiles = Array.from(new Set([...committedFiles, ...workingChanged]));
   const statusRes = runGit(["status", "--short", "-uall"], { cwd: targetDir });
-  const diffRes = runGit(["diff", "HEAD"], { cwd: targetDir });
+  const diffRes = runGit(["diff", diffTarget], { cwd: targetDir });
 
   // Also include diffs for newly created untracked files so GUI diff viewer sees new files
   const untrackedDiffs: string[] = [];
@@ -1264,6 +1381,8 @@ export function getWorktreeDiff(
     changedFiles,
     statusShort: statusRes.stdout.trim(),
     diff: combinedDiff,
+    mode,
+    ...(baseRef ? { baseRef } : {}),
   };
 }
 
