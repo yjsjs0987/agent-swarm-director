@@ -31,6 +31,7 @@ process.env.NODE_NO_WARNINGS = "1";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { finalizeSubagentArtifacts } from "../core/spawner.ts";
+import { setDriverHarnessSessionId } from "../core/drivers.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
@@ -1064,12 +1065,14 @@ export async function main(
         const adapter = getAdapter(harnessId);
         const rootDir = resolvedHookRoot;
 
-        // Track native CLI/harness session in <projectRoot>/.asd/sessions/cli-recent.json
-        // when running as main session and a native session ID is present in hook payload.
-        if (
-          process.env.ASD_SESSION_ROLE !== "subagent" &&
-          payload.roleType !== "subagent"
-        ) {
+        // CR-04: Hook session tracking & driver session ID binding (no automatic ASD session hijacking)
+        const isSubagentHook =
+          process.env.ASD_SESSION_ROLE === "subagent" ||
+          payload.roleType === "subagent";
+        const driverIdEnv = process.env.ASD_DRIVER_ID?.trim() || "";
+        const mainSessionIdEnv = process.env.ASD_MAIN_SESSION_ID?.trim() || null;
+
+        if (!isSubagentHook) {
           const hookInfo = extractHookSessionInfo(payload, harnessId);
           if (hookInfo.harnessSessionId) {
             recordCliRecentSession(
@@ -1080,43 +1083,39 @@ export async function main(
                 model: hookInfo.model,
                 summary: hookInfo.summary,
                 transcriptPath: hookInfo.transcriptPath,
+                ...(driverIdEnv && mainSessionIdEnv
+                  ? { asdSessionId: mainSessionIdEnv }
+                  : {}),
               },
               { forceCreateDir: true }
             );
+
+            if (driverIdEnv) {
+              try {
+                const paths = resolveAsdPaths(rootDir, homeDir);
+                if (fs.existsSync(paths.dbPath)) {
+                  const db = openProjectDb(rootDir, homeDir);
+                  try {
+                    const drv = db.getDriver(driverIdEnv);
+                    if (drv && !drv.harness_session_id) {
+                      setDriverHarnessSessionId(db, {
+                        projectRoot: rootDir,
+                        driverId: driverIdEnv,
+                        harnessSessionId: hookInfo.harnessSessionId,
+                      });
+                    }
+                  } finally {
+                    db.close();
+                  }
+                }
+              } catch {
+                // Ignore driver session ID binding error in hook
+              }
+            }
           }
         }
 
         if (subcommand === "session-start" || subcommand === "pre-invocation") {
-          // Link to active ASD session if one exists in SQLite
-          try {
-            const paths = resolveAsdPaths(rootDir, homeDir);
-            if (fs.existsSync(paths.dbPath)) {
-              const db = openProjectDb(rootDir, homeDir);
-              try {
-                const hookInfo = extractHookSessionInfo(payload, harnessId);
-                const latestSess = db.getLatestSession();
-                if (
-                  hookInfo.harnessSessionId &&
-                  latestSess &&
-                  latestSess.phase !== "done"
-                ) {
-                  linkHarnessSessionToAsdSession({
-                    projectRoot: rootDir,
-                    homeDir,
-                    asdSessionId: latestSess.session_id,
-                    harness: harnessId,
-                    harnessSessionId: hookInfo.harnessSessionId,
-                    mainModel: hookInfo.model,
-                    db,
-                  });
-                }
-              } finally {
-                db.close();
-              }
-            }
-          } catch {
-            // Ignore session-start link errors
-          }
           return 0;
         } else if (subcommand === "pre-tool-use") {
           const decision = evaluatePreToolUse(
@@ -1147,28 +1146,6 @@ export async function main(
             const paths = resolveAsdPaths(rootDir, homeDir);
             if (fs.existsSync(paths.dbPath)) {
               db = openProjectDb(rootDir, homeDir);
-              if (
-                process.env.ASD_SESSION_ROLE !== "subagent" &&
-                payload.roleType !== "subagent"
-              ) {
-                const hookInfo = extractHookSessionInfo(payload, harnessId);
-                const latestSess = db.getLatestSession();
-                if (
-                  hookInfo.harnessSessionId &&
-                  latestSess &&
-                  latestSess.phase !== "done"
-                ) {
-                  linkHarnessSessionToAsdSession({
-                    projectRoot: rootDir,
-                    homeDir,
-                    asdSessionId: latestSess.session_id,
-                    harness: harnessId,
-                    harnessSessionId: hookInfo.harnessSessionId,
-                    mainModel: hookInfo.model,
-                    db,
-                  });
-                }
-              }
             }
             const decision = evaluateStopHook(
               payload as StopHookPayload,
