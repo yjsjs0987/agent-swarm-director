@@ -11,6 +11,7 @@ export * from "./core/types.ts";
 export * from "./core/config.ts";
 export * from "./core/db.ts";
 export * from "./core/session-tracker.ts";
+export * from "./core/drivers.ts";
 export * from "./core/spawner.ts";
 export * from "./core/router.ts";
 export * from "./core/workspace.ts";

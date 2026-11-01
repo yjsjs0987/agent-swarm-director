@@ -30,6 +30,7 @@ import { runAsdDoctor } from "../adapters/installer.ts";
 import { loadRoutingConfig, resolveAsdPaths } from "../core/config.ts";
 import {
   type DebateRow,
+  type DriverRow,
   openProjectDb,
   type SessionRow,
   type SqliteDriver,
@@ -82,6 +83,7 @@ export interface DashboardSnapshot {
   allTasks: TaskRow[];
   debates: DebateRow[];
   allDebates: DebateRow[];
+  drivers: Record<string, DriverRow[]>;
   subagentLogs: SubagentLogRecord[];
   cliRecentSessions?: CliRecentSessionEntry[];
   routingConfig: RoutingConfig;
@@ -832,6 +834,7 @@ export async function collectDashboardSnapshot(options?: {
   let rawSessions: SessionRow[] = [];
   let allTasks: TaskRow[] = [];
   let rawDebates: DebateRow[] = [];
+  const drivers: Record<string, DriverRow[]> = {};
 
   if (fs.existsSync(paths.dbPath)) {
     let db: SqliteDriver | undefined;
@@ -840,6 +843,9 @@ export async function collectDashboardSnapshot(options?: {
       rawSessions = db.listSessions();
       allTasks = db.getAllTasks();
       rawDebates = db.getAllDebates();
+      for (const s of rawSessions) {
+        drivers[s.session_id] = db.listDrivers(s.session_id);
+      }
     } catch {
       // Ignore transient read issues
     } finally {
@@ -1011,6 +1017,7 @@ export async function collectDashboardSnapshot(options?: {
     allTasks,
     debates,
     allDebates,
+    drivers,
     subagentLogs,
     cliRecentSessions: readCliRecentSessions(projectRoot, {
       syncLocalTranscripts: true,

@@ -14,11 +14,16 @@ import type {
   AgentRole,
   DifficultyTier,
   DoneClaim,
+  DriverDetachReason,
+  DriverRow,
+  DriverSource,
   HarnessId,
   SessionPhase,
   TaskStatus,
   TaskTrack,
 } from "./types.ts";
+
+export type { DriverDetachReason, DriverRow, DriverSource };
 
 // ============================================================================
 // ASD Session ID Generation & Validation (CR-15 / CR-17.4)
@@ -102,6 +107,7 @@ export interface SessionInput {
   mainPid?: number | null;
   baseSha?: string | null;
   memo?: string | null;
+  driverSource?: DriverSource;
 }
 
 export interface TaskRow {
@@ -247,7 +253,30 @@ CREATE TABLE IF NOT EXISTS debates (
   insight_verdict_json TEXT,              -- JSON: { verdict, hard_constraints, decisions, risks, diversity_degraded? }
   FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS session_drivers (
+  driver_id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  harness TEXT NOT NULL,
+  model TEXT DEFAULT NULL,
+  harness_session_id TEXT DEFAULT NULL,
+  source TEXT NOT NULL,
+  attached_at INTEGER NOT NULL,
+  detached_at INTEGER DEFAULT NULL,
+  detach_reason TEXT DEFAULT NULL,
+  briefing_injected INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_session_active_driver
+  ON session_drivers(session_id) WHERE detached_at IS NULL;
+CREATE INDEX IF NOT EXISTS ix_session_drivers_sid
+  ON session_drivers(session_id, harness_session_id);
 `;
+
+export function generateDriverId(nowMs = Date.now()): string {
+  const rand = Math.random().toString(36).slice(2, 6).padEnd(4, "0").slice(0, 4);
+  return `drv-${nowMs.toString(36)}-${rand}`;
+}
 
 const TASK_COLUMNS = `task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, assigned_harness, assigned_model, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, done_claim_json, worktree_path, sub_session_id, commit_sha, duration_ms, is_cross_scope`;
 
@@ -296,6 +325,40 @@ export class SqliteDriver {
           "ALTER TABLE tasks ADD COLUMN is_cross_scope INTEGER NOT NULL DEFAULT 0"
         );
       }
+      // CR-01: Idempotent migration for existing sessions without any session_drivers rows
+      this.withImmediateTx(() => {
+        const orphanSessions = this.db
+          .prepare(
+            `SELECT s.session_id, s.main_harness, s.main_model, s.harness_session_id, s.created_at
+             FROM sessions s
+             WHERE NOT EXISTS (
+               SELECT 1 FROM session_drivers d WHERE d.session_id = s.session_id
+             )`
+          )
+          .all() as Array<{
+          session_id: string;
+          main_harness: string;
+          main_model: string | null;
+          harness_session_id: string | null;
+          created_at: number;
+        }>;
+        if (orphanSessions.length > 0) {
+          const insertStmt = this.db.prepare(
+            `INSERT INTO session_drivers (driver_id, session_id, harness, model, harness_session_id, source, attached_at, detached_at, detach_reason, briefing_injected)
+             VALUES (?, ?, ?, ?, ?, 'migrated', ?, NULL, NULL, 0)`
+          );
+          for (const s of orphanSessions) {
+            insertStmt.run(
+              generateDriverId(s.created_at || Date.now()),
+              s.session_id,
+              s.main_harness || "claude-code",
+              s.main_model ?? null,
+              s.harness_session_id ?? null,
+              s.created_at || Date.now()
+            );
+          }
+        }
+      });
     } catch {
       // Ignore migration check error if table already matches
     }
@@ -445,6 +508,18 @@ export class SqliteDriver {
           now,
           now
         );
+      if (session.mainHarness) {
+        this.insertDriver({
+          driver_id: generateDriverId(now),
+          session_id: session.sessionId,
+          harness: session.mainHarness,
+          model: session.mainModel ?? null,
+          harness_session_id: session.harnessSessionId ?? null,
+          source: session.driverSource ?? "cli-asd",
+          attached_at: now,
+          briefing_injected: 0,
+        });
+      }
       const row = this.getSession(session.sessionId);
       if (!row) throw new Error(`session insert failed: ${session.sessionId}`);
       return row;
@@ -685,6 +760,90 @@ export class SqliteDriver {
       const row = this.getTask(sessionId, taskId);
       if (!row) throw new Error(`task vanished: ${sessionId}/${taskId}`);
       return row;
+    });
+  }
+
+
+  // --------------------------------------------------------------------------
+  // session_drivers (CR-01)
+  // --------------------------------------------------------------------------
+
+  insertDriver(row: Omit<DriverRow, "detached_at" | "detach_reason">): DriverRow {
+    return this.withImmediateTx(() => {
+      this.db
+        .prepare(
+          `INSERT INTO session_drivers (driver_id, session_id, harness, model, harness_session_id, source, attached_at, detached_at, detach_reason, briefing_injected)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`
+        )
+        .run(
+          row.driver_id,
+          row.session_id,
+          row.harness,
+          row.model ?? null,
+          row.harness_session_id ?? null,
+          row.source,
+          row.attached_at,
+          row.briefing_injected ?? 0
+        );
+      return this.getDriver(row.driver_id)!;
+    });
+  }
+
+  getDriver(driverId: string): DriverRow | undefined {
+    return this.withImmediateTx(() => {
+      return this.db
+        .prepare("SELECT * FROM session_drivers WHERE driver_id = ?")
+        .get(driverId) as unknown as DriverRow | undefined;
+    });
+  }
+
+  getActiveDriver(sessionId: string): DriverRow | undefined {
+    return this.withImmediateTx(() => {
+      return this.db
+        .prepare(
+          "SELECT * FROM session_drivers WHERE session_id = ? AND detached_at IS NULL LIMIT 1"
+        )
+        .get(sessionId) as unknown as DriverRow | undefined;
+    });
+  }
+
+  listDrivers(sessionId: string): DriverRow[] {
+    return this.withImmediateTx(() => {
+      return this.db
+        .prepare(
+          "SELECT * FROM session_drivers WHERE session_id = ? ORDER BY attached_at ASC, rowid ASC"
+        )
+        .all(sessionId) as unknown as DriverRow[];
+    });
+  }
+
+  detachDriverRow(driverId: string, reason: DriverDetachReason, at: number): void {
+    this.withImmediateTx(() => {
+      this.db
+        .prepare(
+          "UPDATE session_drivers SET detached_at = ?, detach_reason = ? WHERE driver_id = ?"
+        )
+        .run(at, reason, driverId);
+    });
+  }
+
+  setDriverHarnessSessionId(driverId: string, harnessSessionId: string): void {
+    this.withImmediateTx(() => {
+      this.db
+        .prepare(
+          "UPDATE session_drivers SET harness_session_id = ? WHERE driver_id = ?"
+        )
+        .run(harnessSessionId, driverId);
+    });
+  }
+
+  markDriverBriefingInjected(driverId: string): void {
+    this.withImmediateTx(() => {
+      this.db
+        .prepare(
+          "UPDATE session_drivers SET briefing_injected = 1 WHERE driver_id = ?"
+        )
+        .run(driverId);
     });
   }
 
