@@ -13,15 +13,20 @@
  *    - `/asd` orchestration & GUI main sessions are stored in `<projectRoot>/.asd/sessions/<asd-id>/`
  *      (`main.json` + `subagents/<sub-id>/meta.json`) and linked back to `cli-recent.json`.
  * 4. Multi-Project Discovery (`listKnownProjects`):
- *    - Scans `~/.asd/state/<project-hash>/core.db` to discover all projects and their latest sessions.
+ *    - Queries the shared `~/.asd/state/core.db` to discover all projects and their latest sessions.
  */
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureGitExclude, resolveAsdPaths } from "./config.ts";
-import { openProjectDb, SqliteDriver } from "./db.ts";
+import {
+  computeProjectHash,
+  ensureGitExclude,
+  resolveAsdPaths,
+  resolveHomeDir,
+} from "./config.ts";
+import { openProjectDb, SqliteDriver, type SessionRow } from "./db.ts";
 import { attachDriver, type DriverSource } from "./drivers.ts";
 import { atomicWriteFileSync } from "./render.ts";
 import type {
@@ -978,53 +983,51 @@ export function linkHarnessSessionToAsdSession(options: {
 }
 
 /**
- * Scans `<homeDir>/.asd/state/<projectHash>/core.db` to discover all projects
- * that have used ASD, without requiring a separate GUI database.
+ * Discovers all projects that have used ASD by querying the shared state DB
+ * (one entry per distinct sessions.project_root) — no directory scanning.
  */
 export function listKnownProjects(options?: {
   homeDir?: string;
   extraProjectRoots?: string[];
 }): KnownProjectSummary[] {
-  const home = options?.homeDir ?? os.homedir();
+  const home = resolveHomeDir(options?.homeDir);
   const stateRoot = path.join(home, ".asd", "state");
+  const dbPath = path.join(stateRoot, "core.db");
   const byHash = new Map<string, KnownProjectSummary>();
 
-  if (fs.existsSync(stateRoot)) {
+  if (fs.existsSync(dbPath)) {
+    // Unscoped on purpose: discovery is inherently cross-project.
+    let db: SqliteDriver | undefined;
     try {
-      const entries = fs.readdirSync(stateRoot, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const dbPath = path.join(stateRoot, entry.name, "core.db");
-        if (!fs.existsSync(dbPath)) continue;
-
-        let db: SqliteDriver | undefined;
-        try {
-          db = new SqliteDriver(dbPath);
-          const sessions = db.listSessions();
-          if (sessions.length === 0) continue;
-          const latest = sessions[0]!;
-          const projectRoot = latest.project_root;
-          byHash.set(entry.name, {
-            projectHash: entry.name,
-            projectRoot,
-            dbPath,
-            existsOnDisk: fs.existsSync(projectRoot),
-            sessionCount: sessions.length,
-            latestSessionId: latest.session_id,
-            latestHarness: latest.main_harness,
-            latestMemo: latest.memo ?? null,
-            updatedAt: latest.updated_at || latest.created_at,
-          });
-        } catch {
-          // Ignore unreadable DB
-        } finally {
-          try {
-            db?.close();
-          } catch {}
-        }
+      db = new SqliteDriver(dbPath); // unscoped: cross-project discovery
+      const sessions = db.listSessions();
+      const perProject = new Map<string, SessionRow[]>();
+      for (const s of sessions) {
+        const list = perProject.get(s.project_root);
+        if (list) list.push(s);
+        else perProject.set(s.project_root, [s]);
+      }
+      for (const [projectRoot, projectSessions] of perProject) {
+        const latest = projectSessions[0]!;
+        const hash = computeProjectHash(projectRoot);
+        byHash.set(hash, {
+          projectHash: hash,
+          projectRoot,
+          dbPath,
+          existsOnDisk: fs.existsSync(projectRoot),
+          sessionCount: projectSessions.length,
+          latestSessionId: latest.session_id,
+          latestHarness: latest.main_harness,
+          latestMemo: latest.memo ?? null,
+          updatedAt: latest.updated_at || latest.created_at,
+        });
       }
     } catch {
-      // Ignore state dir scan error
+      // Ignore unreadable DB
+    } finally {
+      try {
+        db?.close();
+      } catch {}
     }
   }
 

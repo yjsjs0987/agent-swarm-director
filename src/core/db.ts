@@ -290,8 +290,16 @@ const TASK_COLUMNS = `task_id, session_id, turn, title, track, role, category, d
 export class SqliteDriver {
   private db: DatabaseSync;
   private txDepth = 0;
+  /**
+   * When set, all multi-row reads (list/get-latest/all-tasks/all-debates) are
+   * scoped to this project root — required now that every project shares one
+   * DB file. Direct construction without projectRoot stays unscoped (tests,
+   * custom DBs); openProjectDb always sets it.
+   */
+  private scopeProjectRoot: string | null;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, projectRoot?: string) {
+    this.scopeProjectRoot = projectRoot ?? null;
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     // Separate statements; the busy_timeout result row key is "timeout".
@@ -415,18 +423,41 @@ export class SqliteDriver {
       .get(sessionId) as unknown as SessionRow | undefined;
   }
 
-  /** Return the most recently created session, or undefined if none exists. */
+  /** Return the most recently created session for this project, or undefined. */
   getLatestSession(): SessionRow | undefined {
+    if (this.scopeProjectRoot !== null) {
+      return this.db
+        .prepare(
+          "SELECT * FROM sessions WHERE project_root = ? ORDER BY created_at DESC LIMIT 1"
+        )
+        .get(this.scopeProjectRoot) as unknown as SessionRow | undefined;
+    }
     return this.db
       .prepare("SELECT * FROM sessions ORDER BY created_at DESC LIMIT 1")
       .get() as unknown as SessionRow | undefined;
   }
 
-  /** Return all sessions ordered by created_at DESC (newest first). */
+  /** Return all sessions of this project ordered by created_at DESC (newest first). */
   listSessions(): SessionRow[] {
+    if (this.scopeProjectRoot !== null) {
+      return this.db
+        .prepare(
+          "SELECT * FROM sessions WHERE project_root = ? ORDER BY created_at DESC"
+        )
+        .all(this.scopeProjectRoot) as unknown as SessionRow[];
+    }
     return this.db
       .prepare("SELECT * FROM sessions ORDER BY created_at DESC")
       .all() as unknown as SessionRow[];
+  }
+
+  /** Distinct project roots present in this DB (single-DB discovery source). */
+  listProjectRoots(): string[] {
+    return (
+      this.db
+        .prepare("SELECT DISTINCT project_root FROM sessions ORDER BY project_root")
+        .all() as unknown as Array<{ project_root: string }>
+    ).map((r) => r.project_root);
   }
 
   /** Update the short memo attached to a session. */
@@ -896,12 +927,28 @@ export class SqliteDriver {
   }
 
   getAllDebates(): DebateRow[] {
+    if (this.scopeProjectRoot !== null) {
+      return this.db
+        .prepare(
+          `SELECT d.* FROM debates d JOIN sessions s ON d.session_id = s.session_id
+           WHERE s.project_root = ? ORDER BY d.rowid DESC`
+        )
+        .all(this.scopeProjectRoot) as unknown as DebateRow[];
+    }
     return this.db
       .prepare("SELECT * FROM debates ORDER BY rowid DESC")
       .all() as unknown as DebateRow[];
   }
 
   getAllTasks(): TaskRow[] {
+    if (this.scopeProjectRoot !== null) {
+      return this.db
+        .prepare(
+          `SELECT t.* FROM tasks t JOIN sessions s ON t.session_id = s.session_id
+           WHERE s.project_root = ? ORDER BY t.turn, t.task_id`
+        )
+        .all(this.scopeProjectRoot) as unknown as TaskRow[];
+    }
     return this.db
       .prepare("SELECT * FROM tasks ORDER BY turn, task_id")
       .all() as unknown as TaskRow[];
@@ -979,12 +1026,16 @@ export class SqliteDriver {
 // Project DB helper
 // ============================================================================
 
-/** Ensure the 2-path layout exists, then open the project's core.db. */
+/**
+ * Ensure the 2-path layout exists, then open the project's scoped view of the
+ * shared state DB. Every project reads/writes the same state/core.db file; the
+ * driver scopes multi-row queries to this project via sessions.project_root.
+ */
 export function openProjectDb(
   projectRoot: string,
   homeDir?: string
 ): SqliteDriver {
   ensureProjectInitialized(projectRoot, homeDir);
   const paths = resolveAsdPaths(projectRoot, homeDir);
-  return new SqliteDriver(paths.dbPath);
+  return new SqliteDriver(paths.dbPath, projectRoot);
 }

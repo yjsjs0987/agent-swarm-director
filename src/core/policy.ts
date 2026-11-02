@@ -685,7 +685,8 @@ export function evaluateStopHook(
     if (!fs.existsSync(paths.dbPath)) {
       return { decision: "allow" };
     }
-    driver = new SqliteDriver(paths.dbPath);
+    // Scoped to projectRoot: the shared DB holds other projects' sessions too.
+    driver = new SqliteDriver(paths.dbPath, projectRoot);
     ownedDriver = true;
   }
 

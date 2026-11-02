@@ -773,7 +773,7 @@ export async function runSubagentControlAction(options: {
       if (fs.existsSync(paths.dbPath) || fs.existsSync(coreDbFallback)) {
         db = fs.existsSync(paths.dbPath)
           ? openProjectDb(projectRoot, options.homeDir)
-          : new SqliteDriver(coreDbFallback);
+          : new SqliteDriver(coreDbFallback, projectRoot);
         const debMatchInfo = target.subSessionId.match(/-deb-(D-[A-Za-z0-9-]+)-(r1|r2)/);
         if (debMatchInfo) {
           const debId = debMatchInfo[1]!;
@@ -846,7 +846,7 @@ export async function runSubagentControlAction(options: {
     if (fs.existsSync(paths.dbPath) || fs.existsSync(coreDbFallback)) {
       const db = fs.existsSync(paths.dbPath)
         ? openProjectDb(projectRoot, options.homeDir)
-        : new SqliteDriver(coreDbFallback);
+        : new SqliteDriver(coreDbFallback, projectRoot);
       try {
         const taskRow = db.getTask(target.sessionId, target.taskId);
         if (taskRow) {
@@ -1004,7 +1004,7 @@ export async function runSubagentControlAction(options: {
       const coreDbFallback = path.join(projectRoot, ".asd", "core.db");
       const db = fs.existsSync(paths.dbPath)
         ? openProjectDb(projectRoot, options.homeDir)
-        : new SqliteDriver(coreDbFallback);
+        : new SqliteDriver(coreDbFallback, projectRoot);
       try {
         const sess = db.getSession(target.sessionId);
         const execTask = db.getTask(target.sessionId, effectiveTaskId);

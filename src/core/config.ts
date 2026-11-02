@@ -1,11 +1,12 @@
 /**
- * ASD v2.2 2-Path configuration.
+ * ASD v2.3.2 2-Path configuration.
  *
- * globalStateDir (~/.asd): SQLite DB + global routing/mcp config only.
+ * globalStateDir (~/.asd): single SQLite DB (state/core.db) + global routing/mcp config.
  * localViewDir (<project>/.asd): PLAN.md, sessions, worktrees, local routing override.
  *
- * <project-hash> is case-normalized (win32/darwin) so `C:\Proj` and `c:/proj/`
- * hash identically — blocks case-swap security bypasses (.GIT/, .Asd/, .ENV).
+ * All projects share one DB; rows are scoped by sessions.project_root.
+ * projectHash is still computed (case-normalized, win32/darwin) for callers
+ * that key projects (GUI lists), but it no longer maps to a directory.
  */
 
 import * as crypto from "node:crypto";
@@ -15,8 +16,7 @@ import * as path from "node:path";
 import { parseJsonc } from "./jsonc.ts";
 import { ASD_VERSION, type RoutingConfig } from "./types.ts";
 
-/**
- * Resolve the closest EXISTING ancestor of targetPath via realpathSync.native,
+/** Resolve the closest EXISTING ancestor of targetPath via realpathSync.native,
  * then re-join the remaining (possibly non-existent) segments.
  * Never throws ENOENT; if even the root doesn't exist, returns input unchanged.
  */
@@ -70,7 +70,7 @@ export function computeProjectHash(projectRoot: string): string {
 
 export interface AsdPaths {
   projectHash: string;
-  /** <home>/.asd — global DB + global config only */
+  /** <home>/.asd — single shared DB + global config only */
   globalStateDir: string;
   dbPath: string;
   lastSyncPath: string;
@@ -84,16 +84,26 @@ export interface AsdPaths {
   sessionsDir: string;
 }
 
+/**
+ * Home dir resolution: explicit arg > ASD_HOME_DIR env (test/sandbox isolation)
+ * > os.homedir(). ASD_HOME_DIR at this single choke point keeps every consumer
+ * (CLI, MCP, hooks, GUI) isolated without per-callsite changes.
+ */
+export function resolveHomeDir(explicit?: string): string {
+  return explicit ?? process.env.ASD_HOME_DIR ?? os.homedir();
+}
+
 /** Resolve the 2-Path layout for a project. Pure computation; creates nothing. */
 export function resolveAsdPaths(projectRoot: string, homeDir?: string): AsdPaths {
-  const home = homeDir ?? os.homedir();
+  const home = resolveHomeDir(homeDir);
   const projectHash = computeProjectHash(projectRoot);
   const globalStateDir = path.join(home, ".asd");
   const localViewDir = path.join(projectRoot, ".asd");
   return {
     projectHash,
     globalStateDir,
-    dbPath: path.join(globalStateDir, "state", projectHash, "core.db"),
+    // Single shared DB: all projects in state/core.db, scoped by project_root.
+    dbPath: path.join(globalStateDir, "state", "core.db"),
     lastSyncPath: path.join(globalStateDir, "state", "last-sync.json"),
     globalRoutingPath: path.join(globalStateDir, "routing.jsonc"),
     globalMcpPath: path.join(globalStateDir, "mcp.jsonc"),
@@ -185,9 +195,9 @@ export function ensureGitExclude(dir: string, pattern: string): void {
 }
 
 /**
- * Lazy Project Auto-Init: create <project>/.asd/{wt,sessions} and
- * <home>/.asd/state/<hash>/, and register `.asd/` in .git/info/exclude
- * when the project is a git repo. Idempotent.
+ * Lazy Project Auto-Init: create <project>/.asd/{wt,sessions} and the shared
+ * <home>/.asd/state/ dir, and register `.asd/` in .git/info/exclude when the
+ * project is a git repo. Idempotent.
  */
 export function ensureProjectInitialized(
   projectRoot: string,
@@ -231,7 +241,7 @@ export function compareSemver(a: string, b: string): number {
 }
 
 function getUpdateCachePath(homeDir?: string): string {
-  const home = homeDir || process.env.ASD_HOME_DIR || os.homedir();
+  const home = resolveHomeDir(homeDir);
   return path.join(home, ".asd", "state", "update-check.json");
 }
 
