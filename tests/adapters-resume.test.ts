@@ -98,7 +98,7 @@ test("CR-17.2 & Appendix B: tasks.thinking_effort column persists in SQLite and 
     assert.equal(typeof (asd as Record<string, unknown>)[sym], "function", `Missing export in src/index.ts: ${sym}`);
   }
   assert.equal(typeof asd.buildSessionDemotion, "function", "buildSessionDemotion must be exported from src/index.ts");
-  assert.equal(asd.ASD_VERSION, "2.3.2");
+  assert.equal(asd.ASD_VERSION, "2.4.0");
 });
 
 test("T1.1: buildSessionDemotion resolves active driver across harnesses and errors cleanly on missing driver or harness_session_id", () => {

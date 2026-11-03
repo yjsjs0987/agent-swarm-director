@@ -1,5 +1,5 @@
 /**
- * ASD v2.3.2 2-Path configuration.
+ * ASD v2.4.0 2-Path configuration.
  *
  * globalStateDir (~/.asd): single SQLite DB (state/core.db) + global routing/mcp config.
  * localViewDir (<project>/.asd): PLAN.md, sessions, worktrees, local routing override.

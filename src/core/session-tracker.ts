@@ -19,10 +19,12 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import {
   computeProjectHash,
   ensureGitExclude,
+  normalizePathForCompare,
   resolveAsdPaths,
   resolveHomeDir,
 } from "./config.ts";
@@ -380,7 +382,10 @@ export function extractHarnessSessionIdFromOutput(
  * Strips Antigravity `<USER_REQUEST>` / `<ADDITIONAL_METADATA>` wrapper tags if present.
  */
 export function normalizeOneLineSummary(raw: string, maxLen = 50): string {
-  const cleaned = raw
+  const userReqMatch = /<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i.exec(raw);
+  const baseText = userReqMatch ? userReqMatch[1]! : raw;
+  const cleaned = baseText
+    .replace(/<CONTEXT_SUMMARY>[\s\S]*?<\/CONTEXT_SUMMARY>/gi, " ")
     .replace(/<ADDITIONAL_METADATA>[\s\S]*$/i, "")
     .replace(/<\/?USER_REQUEST>/gi, " ")
     .replace(/\r?\n+/g, " ")
@@ -403,8 +408,18 @@ function normalizePathOrFileUri(raw: string): string {
   return path.resolve(trimmed);
 }
 
+function isCodexSystemBoilerplate(text: string): boolean {
+  const t = text.trim();
+  return (
+    t.startsWith("<environment_context>") ||
+    t.startsWith("<permissions instructions>") ||
+    t.startsWith("# AGENTS.md instructions") ||
+    t.startsWith("<INSTRUCTIONS>")
+  );
+}
+
 /**
- * Reads up to 8KB from the beginning of a local transcript JSONL file to extract
+ * Reads up to 32KB from the beginning of a local transcript JSONL file to extract
  * the first user prompt with zero LLM overhead (<1ms).
  */
 export function extractSummaryFromTranscriptFile(transcriptPath: string): string {
@@ -415,7 +430,7 @@ export function extractSummaryFromTranscriptFile(transcriptPath: string): string
 
     const fd = fs.openSync(transcriptPath, "r");
     try {
-      const bufSize = Math.min(stat.size, 8192);
+      const bufSize = Math.min(stat.size, 32768);
       const buf = Buffer.alloc(bufSize);
       const bytesRead = fs.readSync(fd, buf, 0, bufSize, 0);
       const headText = buf.toString("utf8", 0, bytesRead);
@@ -426,6 +441,27 @@ export function extractSummaryFromTranscriptFile(transcriptPath: string): string
         if (!line.startsWith("{")) continue;
         try {
           const obj = JSON.parse(line) as Record<string, unknown>;
+          // Codex event_msg user_message or response_item user message
+          if (obj.type === "event_msg" && obj.payload && typeof obj.payload === "object") {
+            const p = obj.payload as Record<string, unknown>;
+            if (p.type === "user_message" && typeof p.message === "string" && p.message.trim()) {
+              return normalizeOneLineSummary(p.message);
+            }
+          }
+          if (obj.type === "response_item" && obj.payload && typeof obj.payload === "object") {
+            const p = obj.payload as Record<string, unknown>;
+            if (p.role === "user" && Array.isArray(p.content)) {
+              for (const part of p.content) {
+                if (part && typeof part === "object") {
+                  const txt = String((part as Record<string, unknown>).text ?? "").trim();
+                  if (txt && !isCodexSystemBoilerplate(txt)) {
+                    return normalizeOneLineSummary(txt);
+                  }
+                }
+              }
+            }
+          }
+
           // Claude / Cursor / Codex / AGY user message shapes
           const role =
             obj.role ??
@@ -721,36 +757,46 @@ export function getCliRecentSessionsPath(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), ".asd", "sessions", "cli-recent.json");
 }
 
-/**
- * Scans local Antigravity brain transcripts (`~/.gemini/antigravity-cli/brain/*`)
- * for main sessions matching `projectRoot` and syncs any missing entries into
- * `<projectRoot>/.asd/sessions/cli-recent.json`.
- */
-export function syncLocalHarnessTranscripts(
-  projectRoot: string,
-  options?: { homeDir?: string; forceCreateDir?: boolean }
-): CliRecentSessionEntry[] {
-  const resolvedRoot = path.resolve(projectRoot);
-  if (!fs.existsSync(resolvedRoot)) return [];
+interface DiscoveredLocalTranscript {
+  harnessSessionId: string;
+  harness: HarnessId;
+  model: string | null;
+  summary: string;
+  transcriptPath: string;
+  startedAt: number;
+  updatedAt: number;
+}
 
-  const homeDir = options?.homeDir ? path.resolve(options.homeDir) : os.homedir();
+function readFileHeadUtf8(filePath: string, maxBytes = 32768): { headText: string; stat: fs.Stats } | null {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size === 0) return null;
+    const fd = fs.openSync(filePath, "r");
+    try {
+      const readLen = Math.min(stat.size, maxBytes);
+      const buf = Buffer.alloc(readLen);
+      const bytesRead = fs.readSync(fd, buf, 0, readLen, 0);
+      return { headText: buf.toString("utf8", 0, bytesRead), stat };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+function scanAntigravityLocalSessions(
+  resolvedRoot: string,
+  homeDir: string,
+  discovered: DiscoveredLocalTranscript[]
+): void {
   const brainDirs = [
     path.join(homeDir, ".gemini", "antigravity-cli", "brain"),
     path.join(homeDir, ".gemini", "antigravity", "brain"),
   ];
-
   const normSlash = resolvedRoot.replaceAll("\\", "/").toLowerCase();
   const normBackslash = resolvedRoot.replaceAll("/", "\\").toLowerCase();
   const normEscapedBackslash = normBackslash.replaceAll("\\", "\\\\");
-
-  const discovered: Array<{
-    harnessSessionId: string;
-    harness: HarnessId;
-    summary: string;
-    transcriptPath: string;
-    startedAt: number;
-    updatedAt: number;
-  }> = [];
 
   for (const brainDir of brainDirs) {
     if (!fs.existsSync(brainDir)) continue;
@@ -773,53 +819,411 @@ export function syncLocalHarnessTranscripts(
       );
       if (!fs.existsSync(transcriptPath)) continue;
 
-      try {
-        const stat = fs.statSync(transcriptPath);
-        if (!stat.isFile() || stat.size === 0) continue;
+      const headInfo = readFileHeadUtf8(transcriptPath, 32768);
+      if (!headInfo) continue;
+      const { headText, stat } = headInfo;
 
-        const fd = fs.openSync(transcriptPath, "r");
-        let headText = "";
+      // Skip subagent conversations (whose step 0 is a SYSTEM_MESSAGE from a parent agent)
+      const firstNewline = headText.indexOf("\n");
+      const firstLine = (firstNewline >= 0 ? headText.slice(0, firstNewline) : headText).trim();
+      if (firstLine.includes('"type":"SYSTEM_MESSAGE"') && firstLine.includes("sender=")) {
+        continue;
+      }
+
+      const lowerHead = headText.toLowerCase();
+      if (
+        !lowerHead.includes(normSlash) &&
+        !lowerHead.includes(normBackslash) &&
+        !lowerHead.includes(normEscapedBackslash)
+      ) {
+        continue;
+      }
+
+      const summary = extractSummaryFromTranscriptFile(transcriptPath);
+      discovered.push({
+        harnessSessionId: convId,
+        harness: "antigravity",
+        model: null,
+        summary: summary || `Antigravity session (${convId.slice(0, 8)})`,
+        transcriptPath,
+        startedAt: Math.round(stat.birthtimeMs || stat.mtimeMs),
+        updatedAt: Math.round(stat.mtimeMs),
+      });
+    }
+  }
+}
+
+function encodeClaudeProjectDirCandidates(resolvedRoot: string): Set<string> {
+  const candidates = new Set<string>();
+  const slashNorm = resolvedRoot.replaceAll("\\", "/").replace(/\/+$/, "");
+  const backNorm = resolvedRoot.replaceAll("/", "\\").replace(/\\+$/, "");
+  for (const variant of [resolvedRoot, slashNorm, backNorm]) {
+    candidates.add(variant.replace(/[:\\/]/g, "-").toLowerCase());
+    candidates.add(variant.replace(/[^a-zA-Z0-9]/g, "-").toLowerCase());
+  }
+  return candidates;
+}
+
+function scanClaudeCodeLocalSessions(
+  resolvedRoot: string,
+  homeDir: string,
+  discovered: DiscoveredLocalTranscript[],
+  maxFilesPerDir = 30
+): void {
+  const projectsDir = path.join(homeDir, ".claude", "projects");
+  if (!fs.existsSync(projectsDir)) return;
+
+  const targetNorm = normalizePathForCompare(resolvedRoot);
+  const encodedCandidates = encodeClaudeProjectDirCandidates(resolvedRoot);
+
+  let dirEntries: fs.Dirent[] = [];
+  try {
+    dirEntries = fs.readdirSync(projectsDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+
+  for (const d of dirEntries) {
+    if (!d.isDirectory()) continue;
+    const projFolder = path.join(projectsDir, d.name);
+    const dirNameMatch = encodedCandidates.has(d.name.toLowerCase());
+
+    let files: Array<{ name: string; fullPath: string; mtimeMs: number; birthtimeMs: number }> = [];
+    try {
+      for (const f of fs.readdirSync(projFolder, { withFileTypes: true })) {
+        if (!f.isFile() || !f.name.endsWith(".jsonl")) continue;
+        const fullPath = path.join(projFolder, f.name);
         try {
-          const readLen = Math.min(stat.size, 32768);
-          const buf = Buffer.alloc(readLen);
-          const bytesRead = fs.readSync(fd, buf, 0, readLen, 0);
-          headText = buf.toString("utf8", 0, bytesRead);
-        } finally {
-          fs.closeSync(fd);
+          const st = fs.statSync(fullPath);
+          if (st.size > 0) {
+            files.push({
+              name: f.name,
+              fullPath,
+              mtimeMs: st.mtimeMs,
+              birthtimeMs: st.birthtimeMs || st.mtimeMs,
+            });
+          }
+        } catch {
+          // ignore
         }
+      }
+    } catch {
+      continue;
+    }
 
-        // Skip subagent conversations (whose step 0 is a SYSTEM_MESSAGE from a parent agent)
-        const firstNewline = headText.indexOf("\n");
-        const firstLine = (firstNewline >= 0 ? headText.slice(0, firstNewline) : headText).trim();
-        if (firstLine.includes('"type":"SYSTEM_MESSAGE"') && firstLine.includes("sender=")) {
-          continue;
+    if (files.length === 0) continue;
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    files = files.slice(0, maxFilesPerDir);
+
+    for (const fileInfo of files) {
+      const head = readFileHeadUtf8(fileInfo.fullPath, 16384);
+      if (!head) continue;
+
+      let matchesProject = dirNameMatch;
+      let detectedModel: string | null = null;
+      const lines = head.headText.split(/\r?\n/);
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line.startsWith("{")) continue;
+        try {
+          const obj = JSON.parse(line) as Record<string, unknown>;
+          if (!matchesProject && typeof obj.cwd === "string" && obj.cwd.trim()) {
+            if (normalizePathForCompare(obj.cwd) === targetNorm) {
+              matchesProject = true;
+            } else {
+              // Explicit cwd for another project -> skip immediately
+              break;
+            }
+          }
+          if (!detectedModel && obj.message && typeof obj.message === "object") {
+            const msgModel = (obj.message as Record<string, unknown>).model;
+            if (typeof msgModel === "string" && msgModel.trim()) {
+              detectedModel = msgModel.trim();
+            }
+          }
+        } catch {
+          // ignore
         }
+      }
 
-        const lowerHead = headText.toLowerCase();
-        if (
-          !lowerHead.includes(normSlash) &&
-          !lowerHead.includes(normBackslash) &&
-          !lowerHead.includes(normEscapedBackslash)
-        ) {
-          continue;
+      if (!matchesProject) continue;
+      const sessionId = path.basename(fileInfo.name, ".jsonl");
+      const summary = extractSummaryFromTranscriptFile(fileInfo.fullPath);
+      discovered.push({
+        harnessSessionId: sessionId,
+        harness: "claude-code",
+        model: detectedModel,
+        summary: summary || `Claude session (${sessionId.slice(0, 8)})`,
+        transcriptPath: fileInfo.fullPath,
+        startedAt: Math.round(fileInfo.birthtimeMs),
+        updatedAt: Math.round(fileInfo.mtimeMs),
+      });
+    }
+  }
+}
+
+function scanCodexLocalSessions(
+  resolvedRoot: string,
+  homeDir: string,
+  discovered: DiscoveredLocalTranscript[],
+  maxFiles = 40
+): void {
+  const sessionsRoot = path.join(homeDir, ".codex", "sessions");
+  if (!fs.existsSync(sessionsRoot)) return;
+
+  const targetNorm = normalizePathForCompare(resolvedRoot);
+  const rolloutFiles: Array<{ fullPath: string; mtimeMs: number; birthtimeMs: number }> = [];
+
+  function walkCodexDir(dir: string, depth: number): void {
+    if (depth > 4) return;
+    let entries: fs.Dirent[] = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walkCodexDir(fullPath, depth + 1);
+      } else if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
+        try {
+          const st = fs.statSync(fullPath);
+          if (st.size > 0) {
+            rolloutFiles.push({
+              fullPath,
+              mtimeMs: st.mtimeMs,
+              birthtimeMs: st.birthtimeMs || st.mtimeMs,
+            });
+          }
+        } catch {
+          // ignore
         }
-
-        const summary = extractSummaryFromTranscriptFile(transcriptPath);
-        discovered.push({
-          harnessSessionId: convId,
-          harness: "antigravity",
-          summary: summary || `Antigravity session (${convId.slice(0, 8)})`,
-          transcriptPath,
-          startedAt: Math.round(stat.birthtimeMs || stat.mtimeMs),
-          updatedAt: Math.round(stat.mtimeMs),
-        });
-      } catch {
-        // Ignore unreadable transcript
       }
     }
   }
 
-  if (discovered.length === 0) return [];
+  walkCodexDir(sessionsRoot, 0);
+  if (rolloutFiles.length === 0) return;
+
+  rolloutFiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const candidates = rolloutFiles.slice(0, maxFiles);
+
+  for (const fileInfo of candidates) {
+    const head = readFileHeadUtf8(fileInfo.fullPath, 32768);
+    if (!head) continue;
+
+    let threadId = "";
+    let sessionCwd = "";
+    let detectedModel: string | null = null;
+    const lines = head.headText.split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line.startsWith("{")) continue;
+      try {
+        const obj = JSON.parse(line) as Record<string, unknown>;
+        const payload =
+          obj.payload && typeof obj.payload === "object"
+            ? (obj.payload as Record<string, unknown>)
+            : undefined;
+        if (obj.type === "session_meta" && payload) {
+          if (typeof payload.id === "string" && payload.id.trim()) {
+            threadId = payload.id.trim();
+          }
+          if (typeof payload.cwd === "string" && payload.cwd.trim()) {
+            sessionCwd = payload.cwd.trim();
+          }
+          if (typeof payload.model === "string" && payload.model.trim()) {
+            detectedModel = payload.model.trim();
+          }
+        } else if (obj.type === "turn_context" && payload) {
+          if (!sessionCwd && typeof payload.cwd === "string" && payload.cwd.trim()) {
+            sessionCwd = payload.cwd.trim();
+          }
+          if (!detectedModel && typeof payload.model === "string" && payload.model.trim()) {
+            detectedModel = payload.model.trim();
+          }
+        }
+        if (threadId && sessionCwd) break;
+      } catch {
+        // ignore
+      }
+    }
+
+    if (!sessionCwd || normalizePathForCompare(sessionCwd) !== targetNorm) {
+      continue;
+    }
+
+    if (!threadId) {
+      const base = path.basename(fileInfo.fullPath, ".jsonl");
+      const m = base.match(/rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)$/);
+      threadId = m?.[1] || base;
+    }
+
+    const summary = extractSummaryFromTranscriptFile(fileInfo.fullPath);
+    discovered.push({
+      harnessSessionId: threadId,
+      harness: "codex",
+      model: detectedModel,
+      summary: summary || `Codex session (${threadId.slice(0, 8)})`,
+      transcriptPath: fileInfo.fullPath,
+      startedAt: Math.round(fileInfo.birthtimeMs),
+      updatedAt: Math.round(fileInfo.mtimeMs),
+    });
+  }
+}
+
+function scanOpenCodeLocalSessions(
+  resolvedRoot: string,
+  homeDir: string,
+  discovered: DiscoveredLocalTranscript[],
+  maxRows = 50
+): void {
+  const dbCandidates = [
+    path.join(homeDir, ".local", "share", "opencode", "opencode.db"),
+    path.join(homeDir, ".opencode", "opencode.db"),
+  ];
+  if (process.env.LOCALAPPDATA) {
+    dbCandidates.push(path.join(process.env.LOCALAPPDATA, "opencode", "opencode.db"));
+  }
+
+  const targetNorm = normalizePathForCompare(resolvedRoot);
+
+  for (const dbPath of dbCandidates) {
+    if (!fs.existsSync(dbPath)) continue;
+    let db: DatabaseSync | null = null;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      const tables = db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .all() as Array<{ name: string }>;
+      const tableNames = new Set(tables.map((t) => t.name));
+      if (!tableNames.has("session")) continue;
+
+      const sessionColsInfo = db.prepare("PRAGMA table_info(session)").all() as Array<{ name: string }>;
+      const sessionCols = new Set(sessionColsInfo.map((c) => c.name));
+      if (!sessionCols.has("id")) continue;
+
+      const hasProjectTable = tableNames.has("project") && sessionCols.has("project_id");
+      let projectWorktreeCol: string | null = null;
+      if (hasProjectTable) {
+        const projCols = new Set(
+          (db.prepare("PRAGMA table_info(project)").all() as Array<{ name: string }>).map((c) => c.name)
+        );
+        for (const cand of ["worktree", "directory", "path", "project_root"]) {
+          if (projCols.has(cand)) {
+            projectWorktreeCol = cand;
+            break;
+          }
+        }
+      }
+
+      const dirCol = ["directory", "cwd", "project_root", "worktree"].find((c) => sessionCols.has(c)) ?? null;
+      const titleCol = ["title", "summary", "name"].find((c) => sessionCols.has(c)) ?? null;
+      const createdCol = ["time_created", "created_at", "started_at"].find((c) => sessionCols.has(c)) ?? null;
+      const updatedCol = ["time_updated", "updated_at"].find((c) => sessionCols.has(c)) ?? null;
+      const parentIdCol = sessionCols.has("parent_id") ? "parent_id" : sessionCols.has("parentID") ? "parentID" : null;
+
+      let sql = `SELECT s.id AS id`;
+      sql += titleCol ? `, s.${titleCol} AS title` : `, NULL AS title`;
+      sql += dirCol ? `, s.${dirCol} AS dir` : `, NULL AS dir`;
+      sql += createdCol ? `, s.${createdCol} AS created_at` : `, NULL AS created_at`;
+      sql += updatedCol ? `, s.${updatedCol} AS updated_at` : `, NULL AS updated_at`;
+      sql += parentIdCol ? `, s.${parentIdCol} AS parent_id` : `, NULL AS parent_id`;
+      if (hasProjectTable && projectWorktreeCol) {
+        sql += `, p.${projectWorktreeCol} AS proj_dir FROM session s LEFT JOIN project p ON s.project_id = p.id`;
+      } else {
+        sql += `, NULL AS proj_dir FROM session s`;
+      }
+      if (updatedCol) {
+        sql += ` ORDER BY s.${updatedCol} DESC`;
+      }
+      sql += ` LIMIT ${maxRows}`;
+
+      const rows = db.prepare(sql).all() as Array<{
+        id: string;
+        title?: string | null;
+        dir?: string | null;
+        proj_dir?: string | null;
+        created_at?: number | string | null;
+        updated_at?: number | string | null;
+        parent_id?: string | null;
+      }>;
+
+      const fileMtime = Math.round(fs.statSync(dbPath).mtimeMs);
+      for (const row of rows) {
+        if (!row.id || row.parent_id) continue; // skip subagent sessions
+        const rawDir = (row.dir || row.proj_dir || "").trim();
+        if (!rawDir || normalizePathForCompare(rawDir) !== targetNorm) continue;
+
+        const parseTs = (v: number | string | null | undefined, fallback: number): number => {
+          if (typeof v === "number" && Number.isFinite(v)) {
+            return v < 1e11 ? Math.round(v * 1000) : Math.round(v);
+          }
+          if (typeof v === "string" && v.trim()) {
+            const n = Number(v);
+            if (Number.isFinite(n)) return n < 1e11 ? Math.round(n * 1000) : Math.round(n);
+            const parsed = Date.parse(v);
+            if (!Number.isNaN(parsed)) return parsed;
+          }
+          return fallback;
+        };
+
+        const updatedAt = parseTs(row.updated_at, fileMtime);
+        const startedAt = parseTs(row.created_at, updatedAt);
+        const summary = row.title ? normalizeOneLineSummary(String(row.title)) : `OpenCode session (${row.id.slice(0, 8)})`;
+
+        discovered.push({
+          harnessSessionId: String(row.id),
+          harness: "opencode",
+          model: null,
+          summary,
+          transcriptPath: dbPath,
+          startedAt,
+          updatedAt,
+        });
+      }
+    } catch {
+      // Ignore locked or incompatible SQLite DB
+    } finally {
+      try {
+        db?.close();
+      } catch {}
+    }
+  }
+}
+
+/**
+ * Scans local harness transcripts across Antigravity (`~/.gemini/antigravity-cli/brain/*`),
+ * Claude Code (`~/.claude/projects/<dir>/*.jsonl`), Codex (`~/.codex/sessions/** /rollout-*.jsonl`),
+ * and OpenCode (`~/.local/share/opencode/opencode.db`) for main sessions matching `projectRoot`
+ * and syncs any missing entries into `<projectRoot>/.asd/sessions/cli-recent.json`.
+ */
+export function syncLocalHarnessTranscripts(
+  projectRoot: string,
+  options?: { homeDir?: string; forceCreateDir?: boolean; harnesses?: HarnessId[] }
+): CliRecentSessionEntry[] {
+  const resolvedRoot = path.resolve(projectRoot);
+  if (!fs.existsSync(resolvedRoot)) return [];
+
+  const homeDir = options?.homeDir ? path.resolve(options.homeDir) : os.homedir();
+  const harnessFilter = options?.harnesses ? new Set(options.harnesses) : null;
+  const discovered: DiscoveredLocalTranscript[] = [];
+
+  if (!harnessFilter || harnessFilter.has("antigravity")) {
+    scanAntigravityLocalSessions(resolvedRoot, homeDir, discovered);
+  }
+  if (!harnessFilter || harnessFilter.has("claude-code")) {
+    scanClaudeCodeLocalSessions(resolvedRoot, homeDir, discovered);
+  }
+  if (!harnessFilter || harnessFilter.has("codex")) {
+    scanCodexLocalSessions(resolvedRoot, homeDir, discovered);
+  }
+  if (!harnessFilter || harnessFilter.has("opencode")) {
+    scanOpenCodeLocalSessions(resolvedRoot, homeDir, discovered);
+  }
+
+  if (discovered.length === 0) return readCliRecentSessionsRaw(resolvedRoot);
 
   const asdDir = path.join(resolvedRoot, ".asd");
   if (!options?.forceCreateDir && !fs.existsSync(asdDir)) {
@@ -843,6 +1247,10 @@ export function syncLocalHarnessTranscripts(
         prev.summary = item.summary;
         changed = true;
       }
+      if (!prev.model && item.model) {
+        prev.model = item.model;
+        changed = true;
+      }
       if (!prev.transcriptPath && item.transcriptPath) {
         prev.transcriptPath = item.transcriptPath;
         changed = true;
@@ -855,7 +1263,7 @@ export function syncLocalHarnessTranscripts(
       existingList.push({
         harnessSessionId: item.harnessSessionId,
         harness: item.harness,
-        model: null,
+        model: item.model ?? null,
         summary: item.summary,
         transcriptPath: item.transcriptPath,
         asdSessionId: null,
@@ -951,15 +1359,30 @@ export function recordCliRecentSession(
   let updatedEntry: CliRecentSessionEntry;
   if (idx >= 0) {
     const prev = existingList[idx]!;
+    const incomingSummary = (input.summary || "").trim();
+    const isGenericIncoming =
+      incomingSummary.startsWith("Tool:") || incomingSummary.startsWith("Shell:");
+    const hasMeaningfulPrev = Boolean(
+      prev.summary &&
+        !prev.summary.startsWith("Tool:") &&
+        !prev.summary.startsWith("Shell:")
+    );
+    const resolvedSummary =
+      incomingSummary && (!hasMeaningfulPrev || !isGenericIncoming)
+        ? incomingSummary
+        : prev.summary || incomingSummary || "";
     updatedEntry = {
       ...prev,
-      model: input.model ?? prev.model ?? null,
-      summary:
-        input.summary && input.summary.trim() && (!prev.summary || prev.summary.startsWith("Tool:"))
-          ? input.summary.trim()
-          : prev.summary || input.summary || "",
-      transcriptPath: input.transcriptPath ?? prev.transcriptPath ?? null,
-      asdSessionId: input.asdSessionId ?? prev.asdSessionId ?? null,
+      model: (input.model && input.model.trim()) || prev.model || null,
+      summary: resolvedSummary,
+      transcriptPath:
+        (input.transcriptPath && input.transcriptPath.trim()) ||
+        prev.transcriptPath ||
+        null,
+      asdSessionId:
+        (input.asdSessionId && input.asdSessionId.trim()) ||
+        prev.asdSessionId ||
+        null,
       updatedAt: now,
     };
     existingList.splice(idx, 1);
@@ -967,10 +1390,10 @@ export function recordCliRecentSession(
     updatedEntry = {
       harnessSessionId: input.harnessSessionId,
       harness: input.harness,
-      model: input.model ?? null,
+      model: (input.model && input.model.trim()) || null,
       summary: (input.summary || "").trim(),
-      transcriptPath: input.transcriptPath ?? null,
-      asdSessionId: input.asdSessionId ?? null,
+      transcriptPath: (input.transcriptPath && input.transcriptPath.trim()) || null,
+      asdSessionId: (input.asdSessionId && input.asdSessionId.trim()) || null,
       projectRoot: resolvedRoot,
       startedAt: now,
       updatedAt: now,
@@ -1009,9 +1432,16 @@ export function linkHarnessSessionToAsdSession(options: {
   const tenMinutesMs = 10 * 60 * 1000;
 
   let recentList = readCliRecentSessionsRaw(projectRoot);
-  if (recentList.length === 0 && !options.harnessSessionId?.trim()) {
+  const hasFreshCandidate = recentList.some(
+    (r) =>
+      (!options.harness || r.harness === options.harness) &&
+      typeof r.updatedAt === "number" &&
+      now - r.updatedAt <= tenMinutesMs
+  );
+  if (!hasFreshCandidate && !options.harnessSessionId?.trim()) {
     recentList = syncLocalHarnessTranscripts(projectRoot, {
       homeDir: options.homeDir,
+      harnesses: options.harness ? [options.harness] : undefined,
     });
   }
 

@@ -24,7 +24,7 @@ function readPackageVersion(): string {
   } catch {
     // Fallback if package.json is unreadable
   }
-  return "2.3.2";
+  return "2.4.0";
 }
 
 export const ASD_VERSION: string = readPackageVersion();
