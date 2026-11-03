@@ -436,6 +436,107 @@ describe("Harness Transcripts (CR-10)", () => {
   });
 
   describe("7. T2.1 4-way classification (Thinking, Tool Use, Tool Result, User/Assistant)", () => {
+
+    test("Antigravity type: GENERIC is classified as tool_result and merged into preceding tool_use", () => {
+      const home = makeHome();
+      const sid = "agy-generic-1";
+      const logDir = path.join(home, ".gemini", "antigravity-cli", "brain", sid, ".system_generated", "logs");
+      const compactPath = path.join(logDir, "transcript.jsonl");
+
+      writeJsonl(compactPath, [
+        JSON.stringify({
+          step_index: 0,
+          type: "USER_INPUT",
+          content: "<USER_REQUEST>Read workspace.ts</USER_REQUEST>",
+          created_at: "2026-11-04T00:00:00Z",
+        }),
+        JSON.stringify({
+          step_index: 1,
+          source: "MODEL",
+          type: "PLANNER_RESPONSE",
+          status: "DONE",
+          thinking: "Checking workspace.ts content",
+          tool_calls: [{ name: "read_file", args: { Path: "workspace.ts" } }],
+          created_at: "2026-11-04T00:00:01Z",
+        }),
+        JSON.stringify({
+          step_index: 2,
+          source: "MODEL",
+          type: "GENERIC",
+          status: "DONE",
+          content: "Created At: 2026-11-04T00:00:01Z\nCompleted At: 2026-11-04T00:00:02Z\nShowing lines 1-50 of 50\nexport function isPidAlive() {}",
+          created_at: "2026-11-04T00:00:02Z",
+        }),
+      ]);
+
+      // With default mergeToolResults: true -> merged into 2 messages
+      const mergedRes = readHarnessTranscript("antigravity", sid, { homeDir: home });
+      assert.equal(mergedRes.found, true);
+      assert.equal(mergedRes.messages.length, 2);
+      assert.equal(mergedRes.messages[0]?.category, "user");
+      assert.equal(mergedRes.messages[1]?.category, "tool_use");
+      assert.equal(mergedRes.messages[1]?.toolUse?.[0]?.name, "read_file");
+      assert.equal(mergedRes.messages[1]?.toolResult?.length, 1);
+      assert.match(mergedRes.messages[1]?.toolResult?.[0]?.output ?? "", /Showing lines 1-50/);
+
+      // With mergeToolResults: false -> 3 separate messages
+      const unmergedRes = readHarnessTranscript("antigravity", sid, { homeDir: home, mergeToolResults: false });
+      assert.equal(unmergedRes.messages.length, 3);
+      assert.equal(unmergedRes.messages[2]?.category, "tool_result");
+      assert.equal(unmergedRes.messages[2]?.role, "tool");
+      assert.match(unmergedRes.messages[2]?.toolResult?.[0]?.output ?? "", /isPidAlive/);
+    });
+
+    test("Claude Code ignores api-request-blob and strips <system-reminder> / <local-command-caveat>", () => {
+      const home = makeHome();
+      const sid = "cc-clean-1";
+      const file = path.join(home, ".claude", "projects", "proj", `${sid}.jsonl`);
+      writeJsonl(file, [
+        JSON.stringify({
+          type: "api-request-blob",
+          message: { role: "system", content: "internal prompt dump" },
+        }),
+        JSON.stringify({
+          type: "user",
+          isMeta: true,
+          message: { role: "user", content: "meta prompt companion" },
+        }),
+        JSON.stringify({
+          type: "user",
+          message: {
+            role: "user",
+            content: "Hello <system-reminder>secret reminder</system-reminder>world <local-command-caveat>caveat</local-command-caveat>",
+          },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "tu_clean", name: "bash", input: "ls" },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "tu_clean", content: [{ type: "text", text: "file1.txt\nfile2.txt" }] },
+            ],
+          },
+        }),
+      ]);
+
+      const res = readHarnessTranscript("claude-code", sid, { homeDir: home });
+      assert.equal(res.found, true);
+      assert.equal(res.messages.length, 2);
+      assert.equal(res.messages[0]?.category, "user");
+      assert.equal(res.messages[0]?.text, "Hello world");
+      assert.equal(res.messages[1]?.category, "tool_use");
+      assert.equal(res.messages[1]?.toolResult?.[0]?.output, "file1.txt\nfile2.txt");
+    });
+
     test("Claude Code separates thinking, tool_use, tool_result, and assistant text", () => {
       const home = makeHome();
       const sid = "cc-4way-1";
@@ -473,7 +574,7 @@ describe("Harness Transcripts (CR-10)", () => {
         }),
       ]);
 
-      const res = readHarnessTranscript("claude-code", sid, { homeDir: home });
+      const res = readHarnessTranscript("claude-code", sid, { homeDir: home, mergeToolResults: false });
       assert.equal(res.found, true);
       assert.equal(res.messages.length, 4);
       assert.equal(res.messages[0]?.category, "user");
@@ -543,7 +644,7 @@ describe("Harness Transcripts (CR-10)", () => {
         }),
       ]);
 
-      const res = readHarnessTranscript("antigravity", sid, { homeDir: home });
+      const res = readHarnessTranscript("antigravity", sid, { homeDir: home, mergeToolResults: false });
       assert.equal(res.found, true);
       assert.equal(res.messages.length, 3);
       assert.equal(res.messages[0]?.role, "user");

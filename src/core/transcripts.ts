@@ -181,8 +181,17 @@ function normalizeRole(role: string): string {
   const r = role.trim().toLowerCase();
   if (r === "user_message" || r === "user_input" || r === "human") return "user";
   if (r === "agent_message" || r === "planner_response" || r === "model") return "assistant";
-  if (r === "tool_response" || r === "function_call_output" || r === "custom_tool_call_output") return "tool";
+  if (r === "tool_response" || r === "function_call_output" || r === "custom_tool_call_output" || r === "generic" || r === "tool") return "tool";
   return r || "unknown";
+}
+
+function cleanClaudeText(raw: string): string {
+  return raw
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
+    .replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/gi, "")
+    .replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/gi, "")
+    .replace(/<command-message>[\s\S]*?<\/command-message>/gi, "")
+    .trim();
 }
 
 function cleanAntigravityUserText(raw: string): string {
@@ -294,9 +303,18 @@ function extractLineMessage(line: Rec): ExtractedMessageFields | null {
     };
   }
 
-  if (lineType === "TOOL_RESPONSE") {
+  const isAntigravityToolResponse =
+    lineType === "TOOL_RESPONSE" ||
+    lineType === "GENERIC" ||
+    ((getStr(line, "source") === "MODEL" || getStr(line, "source") === "SYSTEM") &&
+      lineType !== "PLANNER_RESPONSE" &&
+      lineType !== "USER_INPUT" &&
+      (typeof line.content === "string" || typeof line.error === "string"));
+
+  if (isAntigravityToolResponse) {
     const output = (
       contentToText(line.content) ||
+      getStr(line, "error") ||
       getStr(line, "output") ||
       getStr(line, "result") ||
       getStr(line, "text") ||
@@ -305,16 +323,20 @@ function extractLineMessage(line: Rec): ExtractedMessageFields | null {
     const toolName = getStr(line, "tool_name") ?? getStr(line, "name");
     const toolUseId = getStr(line, "tool_call_id") ?? getStr(line, "id");
     if (!output && !toolName) return null;
+    const isErr =
+      line.status === "ERROR" ||
+      line.is_error === true ||
+      Boolean(getStr(line, "error"));
     const tr: TranscriptToolResultItem = {
       output,
       ...(toolUseId ? { toolUseId } : {}),
       ...(toolName ? { name: toolName } : {}),
-      ...(line.status === "ERROR" || line.is_error === true ? { isError: true } : {}),
+      ...(isErr ? { isError: true } : {}),
     };
     return {
       role: "tool",
       category: "tool_result",
-      text: output,
+      text: "",
       toolResult: [tr],
       timestamp: lineTs,
     };
@@ -437,6 +459,18 @@ function extractLineMessage(line: Rec): ExtractedMessageFields | null {
   }
 
   // 4. Claude Code: {"type":"user"|"assistant","message":{"role":...,"content":[...]},"timestamp":"..."}
+  // Exclude internal/meta types: api-request-blob, isMeta, turnCompanion, summary, queue-operation, etc.
+  if (
+    lineType === "api-request-blob" ||
+    lineType === "summary" ||
+    lineType === "queue-operation" ||
+    lineType === "last-prompt" ||
+    Boolean(line.isMeta) ||
+    Boolean(line.turnCompanion)
+  ) {
+    return null;
+  }
+
   const message = getRec(line, "message");
   if (message) {
     const rawRole = normalizeRole(getStr(message, "role") ?? lineType ?? "unknown");
@@ -447,11 +481,13 @@ function extractLineMessage(line: Rec): ExtractedMessageFields | null {
     const toolResult: TranscriptToolResultItem[] = [];
 
     if (typeof message.content === "string") {
-      if (message.content.trim()) textParts.push(message.content);
+      const cleaned = cleanClaudeText(message.content);
+      if (cleaned) textParts.push(cleaned);
     } else if (Array.isArray(message.content)) {
       for (const block of message.content) {
         if (typeof block === "string") {
-          if (block.trim()) textParts.push(block);
+          const cleaned = cleanClaudeText(block);
+          if (cleaned) textParts.push(cleaned);
           continue;
         }
         if (!isRec(block)) continue;
@@ -470,18 +506,25 @@ function extractLineMessage(line: Rec): ExtractedMessageFields | null {
           });
         } else if (bType === "tool_result") {
           const toolUseId = getStr(block, "tool_use_id") ?? getStr(block, "id");
-          const output = (
-            contentToText(block.content) ||
-            getStr(block, "output") ||
-            ""
-          ).trim();
+          let rawOut = "";
+          if (typeof block.content === "string") {
+            rawOut = block.content;
+          } else if (Array.isArray(block.content)) {
+            rawOut = block.content.map((x) => (isRec(x) ? getStr(x, "text") ?? "" : String(x))).join("\n");
+          } else if (block.content !== undefined) {
+            rawOut = JSON.stringify(block.content);
+          } else if (typeof block.output === "string") {
+            rawOut = block.output;
+          }
+          const output = rawOut.trim();
           toolResult.push({
             output,
             ...(toolUseId ? { toolUseId } : {}),
             ...(block.is_error === true ? { isError: true } : {}),
           });
         } else if (typeof block.text === "string" && block.text) {
-          textParts.push(block.text);
+          const cleaned = cleanClaudeText(block.text);
+          if (cleaned) textParts.push(cleaned);
         }
       }
     }
@@ -647,9 +690,39 @@ function loadFullTranscriptSibling(
 
 // ponytail: before-pagination on >20MB files only sees the last 20MB window;
 // widen maxReadBytes if a caller ever needs deeper history.
+
+function mergeOrAppendMessage(list: TranscriptMessage[], next: TranscriptMessage): void {
+  if (
+    next.category === "tool_result" &&
+    !next.text.trim() &&
+    next.toolResult &&
+    next.toolResult.length > 0 &&
+    list.length > 0
+  ) {
+    const prev = list[list.length - 1]!;
+    if (prev.toolUse && prev.toolUse.length > 0) {
+      if (!prev.toolResult) {
+        prev.toolResult = [];
+      }
+      for (let k = 0; k < next.toolResult.length; k++) {
+        const tr = next.toolResult[k]!;
+        if (!tr.name && prev.toolUse[k]) {
+          tr.name = prev.toolUse[k]!.name;
+        }
+        if (!tr.toolUseId && prev.toolUse[k]?.id) {
+          tr.toolUseId = prev.toolUse[k]!.id;
+        }
+        prev.toolResult.push(tr);
+      }
+      return;
+    }
+  }
+  list.push(next);
+}
+
 function readJsonlWindow(
   filePath: string,
-  options: { limit: number; before?: number; maxReadBytes: number }
+  options: { limit: number; before?: number; maxReadBytes: number; mergeToolResults?: boolean }
 ): JsonlWindow | null {
   let stat: fs.Stats;
   try {
@@ -708,7 +781,11 @@ function readJsonlWindow(
     if (parsed.toolUse && parsed.toolUse.length > 0) msg.toolUse = parsed.toolUse;
     if (parsed.toolResult && parsed.toolResult.length > 0) msg.toolResult = parsed.toolResult;
     if (parsed.timestamp) msg.timestamp = parsed.timestamp;
-    messages.push(msg);
+    if (options.mergeToolResults !== false) {
+      mergeOrAppendMessage(messages, msg);
+    } else {
+      messages.push(msg);
+    }
   }
 
   const start0 = Math.max(0, messages.length - options.limit);
@@ -1082,7 +1159,7 @@ function readOpencodeStorageMessages(storageDir: string, sessionId: string): Ope
 // Public read API
 // ============================================================================
 
-function toTranscriptMessages(raw: OpencodeRawMessage[]): TranscriptMessage[] {
+function toTranscriptMessages(raw: OpencodeRawMessage[], mergeToolResults?: boolean): TranscriptMessage[] {
   const out: TranscriptMessage[] = [];
   for (let i = 0; i < raw.length; i++) {
     const item = raw[i];
@@ -1108,7 +1185,11 @@ function toTranscriptMessages(raw: OpencodeRawMessage[]): TranscriptMessage[] {
       ...(toolResult && toolResult.length > 0 ? { toolResult } : {}),
     };
     if (item.timestamp) msg.timestamp = item.timestamp;
-    out.push(msg);
+    if (mergeToolResults !== false) {
+      mergeOrAppendMessage(out, msg);
+    } else {
+      out.push(msg);
+    }
   }
   return out;
 }
@@ -1136,6 +1217,7 @@ export function readHarnessTranscript(
         limit,
         before: options.before,
         maxReadBytes,
+        mergeToolResults: options.mergeToolResults,
       });
       if (!window) {
         return { ...base, error: "transcriptPath is not a readable file" };
@@ -1169,7 +1251,7 @@ export function readHarnessTranscript(
       if (!raw) {
         return { ...base, error: "opencode transcript could not be read" };
       }
-      const all = toTranscriptMessages(raw);
+      const all = toTranscriptMessages(raw, options.mergeToolResults);
       const filtered = options.before !== undefined ? all.filter((m) => m.index < (options.before ?? 0)) : all;
       const messages = filtered.slice(Math.max(0, filtered.length - limit));
       return {
@@ -1191,6 +1273,7 @@ export function readHarnessTranscript(
       limit,
       before: options.before,
       maxReadBytes,
+      mergeToolResults: options.mergeToolResults,
     });
     if (!window) {
       return { ...base, transcriptPath: location.transcriptPath, error: "transcript could not be read" };

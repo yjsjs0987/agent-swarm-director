@@ -888,14 +888,27 @@ export function parseDriverStreamLine(
     }
     if (events.length > 0) return events;
   }
-  if (lineType === "TOOL_RESPONSE") {
-    const out = typeof obj.content === "string" ? obj.content : JSON.stringify(obj.content ?? "");
+  const isAntigravityToolResponse =
+    lineType === "TOOL_RESPONSE" ||
+    lineType === "GENERIC" ||
+    ((String(obj.source) === "MODEL" || String(obj.source) === "SYSTEM") &&
+      lineType !== "PLANNER_RESPONSE" &&
+      lineType !== "USER_INPUT" &&
+      (typeof obj.content === "string" || typeof obj.error === "string"));
+
+  if (isAntigravityToolResponse) {
+    const rawOut = obj.content ?? obj.error ?? obj.output ?? "";
+    const out = typeof rawOut === "string" ? rawOut : JSON.stringify(rawOut);
+    if (!out.trim() && !obj.tool_name) return [];
     events.push({
       type: "tool_result",
       harness,
       ...(typeof obj.tool_name === "string" ? { toolName: obj.tool_name } : {}),
+      ...(typeof obj.name === "string" ? { toolName: obj.name } : {}),
       ...(typeof obj.tool_call_id === "string" ? { toolId: obj.tool_call_id } : {}),
+      ...(typeof obj.id === "string" ? { toolId: obj.id } : {}),
       toolOutput: out,
+      ...(obj.status === "ERROR" || Boolean(obj.error) || obj.is_error === true ? { isError: true } : {}),
       timestamp: now,
     });
     return events;
