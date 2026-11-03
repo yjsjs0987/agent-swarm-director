@@ -1,6 +1,6 @@
 # Agent Swarm Director (ASD v2.4.0) — 아키텍처 및 전체 파일·함수 상세 레퍼런스
 
-> **최종 갱신일**: 2026-11-03  
+> **최종 갱신일**: 2026-11-04  
 > **버전**: `2.4.0` (`agent-swarm-director`)  
 > **대상 하네스 (5대 AI 코딩 CLI)**: Claude Code (`@cc`), OpenCode (`@oc`), Codex CLI (`@cx`), Antigravity (`@ag`), Cursor CLI (`@cr`)  
 > **외부 런타임 의존성**: `0개` (`dependencies: {}` — 순수 Node.js `>=22.13.0` 내장 모듈만 사용)
@@ -80,7 +80,7 @@ ASD v2.4.0은 프로젝트 폴더 오염을 막고 멀티 프로젝트·멀티 �
 
 ### 3.1 글로벌 상태 디렉토리 (`~/.asd`)
 - **`~/.asd/state/core.db` (단일 공유 SQLite SSOT)**:
-  - 구버전(v2.3.2 이하)에서는 프로젝트마다 `~/.asd/state/<projectHash>/core.db`를 별도로 생성했으나, v2.3.3 / v2.4.0부터는 **단 하나의 `~/.asd/state/core.db`** 파일에 모든 프로젝트의 세션을 저장하며 `sessions.project_root` 컬럼으로 프로젝트를 스코프 구분합니다.
+  - 구버전(v2.3.2 이하)에서는 프로젝트마다 `~/.asd/state/<projectHash>/core.db`를 별도로 생성했으나, v2.3.3 / v2.4.0부터는 **단 하나의 `~/.asd/state/core.db`** 파일에 모든 프로젝트의 세션을 저장하며 `sessions.project_root` 컬럼으로 프로젝트를 스코프 구분합니다 (구버전 DB 자동 마이그레이션 및 스키마 복구는 [공식 `asd-db-migrate` 도구](https://drive.google.com/drive/u/0/folders/1knUQzIY8HDzIKYkxrhsCxgorQDn_B3nU)로 수행).
   - WAL(`journal_mode = WAL`), `busy_timeout = 5000`, `foreign_keys = ON`, `BEGIN IMMEDIATE` 트랜잭션으로 다중 프로세스 동시 접근 시에도 안전합니다.
   - 총 4개 테이블로 구성됩니다: `sessions`, `tasks`, `debates`, `session_drivers`.
 - **`~/.asd/state/cli-recent.json`**:
@@ -152,13 +152,13 @@ Node.js 내장 `node:sqlite` (`DatabaseSync`)를 사용하여 `~/.asd/state/core
 #### ④ [`src/core/session-tracker.ts`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts)
 5대 하네스의 CLI 세션 ID 추출, 로컬 트랜스크립트 스캔, CLI ↔ ASD 세션 양방향 승격/하강, 멀티 프로젝트 목록 탐색을 담당합니다.
 - [`extractHookSessionInfo(rawPayload)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L229-L360): 각 하네스 훅이 전달한 JSON 페이로드에서 `harnessSessionId`, `transcriptPath`, `cwd`, `model`, `promptSummary`를 정규화 추출합니다.
-- [`buildResumeHarnessCommand(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L85-L150) & [`buildInteractiveResumeHarnessCommand(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L157-L220): 하네스별 헤드리스 재개 명령 및 대화형 TUI 재개 명령(`claude --resume <id>`, `codex resume <id>`, `opencode -s <id>`, `cursor-agent --resume <id>`, `agy chat --resume <id>`)을 생성합니다.
+- [`buildHeadlessHarnessCommand(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L85-L185), [`buildResumeHarnessCommand(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L190-L245) & [`buildInteractiveResumeHarnessCommand(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L250-L315): 하네스별 최초/재개 헤드리스 실행 명령 및 대화형 TUI 재개 명령(`claude --resume <id>`, `codex resume <id>`, `opencode -s <id>`, `cursor-agent --resume <id>`, `agy chat --resume <id>`)을 생성합니다 (코어 순수성 유지를 위해 어댑터 import 없이 코어에서 직접 조립).
 - [`syncLocalHarnessTranscripts(projectRoot, options?)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1200-L1308): Antigravity(`brain/`), Claude Code(`~/.claude/projects`), Codex(`~/.codex/sessions`), OpenCode(`opencode.db`)의 로컬 저장소를 직접 스캔하여 훅이 누락된 CLI 세션도 `cli-recent.json`에 자동 복구합니다 (`transcriptDiscoveryCache`를 통해 파일 `mtimeMs`가 변경되지 않은 `.jsonl` 파일은 재파싱 없이 즉시 캐시 반환).
 - [`recordCliRecentSession(entry, homeDir?)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1331-L1410) & [`readCliRecentSessions(filter?, homeDir?)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1310-L1329): `~/.asd/state/cli-recent.json`에 최근 CLI 세션을 기록(기존 첫 프롬프트 `summary`와 `transcriptPath` 보존) 및 조회합니다.
 - [`linkHarnessSessionToAsdSession(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1415-L1450): ASD 세션에 네이티브 하네스 세션 ID를 연결합니다(후보가 없으면 `syncLocalHarnessTranscripts` 자동 실행).
-- [`promoteCliSessionToAsd(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1619-L1740): 일반 CLI 세션을 ASD 세션(`sessions` 테이블)으로 즉시 승격(멱등성 보장)하고 선택적으로 드라이버(`session_drivers`)를 연결합니다.
-- [`unlinkHarnessSessionFromAsdSession(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1670-L1785): `promoteCliSessionToAsd()`의 역연산으로, 활성 드라이버를 분리(또는 `deleteAsdSession: true` 시 세션 삭제)하고 `cli-recent.json`의 `asdSessionId`를 `null`로 초기화하여 일반 CLI 세션 상태로 복귀시킵니다.
-- [`demoteAsdSession(projectRoot, sessionId, options?)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1455-L1545) & [`buildSessionDemotion(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L248-L350): ASD 세션을 일시정지(`paused`)하고 드라이버를 분리한 뒤, 원래 하네스 CLI로 돌아갈 수 있는 대화형 Resume 명령어를 반환하고 `cli-recent.json`을 갱신합니다.
+- [`promoteCliSessionToAsd(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1680-L1845): 일반 CLI 세션을 ASD 세션(`sessions` 테이블)으로 즉시 승격(이미 매핑된 세션이 있으면 `created: false`로 재사용)하고, 활성 드라이버(`session_drivers`) 연결 및 `makeForeground: true` 시 `.asd/PLAN.md` 전경 세션 설정까지 수행합니다 (`{ sessionId, asdSessionId, created, driverId, driver, session, harness, harnessSessionId, model, mainJsonPath }` 반환).
+- [`unlinkHarnessSessionFromAsdSession(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1850-L1955): `promoteCliSessionToAsd()`의 역연산으로, 활성 드라이버를 분리(또는 `deleteAsdSession: true` 시 세션 삭제)하고 `cli-recent.json`의 `asdSessionId`를 `null`로 초기화하여 일반 CLI 세션 상태로 복귀시킵니다.
+- [`demoteAsdSession(projectRoot, sessionId, options?)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1520-L1610) & [`buildSessionDemotion(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L2070-L2145): ASD 세션을 일시정지(`paused`)하고 드라이버를 분리한 뒤, 원래 하네스 CLI로 돌아갈 수 있는 대화형 Resume 명령어를 반환하고 `cli-recent.json`을 갱신합니다 (활성 드라이버가 없어도 `session.harness_session_id` 및 이력 드라이버에서 폴백 복원).
 - [`discoverProjectCliSessions(projectPath, options?)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1774-L1895): 특정 프로젝트 경로에서 실행된 5대 하네스의 모든 CLI 세션을 탐색하고, 각 세션이 ASD 세션으로 승격되어 있는지(`isPromotedToAsd`, `asdSessionId`, `asdPhase`) 결합하여 최신순으로 반환합니다.
 - [`listKnownProjects(options?)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-tracker.ts#L1901-L1980): 단일 공유 DB(`core.db`)에서 프로젝트별 세션/태스크/토론 통계를 고속 집계합니다 (15초 FS stat 캐시, `skipDiskCheck`, `db` 재사용 지원).
 
@@ -197,8 +197,8 @@ Node.js 내장 `node:sqlite` (`DatabaseSync`)를 사용하여 `~/.asd/state/core
 Git 작업 트리 보호, `LIGHT` 체크포인트 커밋/롤백, `HEAVY` 워크트리 생성/병합, 고아 태스크 복구를 담당합니다.
 - [`prepareBaseline(projectRoot, db, sessionId)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/workspace.ts#L375-L430): 세션 시작 시 미커밋 변경사항이 있으면 `git stash push -u`로 안전하게 보관하고 `stashed_work_sha`를 DB에 기록합니다.
 - [`verifyAndCommitLightTask(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/workspace.ts#L505-L625): `LIGHT` 트랙에서 수정된 파일이 `targetFiles` 범위 내인지와 시크릿 유출 여부를 검사하고, 검증 명령(`verifyCmd`) 통과 시 `asd(<taskId>): <title>` 체크포인트 커밋을 생성합니다. 실패 시 [`rollbackLightChanges()`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/workspace.ts#L450-L500)로 해당 태스크 범위만 즉시 롤백합니다.
-- [`createTaskWorktree(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/workspace.ts#L220-L310) & [`verifyAndMergeHeavyTask(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/workspace.ts#L630-L790): `HEAVY` 트랙에서 `.asd/wt/<turn>-<taskId>` 독립 워크트리를 생성하고 루트 `node_modules`를 Junction으로 연결한 뒤, 검증 통과 시 Junction을 해제하고 프로세스 간 파일 잠금(`.asd/merge.lock`, `withMergeLock`) 하에 `--no-ff` 병합합니다.
-- [`recoverOrphanedTasks(db, projectRoot, sessionId)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/workspace.ts#L850-L940): 비정상 종료된 프로세스의 `running` 태스크를 감지하여 `pending` 또는 `escalated` 상태로 자동 복구합니다.
+- [`createTaskWorktree(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/workspace.ts#L220-L310) & [`verifyAndMergeHeavyTask(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/workspace.ts#L630-L790): `HEAVY` 트랙에서 `.asd/wt/<turn>-<taskId>` 독립 워크트리를 생성하고 루트 `node_modules`를 Junction으로 연결한 뒤, 검증 통과 시 Junction을 해제하고 프로세스 간 파일 잠금(`.asd/merge.lock`, `withMergeLock`) 하에 `--no-ff` 병합합니다 (`autoApprove: false` 수동 승인 대기 태스크를 위한 `approvePendingTask` / `rejectPendingTask` 지원).
+- [`recoverOrphanedTasks(db, projectRoot, sessionId)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/workspace.ts#L850-L940) & [`isPidAlive(pid)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/workspace.ts#L171-L185): 비정상 종료된 프로세스의 `running` 태스크를 감지하여 `pending` 또는 `escalated` 상태로 자동 복구합니다.
 
 #### ⑩ [`src/core/debate.ts`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/debate.ts)
 이기종 모델 간 블라인드 교차 비평(Round 1)과 심판 합의 판결(Round 2)을 수행합니다.

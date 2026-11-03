@@ -30,6 +30,13 @@ Complete chronological patch history for **Agent Swarm Director (ASD v2.4.0)**, 
   - Optimized `listKnownProjects()` in `src/core/session-tracker.ts` with a 15-second in-memory FS stat cache, `skipDiskCheck`, and `db` instance reuse.
 - **Codex Notify Hook & Cursor Nested Hook Schema (`aad8d91`, `8d68e01`)**:
   - Added Codex `notify` hook installation in `~/.codex/config.toml` and updated Cursor `~/.cursor/hooks.json` to the official nested `{"version": 1, "hooks": {...}}` schema with full payload extraction tests.
+- **GUI v2.4.0 Integration Fixes, Strict TypeScript (`tsc --noEmit`) Cleanliness & Core Purity (`e064b11`)**:
+  - Fixed `SqliteDriver.findSessionByHarnessSessionId()` SQL column bug (`ORDER BY d.last_seen_at DESC` → `ORDER BY d.attached_at DESC`).
+  - Enhanced `promoteCliSessionToAsd()` to reuse existing mapped ASD sessions (`created: false`), support `makeForeground: true`, accept `sessionId` alias, and return `{ sessionId, asdSessionId, created, driverId, driver, session, ... }`.
+  - Fixed `buildSessionDemotion()` to fall back to `session.harness_session_id` and historical drivers when no active driver is attached, and updated `detachDriver()` to accept either `driverId` or `sessionId`.
+  - Restored strict Core Purity in `src/core/drivers.ts` by replacing `getAdapter` import with `buildHeadlessHarnessCommand` in `src/core/session-tracker.ts`, and resolved all `npx tsc --noEmit` strict type errors across `db.ts`, `types.ts`, `config.ts`, `router.ts`, `drivers.ts`, `installer.ts`, `dashboard.ts`, and `mcp/server.ts`.
+- **Legacy (`<= v2.3.2`) DB Migration & Auto-Repair Tool (`9a7b8e9`)**:
+  - Added official distribution notices and download links in `README.md`, `README_ko.md`, and `EXTERNAL_SDK_REFERENCE.md` for `asd-db-migrate.mjs` (migrates per-project `~/.asd/state/<hash>/core.db` databases into `~/.asd/state/core.db` and repairs legacy schema columns).
 
 ### `v2.3.3` (`fe668d3`) — Single Shared State DB (`~/.asd/state/core.db`) & Project-Scoped SQLite Driver
 - Consolidated per-project `~/.asd/state/<projectHash>/core.db` files into a single shared `~/.asd/state/core.db` with `SqliteDriver(dbPath, projectRoot?)` project scoping and `resolveHomeDir()` test isolation.

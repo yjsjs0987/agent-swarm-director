@@ -35,8 +35,9 @@
    - 관련 파일(`PROJECT_STATUS.md` 참고)을 먼저 읽고, 수정할 파일 경로·변경 내용·예상 영향을 간결하게 요약해 보고해라. (단, 사용자가 "알아서 끝까지 해"라고 지시한 경우 즉시 실행)
 2. **최소 범위 구현**:
    - 요청받은 기능과 직접 관련된 파일만 수정하고, 기존 주석이나 인터페이스를 임의로 삭제하지 마라.
-3. **격리 테스트 검증**:
-   - 수정한 모듈에 대응하는 단위 테스트를 추가/수정한 뒤 `node scripts/run-tests.mjs tests/<대상>.test.ts`를 실행해 100% 통과를 확인해라.
+3. **격리 테스트 및 타입 검증**:
+   - 수정한 모듈에 대응하는 단위 테스트를 추가/수정한 뒤 `npm test` (내부적으로 `node --no-warnings scripts/run-tests.mjs` 실행) 또는 `node scripts/run-tests.mjs tests/<대상>.test.ts`를 실행해 100% 통과를 확인해라.
+   - 타입이나 인터페이스를 건드린 경우 `npx tsc --noEmit`으로 외부 소비 패키지(`asd-gui` 등)에서 컴파일 에러가 없는지 함께 검증해라.
 4. **문서 최신화 및 커밋/푸시**:
    - 함수 시그니처나 기능이 추가/변경되면 `PROJECT_STATUS.md`, `EXTERNAL_SDK_REFERENCE.md`, `PATCH_NOTES.md`, `PATCH_NOTES_ko.md`를 최신 상태로 반영해라.
    - 사용자가 커밋/푸시를 지시한 경우 `Co-Authored-By` 없이 깔끔하게 커밋하고 `git push origin main`을 수행해라.

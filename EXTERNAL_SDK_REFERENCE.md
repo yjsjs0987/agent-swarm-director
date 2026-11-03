@@ -14,6 +14,11 @@
 ### 1.1 단일 공유 SQLite DB 전환 (`~/.asd/state/core.db`)
 기존(v2.3.2 이하)에는 프로젝트마다 `~/.asd/state/<projectHash>/core.db`를 개별 생성했으나, 테스트 임시 프로젝트 누적 등으로 디렉토리가 수천 개로 늘어나는 문제를 해결하기 위해 **단일 공유 DB(`~/.asd/state/core.db`)** 구조로 전환했습니다.
 
+> [!IMPORTANT]
+> **구버전(`v2.3.2` 이하) DB 자동 복구·마이그레이션 도구 (`asd-db-migrate.mjs`)**:  
+> 구버전(`v2.3.2` 이하)의 해시 디렉토리별 DB(`~/.asd/state/<projectHash>/core.db`) 데이터를 `v2.4.0` 단일 공유 DB(`~/.asd/state/core.db`)로 이관하거나 손상된 컬럼을 복구해야 하는 경우, 아래 공식 마이그레이션 툴을 다운로드해 실행하세요:  
+> 👉 **[Google Drive에서 `asd-db-migrate` 다운로드](https://drive.google.com/drive/u/0/folders/1knUQzIY8HDzIKYkxrhsCxgorQDn_B3nU)** (`node asd-db-migrate.mjs`)
+
 | 구분 | 이전 (v2.3.2 이하) | 현재 (v2.4.0) |
 | :--- | :--- | :--- |
 | **DB 파일 위치** | `~/.asd/state/<projectHash>/core.db` × N개 | **`~/.asd/state/core.db` 단 1개** |
@@ -187,17 +192,21 @@ import {
 
 const promoted: PromoteCliSessionResult = promoteCliSessionToAsd({
   projectRoot: "/path/to/project",
+  homeDir: undefined,        // 선택: 생략 시 resolveHomeDir() 적용
   harness: "claude-code",
   harnessSessionId: "eb7de063-fd75-4fa7-8312-9efcf3fd77e5",
   model: "claude-sonnet-4-6",
+  title: "GUI에서 승격된 세션",
   memo: "GUI에서 승격된 세션",
-  phase: "running",         // 기본값 "running"
-  attachActiveDriver: true, // true 시 session_drivers 테이블에 즉시 활성 드라이버 등록
-  driverSource: "gui",
+  transcriptPath: undefined, // 선택: 로컬 트랜스크립트 경로
+  makeForeground: true,      // true 시 .asd/PLAN.md 의 전경(Foreground) 세션으로 즉시 설정
+  source: "gui",             // "gui" | "cli" (기본값 "gui")
+  db: undefined,             // 선택: 이미 열린 SqliteDriver 인스턴스 주입 가능
 });
-// promoted.session        -> 생성 또는 기존 매칭된 SessionRecord
-// promoted.created        -> 신규 생성 여부 (이미 승격된 세션이면 false)
-// promoted.driver         -> 부착된 DriverRow | null
+// promoted.sessionId / promoted.asdSessionId -> 승격된 ASD session_id (동일 값)
+// promoted.created                           -> 신규 생성 여부 (이미 승격된 세션이면 false, 기존 세션 재사용)
+// promoted.driver                            -> 부착된 활성 DriverRow
+// promoted.session                           -> 생성 또는 재사용된 SessionRow
 ```
 
 #### ② ASD 세션을 다시 하네스의 네이티브 CLI 세션으로 하강 및 연결 해제 (`buildSessionDemotion`, `unlinkHarnessSessionFromAsdSession`)
@@ -208,7 +217,7 @@ import {
   type SessionDemotionResult,
 } from "agent-swarm-director";
 
-// 1. 터미널 대화형 Resume 명령어 생성 (asd resume 과 동일)
+// 1. 터미널 대화형 Resume 명령어 생성 (asd resume 과 동일; 활성 드라이버가 없어도 session.harness_session_id 폴백 지원)
 const demoted: SessionDemotionResult = buildSessionDemotion({
   projectRoot: "/path/to/project",
   sessionId: "asd-20261103-182153-i9ti",
@@ -263,12 +272,12 @@ import * as dashboard from "agent-swarm-director/cli/dashboard";
 | **`core/types`** | `ASD_VERSION` (`"2.4.0"`), `HARNESS_IDS`, `AGENT_ROLES`, `TASK_CATEGORIES`, `DIFFICULTY_TIERS`, `TASK_TRACKS`, `TASK_STATUSES`, `SESSION_PHASES`, `DRIVER_SOURCES` 및 전체 타입 |
 | **`core/config`** | `resolveAsdPaths(root, home?)`, `resolveHomeDir(explicit?)`, `ensureProjectInitialized`, `loadRoutingConfig`, `loadMcpCatalog`, `checkForRemoteUpdate`, `computeProjectHash` |
 | **`core/db`** | `openProjectDb(root, home?)`, `SqliteDriver(dbPath, projectRoot?)`, `generateAsdSessionId`, `isValidAsdSessionId` — `findSessionByHarnessSessionId(sid, harness?)` *(v2.4.0)*, `deleteSession(sessionId)` *(v2.4.0)* 및 `sessions` / `tasks` / `debates` / `session_drivers` 전체 CRUD |
-| **`core/session-tracker`** | `discoverProjectCliSessions` *(v2.4.0)*, `promoteCliSessionToAsd` *(v2.4.0)*, `unlinkHarnessSessionFromAsdSession` *(v2.4.0)*, `buildSessionDemotion`, `listKnownProjects` *(v2.4.0 캐시 최적화)*, `syncLocalHarnessTranscripts` *(v2.4.0 4하네스 확장 + `mtimeMs` 캐시)*, `linkHarnessSessionToAsdSession`, `readCliRecentSessions`, `recordCliRecentSession`, `buildResumeHarnessCommand`, `buildInteractiveResumeHarnessCommand`, `extractHookSessionInfo` |
-| **`core/drivers`** | `runDriverTurn` *(v2.4.0 `onEvent` 스트리밍)*, `parseDriverStreamLine` *(v2.4.0)*, `attachDriver`, `detachDriver`, `getActiveDriver`, `listDrivers`, `buildDriverBriefing`, `syncSessionDriversToMainJson` |
+| **`core/session-tracker`** | `discoverProjectCliSessions` *(v2.4.0)*, `promoteCliSessionToAsd` *(v2.4.0)*, `unlinkHarnessSessionFromAsdSession` *(v2.4.0)*, `buildSessionDemotion`, `listKnownProjects` *(v2.4.0 캐시 최적화)*, `syncLocalHarnessTranscripts` *(v2.4.0 4하네스 확장 + `mtimeMs` 캐시)*, `linkHarnessSessionToAsdSession`, `readCliRecentSessions`, `recordCliRecentSession`, `buildHeadlessHarnessCommand`, `buildResumeHarnessCommand`, `buildInteractiveResumeHarnessCommand`, `extractHookSessionInfo` |
+| **`core/drivers`** | `runDriverTurn` *(v2.4.0 `onEvent` 스트리밍)*, `parseDriverStreamLine` *(v2.4.0)*, `attachDriver`, `detachDriver` *(driverId 또는 sessionId 지원)*, `getActiveDriver`, `listDrivers`, `buildDriverBriefing`, `syncSessionDriversToMainJson` |
 | **`core/transcripts`** | `readHarnessTranscript` *(v2.4.0 4분류 고도화)*, `locateHarnessTranscript` |
 | **`core/spawner`** | `spawnSubagent`, `executeHarnessProcess`, `killProcessTree`, `resolveSpawnCommand`, `finalizeSubagentArtifacts` |
 | **`core/router`** | `resolveRoute`, `runWithFallbacks`, `escalateTaskRoute`, `resolveFallback`, `detectAvailableCliHarnesses`, `selectDiverseReviewer` |
-| **`core/workspace`** | `prepareBaseline`, `createTaskWorktree`, `verifyAndCommitLightTask`, `verifyAndMergeHeavyTask`, `rollbackLightChanges`, `recoverOrphanedTasks`, `getChangedFiles`, `checkChangedFilesAndSecrets`, `withMergeLock`, `runGit` |
+| **`core/workspace`** | `prepareBaseline`, `createTaskWorktree`, `verifyAndCommitLightTask`, `verifyAndMergeHeavyTask`, `approvePendingTask`, `rejectPendingTask`, `rollbackLightChanges`, `recoverOrphanedTasks`, `isPidAlive`, `getChangedFiles`, `checkChangedFilesAndSecrets`, `withMergeLock`, `runGit` |
 | **`core/render`** | `renderPlanMd`, `parsePlanMd`, `syncPlanFromMd`, `setForegroundSession`, `getForegroundSessionId`, `renderProgressBoard`, `renderSessionSummaryMd`, `atomicWriteFileSync` |
 | **`core/debate`** | `runDebateBroker`, `synthesizeInsightVerdict`, `buildRound1Prompt`, `buildRound2Prompt`, `formatDebateAcceptance` |
 | **`core/policy`** | `evaluatePreToolUse`, `evaluateStopHook`, `isPathAllowed`, `checkProtectedPath`, `verifyChangedFilesBoundary` |

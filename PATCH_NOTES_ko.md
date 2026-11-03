@@ -30,6 +30,13 @@
   - `listKnownProjects()`에 15초 인메모리 FS stat 캐시, `skipDiskCheck`, `db` 재사용 옵션을 추가했습니다.
 - **Codex `notify` 훅 및 Cursor 중첩 `hooks.json` 스키마 지원 (`aad8d91`, `8d68e01`)**:
   - `~/.codex/config.toml`에 Codex `notify` 훅을 자동 등록하고, `~/.cursor/hooks.json`을 Cursor 공식 중첩 스키마(`{"version": 1, "hooks": {...}}`)로 생성하도록 수정했습니다.
+- **GUI v2.4.0 연동 버그 수정, TypeScript 엄격 타입(`tsc --noEmit`) 무결성 및 코어 순수성 복원 (`e064b11`)**:
+  - `SqliteDriver.findSessionByHarnessSessionId()`의 존재하지 않는 컬럼 참조(`d.last_seen_at` → `d.attached_at`) SQL 오류를 수정했습니다.
+  - `promoteCliSessionToAsd()`에서 이미 승격된 세션을 재사용(`created: false`)하고 `makeForeground: true`, `sessionId` 별칭, 확장된 반환 구조(`{ sessionId, asdSessionId, created, driverId, driver, session, ... }`)를 지원하도록 개선했습니다.
+  - `buildSessionDemotion()`에서 활성 드라이버가 없을 때도 `session.harness_session_id` 및 과거 드라이버 이력으로 폴백 복원하도록 수정하고, `detachDriver()`가 `driverId` 또는 `sessionId`를 모두 받을 수 있도록 확장했습니다.
+  - `src/core/drivers.ts`에서 어댑터 직접 import를 제거(`buildHeadlessHarnessCommand` 사용)하여 코어 순수성을 복원하고, `npx tsc --noEmit` 실행 시 검출되던 8개 파일의 TypeScript 엄격 타입 불일치를 전수 해결했습니다.
+- **구버전(`v2.3.2` 이하) DB 자동 복구·마이그레이션 툴 배포 안내 (`9a7b8e9`)**:
+  - 구버전 해시 디렉토리별 DB(`~/.asd/state/<hash>/core.db`)를 `v2.4.0` 단일 공유 DB(`~/.asd/state/core.db`)로 자동 병합·복구하는 `asd-db-migrate.mjs` 다운로드 안내를 `README_ko.md`, `README.md`, `EXTERNAL_SDK_REFERENCE.md`에 추가했습니다.
 
 ### `v2.3.3` (`fe668d3`) — 단일 공유 상태 DB (`~/.asd/state/core.db`) 전환 및 프로젝트 스코프 드라이버
 - 프로젝트마다 생성되던 `~/.asd/state/<projectHash>/core.db` 구조를 단일 `~/.asd/state/core.db` 파일로 통합하고, `SqliteDriver(dbPath, projectRoot?)`를 통해 프로젝트별 자동 스코프 쿼리를 적용했습니다.
