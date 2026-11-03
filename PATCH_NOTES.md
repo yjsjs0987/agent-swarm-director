@@ -1,70 +1,76 @@
-# Patch Notes (`agent-swarm-director` / ASD v2.3)
+# Patch Notes (`agent-swarm-director` / ASD v2.4.0)
 
-**English** | [한국어](./PATCH_NOTES_ko.md) | [📖 Back to README](./README.md)
+**English** | [한국어](./PATCH_NOTES_ko.md) | [📖 Back to README](./README.md) | [🏛️ Architecture & Code Reference](./PROJECT_STATUS.md) | [🔌 External SDK Reference](./EXTERNAL_SDK_REFERENCE.md)
 
-Complete chronological patch history for **Agent Swarm Director (ASD v2.3)**, organized from the latest updates to the initial foundation.
+Complete chronological patch history for **Agent Swarm Director (ASD v2.4.0)**, organized from the latest updates to the initial foundation.
 
 ---
 
-## 1. Latest Orchestration, Dashboard & Cross-Harness Enhancements (v2.3.0)
+## 1. Latest Orchestration, External GUI SDK & Performance Updates (v2.4.0)
 
-### `v2.3.2` ? GUI Core Integration: Multi-Driver History (`session_drivers`), 0-Token Driver Briefing, Headless Driver Runner (`runDriverTurn`), 5-Harness Transcript Reader, Cross-Process Merge Lock & Orphan Task Recovery
+### `v2.4.0` — 4-Way Transcript Classification, Real-Time Streaming (`onEvent`), Bidirectional CLI ↔ ASD Session Promotion/Demotion, Multi-Harness Session Discovery & Startup Caching
+- **Breaking Version & Shared DB Schema Upgrade (`2.4.0`)**:
+  - Bumped `ASD_VERSION` and package version to `2.4.0` across core, skills, presets, and documentation (incompatible with `2.3.x` per-project hash DB layout).
+- **4-Way Structured Transcript Classification (`readHarnessTranscript` — `8b4980c`)**:
+  - Upgraded `TranscriptMessage` in `src/core/transcripts.ts` with `category: "user" | "assistant" | "thinking" | "tool_use" | "tool_result" | "system"`, `thinking`, `toolUse`, and `toolResult`.
+  - Added full 4-way classification across **Claude Code** (`thinking`, `tool_use`, `tool_result`, `text` blocks), **Codex CLI** (`agent_reasoning`, `function_call`, `custom_tool_call`, `function_call_output`), **OpenCode** (`opencode.db` SQLite `part` table + JSON storage), and **Antigravity** (`USER_INPUT`, `PLANNER_RESPONSE`, `TOOL_RESPONSE` + automatic `transcript_full.jsonl` fallback when `truncated_fields` is present).
+- **Real-Time Streaming Turn Execution (`runDriverTurn` & `parseDriverStreamLine` — `ea92b73`)**:
+  - Added `onEvent?: (event: DriverStreamEvent) => void` and `streamJson?: boolean` (default `true`) to `runDriverTurn` in `src/core/drivers.ts`.
+  - Automatically passes `--output-format stream-json --verbose` for Claude Code / Cursor, `--json` for Codex, and `--format json` for OpenCode, emitting real-time `thinking`, `tool_use`, `tool_result`, and `assistant` events while the CLI turn is running.
+- **Bidirectional CLI ↔ ASD Session Promotion & Demotion (`ea92b73`, `31421ba`)**:
+  - Added `promoteCliSessionToAsd()` in `src/core/session-tracker.ts` to promote any standalone CLI session into an ASD session in `core.db` (idempotent if already promoted) and optionally attach an active driver lease.
+  - Added `demoteAsdSession()`, `buildSessionDemotion()`, and the `asd resume` CLI command to pause an ASD session, detach active drivers, record the native session in `cli-recent.json`, and return/execute the interactive native CLI resume command.
+- **Project-Scoped Multi-Harness CLI Session Discovery (`discoverProjectCliSessions` — `c29200b`, `0e26088`)**:
+  - Added `discoverProjectCliSessions()` to discover all local CLI sessions executed in a project across all 5 harnesses and cross-reference `core.db` (`isPromotedToAsd`, `asdSessionId`, `asdPhase`).
+  - Expanded `syncLocalHarnessTranscripts()` from Antigravity-only to also scan **Claude Code** (`~/.claude/projects`), **Codex** (`~/.codex/sessions`), and **OpenCode** (`opencode.db`), and preserved first-prompt `summary` and `transcriptPath` across subsequent `PreToolUse`/`Stop` hook updates in `recordCliRecentSession()`.
+- **Fast Model & Project Loading Optimizations (`fa59456`, `c29200b`)**:
+  - Optimized `discoverHarnessModels()` in `src/cli/dashboard.ts` with parallel async probes (`Promise.all`) and a persistent 10-minute disk cache at `~/.asd/state/models-cache.json` (`getModelsDiskCachePath`).
+  - Optimized `listKnownProjects()` in `src/core/session-tracker.ts` with a 15-second in-memory FS stat cache, `skipDiskCheck`, and `db` instance reuse.
+- **Codex Notify Hook & Cursor Nested Hook Schema (`aad8d91`, `8d68e01`)**:
+  - Added Codex `notify` hook installation in `~/.codex/config.toml` and updated Cursor `~/.cursor/hooks.json` to the official nested `{"version": 1, "hooks": {...}}` schema with full payload extraction tests.
+
+### `v2.3.3` (`fe668d3`) — Single Shared State DB (`~/.asd/state/core.db`) & Project-Scoped SQLite Driver
+- Consolidated per-project `~/.asd/state/<projectHash>/core.db` files into a single shared `~/.asd/state/core.db` with `SqliteDriver(dbPath, projectRoot?)` project scoping and `resolveHomeDir()` test isolation.
+- Rewrote `listKnownProjects()` to query `core.db` directly instead of scanning thousands of hash directories.
+
+### `v2.3.2` — GUI Core Integration: Multi-Driver History (`session_drivers`), 0-Token Driver Briefing, Headless Driver Runner (`runDriverTurn`), 5-Harness Transcript Reader, Cross-Process Merge Lock & Orphan Task Recovery
 - Added `session_drivers` table and driver lifecycle APIs (`attachDriver`, `setDriverHarnessSessionId`, `detachDriver`, `getActiveDriver`, `listDrivers`, `buildDriverBriefing`, `runDriverTurn`).
 - Removed automatic hook session hijacking (CR-04), added `ASD_DRIVER_ID` hook binding, and enforced 10-minute TTL on `cli-recent.json` inference.
 - Added `readHarnessTranscript` & `locateHarnessTranscript` (CR-10), `finalizeSubagentArtifacts` (CR-09), cross-process `.asd/merge.lock` (CR-11), `recoverOrphanedTasks` & atomic `tryClaimTask` (CR-12), state-dependent subagent `resume` with `follow_up_of` (CR-13), `PLAN.md` foreground session guards (CR-14), and scoped LIGHT rollback (CR-07).
 
 ### `v2.3.0` — 5th Harness (`Cursor CLI` / `@cr`), Skill Modernization, Test-File Permission Rule & `asd ui` Inspector Upgrade
 - **5th Harness Support (`Cursor CLI` / `@cr`)**:
-  - Added `CursorAdapter` (`src/adapters/cursor.ts`) supporting headless execution (`agent -p <prompt> --force --output-format json --model <model>`), `PreToolUse` / `Stop` hooks, and global synchronization under `~/.cursor/` (`agents/`, `skills/`, `hooks.json`, `mcp.json`, `cli-config.json`).
-  - Wired `cursor` across `src/core/router.ts`, `src/core/debate.ts`, `src/adapters/installer.ts`, `src/core/policy.ts`, `src/mcp/server.ts`, `src/cli/index.ts`, and `src/cli/dashboard.ts`.
+  - Added `CursorAdapter` (`src/adapters/cursor.ts`) supporting headless execution (`agent -p <prompt> --force --output-format json --model <model>`), `PreToolUse` / `Stop` hooks, and global synchronization under `~/.cursor/`.
 - **Modernized & Differentiated All 6 Skills (`src/skills/*/SKILL.md`)**:
-  - Upgraded `/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`, and `/handoff` (`/asd-handoff`) to v2.3, eliminating legacy role names (`builder`, `analyst`, `verifier`), deduplicating boilerplate, and documenting Cross-Scope `autoCreatedTasks` (max 2) + `deferredCrossScopeRequests`.
+  - Upgraded `/asd`, `/asd-plan`, `/asd-run`, `/asd-debate`, `/asd-debug`, and `/handoff` (`/asd-handoff`), documenting Cross-Scope `autoCreatedTasks` (max 2) + `deferredCrossScopeRequests`.
 - **Automatic Test File Write Permission & `claim_only` Subagent Audit Logs**:
-  - Subagent `allowedFiles` in `src/mcp/server.ts` now automatically permits creating/updating test files (`tests/**`, `**/*.test.ts`, `**/*.spec.ts`) so agents can keep tests aligned with code changes during verification.
-  - Dispatches in `claim_only` mode now record structured `.asd/sessions/<sessionId>/subagents/<subSessionId>/{meta.json,prompt.md,output.log}` artifacts and update them upon `asd verify`.
+  - Subagent `allowedFiles` in `src/mcp/server.ts` automatically permits creating/updating test files (`tests/**`, `**/*.test.ts`, `**/*.spec.ts`).
+  - Dispatches in `claim_only` mode record structured `.asd/sessions/<sessionId>/subagents/<subSessionId>/{meta.json,prompt.md,output.log}` artifacts.
 - **`asd ui` Task Log Selection Fix**:
   - Fixed a dashboard bug where clicking a task with 0 subagent logs fell back to displaying all session logs (`sessionLogs`).
 
 ### `523c3cb` — Cross-Scope File Request Auto-Scheduling & Caller File Bundling
-- **Structured Subagent Cross-Scope Reporting (`asd-report`)**: Subagents are now instructed via `buildPromptForTask` not to directly touch files outside their `Allowed Target Files` (which are blocked by `PreToolUse`). Instead, they emit a trailing `asd-report` JSON block containing `summary`, `key_decisions`, `risks`, and `cross_scope_requests`.
+- **Structured Subagent Cross-Scope Reporting (`asd-report`)**: Subagents emit a trailing `asd-report` JSON block containing `summary`, `key_decisions`, `risks`, and `cross_scope_requests`.
 - **Automatic Next-Turn Follow-Up Task Creation (Cap: Max 2 per Subagent)**:
-  - Up to **2** `cross_scope_requests` per subagent are automatically scheduled into `Turn + 1` (`T<next>.x`).
-  - **Caller A File Bundling**: Each auto-created follow-up task bundles the requested external `target_file` together with up to 2 relevant files from the requesting subagent (`caller_files` or actual git-modified `changedFiles` from `verifyAndMergeHeavyTask` / `verifyAndCommitLightTask`) so the follow-up agent can update both definition and caller sites together.
-  - **Automatic `dependsOn: [A, B]` & Role Inheritance**: Automatically detects which task (`B`) owns `target_file` in the current or earlier turns, sets `dependsOn` to wait for both `A` and `B`, and inherits `B`'s `role` and `category`.
-- **Main Agent Escalation for Excess Requests**: Any requests beyond 2 per subagent (or exceeding chain depth 2) are returned in `deferredCrossScopeRequests` and highlighted under `⚠️ 메인 에이전트 판단 필요 (보류된 Cross-Scope 요청)` on the `progressBoard` for Main Director review.
+  - Up to **2** `cross_scope_requests` per subagent are automatically scheduled into `Turn + 1` (`T<next>.x`), bundling caller files and inheriting `dependsOn: [A, B]`.
 
 ### `8439636` — Real Harness Model Discovery & Searchable Model Picker Popover
-- **Zero Hardcoded Dummy Models**: Removed all fallback dummy model arrays from `discoverHarnessModels` in `src/cli/dashboard.ts`. Model lists now load strictly from real harness sources:
-  - **Antigravity (`agy`)**: Parses `agy models` CLI output directly.
-  - **Claude Code (`claude`)**: Combines local usage/settings models (`~/.claude/projects/**/*.jsonl`, `settings.json`) and live OpenAI-compatible `/v1/models` endpoints when `ANTHROPIC_BASE_URL` is configured.
-  - **Codex CLI (`codex`)**: Reads `~/.codex/models_cache.json` (`slug` / `display_name`) and `config.toml`.
-  - **OpenCode (`opencode`)**: Executes `opencode models` (increased `maxBuffer` and timeout so all 80+ models load without truncation).
-- **Searchable Model Picker Popover**: Replaced plain `<select>` dropdowns in the **Project Routing Editor (`.asd/routing.jsonc`)** and **Custom Model Rerun (`custom`)** controls with a custom popover button + compact real-time search input (`filterModelPicker`).
+- Removed all fallback dummy model arrays from `discoverHarnessModels` in `src/cli/dashboard.ts` and added a searchable model picker popover in `asd ui`.
 
 ### `ca879a4` — Official Claude Code `settings.json` Hook Schema Compatibility
-- Updated `createClaudeHookConfig`, `isAsdManagedClaudeHook`, and `mergeClaudeSettings` in `src/adapters/claude-code.ts` and `src/adapters/installer.ts` to generate the official nested `{ matcher: "", hooks: [{ type: "command", command: "..." }] }` structure required by Claude Code.
-- Automatically strips legacy flat hook entries during `asd sync` and `asd uninstall` while preserving user-defined hooks.
+- Updated `createClaudeHookConfig`, `isAsdManagedClaudeHook`, and `mergeClaudeSettings` to generate the official nested `{ matcher: "", hooks: [{ type: "command", command: "..." }] }` structure.
 
 ### `0b39793` — Per-Harness Model Discovery Modal (`2x2`), Dropdown Selectors & Debate Session Isolation
-- Added a `2x2` **Available Models by Harness** modal in `asd ui` (`GET /api/models`) with click-to-copy model badges.
-- Isolated standalone `asd debate` runs into dedicated `<timestamp>-debate` sessions when `--task` is omitted, preventing standalone debates from polluting active coding session history.
+- Added a `2x2` **Available Models by Harness** modal in `asd ui` (`GET /api/models`) and isolated standalone `asd debate` runs into dedicated `<timestamp>-debate` sessions.
 
 ### `48d09a7` — Project-Scoped Routing Editor (`.asd/routing.jsonc`) & 4 Subagent Runtime Controls
-- Added an in-dashboard **Routing Editor** (`GET/POST /api/routing`) that saves project-level agent and category routing overrides to `.asd/routing.jsonc`.
-- Added 4 runtime control actions (`POST /api/subagent/control`) on each subagent card in `asd ui`:
-  1. **`kill`**: Terminates a running subagent process tree immediately (`killProcessTree`) and cleans up its worktree.
-  2. **`retry`**: Reruns the task using the same harness and model.
-  3. **`fallback`**: Reruns the task using the next fallback route defined in `routing.jsonc`.
-  4. **`custom`**: Reruns the task on a user-selected harness and model.
+- Added an in-dashboard **Routing Editor** (`GET/POST /api/routing`) and 4 runtime control actions (`kill`, `retry`, `fallback`, `custom`) on each subagent card in `asd ui`.
 
 ### `bec4abb` — Dashboard Session Grouping, `.asd` Persistent Memos & Subagent Log Inspection
-- Grouped tasks, subagent runs, and debates by session in `asd ui` with a collapsible session selector.
-- Added persistent per-session memos (`POST /api/session/memo`) saved to both SQLite (`sessions.memo`) and `.asd/sessions/<sessionId>/main.json`.
-- Added an interactive modal in `asd ui` (`GET /api/subagent-log`) to inspect full `prompt.md`, `output.log`, and `DoneClaim` results for any subagent.
+- Grouped tasks, subagent runs, and debates by session in `asd ui` and added persistent per-session memos (`POST /api/session-memo`).
 
 ### `ebb4927` — 5 Core Agent Personas + 3 Difficulty Tiers & Zero-Token Debate Code Slice Injection
-- Consolidated the agent roster into **5 core roles** (`planner`, `architect`, `worker`, `scout`, `critic`) and **3 difficulty tiers** (`low`, `medium`, `high`).
-- Added **Zero-Token Code Slice Injection** (`--files "path:start-end"` and `--include-diff`) in `asd debate` (`src/core/debate.ts`) so debate critics evaluate ground-truth source code and `git diff HEAD` directly in the prompt without spending tool-call turns.
+- Consolidated the agent roster into **5 core roles** (`planner`, `architect`, `worker`, `scout`, `critic`) and **3 difficulty tiers** (`low`, `medium`, `high`), and added Zero-Token Code Slice Injection (`--files`, `--include-diff`) in `asd debate`.
 
 ---
 
@@ -74,7 +80,7 @@ Complete chronological patch history for **Agent Swarm Director (ASD v2.3)**, or
 | :--- | :--- |
 | `f9b2f4a` | **P0/P1 Audit Fixes**: Removed regex-only fake LSP fallback, hardened secret redaction and path boundary checks, and fixed sync edge cases. |
 | `6375b6b` | **Non-TTY & NDJSON Fixes**: Fixed non-TTY stdin hang in CLI, unwrapped NDJSON debate verdicts, enforced internal subagents on `LIGHT` track, and synced per-harness routing models. |
-| `be4ded9` | **Multi-Harness `/handoff` Skill**: Added `/handoff` (`/asd-handoff`) skill to generate `handoff.md` for seamless session continuation across Claude Code, OpenCode, Codex CLI, and Antigravity. |
+| `be4ded9` | **Multi-Harness `/handoff` Skill**: Added `/handoff` (`/asd-handoff`) skill to generate `handoff.md` for seamless session continuation across harnesses. |
 | `afb2ac2` | **Automatic Fallback Chain Stepping**: `asd dispatch` and `asd debate` automatically step through configured `fallbacks` on rate-limit, quota, network, or non-zero CLI exit errors. |
 | `625ec4f` | **Default `LIGHT` Track & Pre-Flight Briefing**: Defaulted `LIGHT` track to current harness and added the mandatory single pre-flight briefing across all `/asd*` skills. |
 | `73faca5` | **CLI Documentation**: Documented both global `PATH` (`asd ...`) and non-`PATH` (`node --no-warnings src/cli/index.ts ...`) execution modes. |
@@ -96,7 +102,7 @@ Complete chronological patch history for **Agent Swarm Director (ASD v2.3)**, or
 
 | Commit | Summary |
 | :--- | :--- |
-| `2bca203` | Built-in `lsp` MCP server (`src/mcp/lsp-server.ts`) and capability-aware gap-filling MCP sync. |
+| `2bca203` | Built-in `lsp` MCP server and capability-aware gap-filling MCP sync. |
 | `d3e4679` | Initial CLI commands (`sync`, `status`, `clean`, `doctor`, `uninstall`), hook runner, and E2E installer tests. |
 | `b6f32fe` | `asd-core` MCP server (`asd_plan`, `asd_dispatch`, `asd_verify`, `asd_debate`), subagent isolation guard, and live `progressBoard`. |
 | `53000fa` | Zero-polling blind cross-model debate broker and automatic acceptance constraint injector (`src/core/debate.ts`). |
