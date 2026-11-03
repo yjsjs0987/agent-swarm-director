@@ -535,22 +535,45 @@ export function extractHookSessionInfo(
 } {
   const harness = ((payload.harness as string) || defaultHarness) as HarnessId;
 
-  const rawTranscript = payload.transcript_path ?? payload.transcriptPath;
+  const rawTranscript =
+    payload.transcript_path ??
+    payload["transcript-path"] ??
+    payload.transcriptPath;
   const transcriptPath =
     typeof rawTranscript === "string" && rawTranscript.trim().length > 0
       ? rawTranscript.trim()
       : null;
 
+  const nestedSession =
+    payload.session && typeof payload.session === "object"
+      ? (payload.session as Record<string, unknown>)
+      : undefined;
+  const nestedConv =
+    payload.conversation && typeof payload.conversation === "object"
+      ? (payload.conversation as Record<string, unknown>)
+      : undefined;
+
   const rawSid =
     payload.session_id ??
+    payload["session-id"] ??
     payload.sessionId ??
     payload.sessionID ??
     payload.conversation_id ??
+    payload["conversation-id"] ??
     payload.conversationId ??
     payload.thread_id ??
+    payload["thread-id"] ??
     payload.threadId ??
     payload.chat_id ??
-    payload.chatId;
+    payload["chat-id"] ??
+    payload.chatId ??
+    payload.composer_id ??
+    payload["composer-id"] ??
+    payload.composerId ??
+    nestedSession?.id ??
+    nestedSession?.session_id ??
+    nestedConv?.id ??
+    nestedConv?.conversation_id;
   let harnessSessionId =
     typeof rawSid === "string" && rawSid.trim().length > 0 ? rawSid.trim() : null;
 
@@ -574,8 +597,20 @@ export function extractHookSessionInfo(
     }
   }
 
+  // Fallback 3: Cursor transcript path or workspace/composer metadata fallback
+  if (!harnessSessionId && harness === "cursor" && transcriptPath) {
+    const baseName = path.basename(transcriptPath, path.extname(transcriptPath)).trim();
+    if (baseName && baseName !== "transcript" && baseName !== "chat") {
+      harnessSessionId = baseName;
+    }
+  }
+
   const rawModel =
-    payload.model ?? payload.model_id ?? payload.modelId ?? payload.modelName;
+    payload.model ??
+    payload.model_id ??
+    payload["model-id"] ??
+    payload.modelId ??
+    payload.modelName;
   const model =
     typeof rawModel === "string" && rawModel.trim().length > 0
       ? rawModel.trim()
@@ -583,13 +618,40 @@ export function extractHookSessionInfo(
 
   const projectRoot = extractHookProjectRoot(payload);
 
-  // Priority 1: Direct prompt fields in hook payload (including Antigravity's lastUserInput)
+  // Priority 1: Direct prompt fields in hook payload (including Antigravity's lastUserInput and Codex input-messages)
+  const inputMsgs =
+    payload["input-messages"] ??
+    payload.input_messages ??
+    payload.inputMessages;
+  let firstInputMsg: string | undefined;
+  if (Array.isArray(inputMsgs) && inputMsgs.length > 0) {
+    for (const item of inputMsgs) {
+      if (typeof item === "string" && item.trim()) {
+        firstInputMsg = item;
+        break;
+      }
+      if (item && typeof item === "object") {
+        const obj = item as Record<string, unknown>;
+        const txt = obj.text ?? obj.content ?? obj.message;
+        if (typeof txt === "string" && txt.trim()) {
+          firstInputMsg = txt;
+          break;
+        }
+      }
+    }
+  }
+
   const rawPrompt =
     payload.prompt ??
     payload.user_prompt ??
+    payload["user-prompt"] ??
     payload.userPrompt ??
     payload.lastUserInput ??
     payload.last_user_message ??
+    payload["last-user-message"] ??
+    firstInputMsg ??
+    payload["last-assistant-message"] ??
+    payload.last_assistant_message ??
     payload.query;
   let summary =
     typeof rawPrompt === "string" && rawPrompt.trim().length > 0
@@ -601,7 +663,7 @@ export function extractHookSessionInfo(
     summary = extractSummaryFromTranscriptFile(transcriptPath);
   }
 
-  // Priority 3: Tool name + target file path (including Antigravity's toolCall.{name,args})
+  // Priority 3: Tool name + target file path (including Antigravity's toolCall.{name,args} & Cursor beforeShellExecution command)
   if (!summary) {
     const toolCallObj =
       payload.toolCall && typeof payload.toolCall === "object"
@@ -637,6 +699,8 @@ export function extractHookSessionInfo(
       summary = normalizeOneLineSummary(`${toolName}: ${path.basename(fileTarget)}`);
     } else if (toolName) {
       summary = normalizeOneLineSummary(`Tool: ${toolName}`);
+    } else if (typeof payload.command === "string" && payload.command.trim()) {
+      summary = normalizeOneLineSummary(`Shell: ${payload.command.trim()}`);
     }
   }
 

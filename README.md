@@ -118,6 +118,7 @@ Once `asd sync` has been run, you can invoke these slash skills directly inside 
 | `asd verify --task <id> [--files <csv>]` | `node --no-warnings src/cli/index.ts verify --task <id> [--files <csv>]` | Enforces `allowedFiles` boundaries, secret redaction checks, test command verification, and LIGHT commit / HEAVY worktree merge. |
 | `asd debate --topic <t> --proposal <p>` | `node --no-warnings src/cli/index.ts debate --topic <t> --proposal <p>` | Executes parallel blind cross-model critiques and synthesizes binding arbiter verdicts with real-time progress streaming. |
 | `asd status [--json]` | `node --no-warnings src/cli/index.ts status [--json]` | Displays the current project's SQLite session state, live TODO progress board, and any unapplied auto-stash warnings. |
+| `asd resume [--session <id>] [--print]` | `node --no-warnings src/cli/index.ts resume [--session <id>] [--print]` | Resolves the active session driver and demotes/resumes the native interactive harness CLI (`--print` outputs the command string, `--json` outputs full metadata). |
 | `asd logs [taskId] [--json]` | `node --no-warnings src/cli/index.ts logs [taskId] [--json]` | Displays the most recent subagent prompt & execution log automatically, or inspects a specific task (`T1.1`, `t1.2`, etc.). |
 | `asd ui [--port <num>]` | `node --no-warnings src/cli/index.ts ui [--port <num>]` | Launches a zero-dependency bilingual (Korean/English) local web dashboard (`http://127.0.0.1:3847`) with live task cards, subagent logs, and debate verdicts. |
 | `asd doctor [--json]` | `node --no-warnings src/cli/index.ts doctor [--json]` | Runs a fast (<100ms) zero-token health check (Node version, SQLite WAL, Git repo, harness CLI binary paths & headless support, synthetic `PreToolUse` security probe). |
@@ -134,6 +135,12 @@ All long-running orchestration actions (`plan`, `dispatch`, `verify`, `debate`) 
 - `context7` (`https://mcp.context7.com/mcp`): Up-to-date official library and framework documentation lookup.
 - `grep_app` (`https://mcp.grep.app/mcp`): Fast regex and code search across public GitHub repositories.
 - `websearch` (`https://mcp.exa.ai/mcp`): Real-time Exa web search (automatically skipped on harnesses with native web search such as Claude Code, Codex, and Antigravity).
+
+---
+
+## Known Limitations
+
+- **Cursor Transcript Reader (`readHarnessTranscript` / `locateHarnessTranscript`)**: Cursor CLI (`agent` / `cursor-agent`) does not expose a stable, unencrypted per-session JSONL transcript file on disk in the same manner as Claude Code, Codex, OpenCode, or Antigravity. Consequently, `readHarnessTranscript` returns `{ unsupported: true, messages: [], totalTurns: 0 }` for `cursor` by design. Session tracking (`cli-recent.json` via `~/.cursor/hooks.json`), driver binding (`session_drivers`), and interactive session demotion (`asd resume`) remain fully supported for Cursor.
 
 ---
 

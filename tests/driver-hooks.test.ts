@@ -7,6 +7,7 @@ import * as child_process from "node:child_process";
 import { openProjectDb } from "../src/core/db.ts";
 import { getActiveDriver, listDrivers } from "../src/core/drivers.ts";
 import {
+  extractHookSessionInfo,
   linkHarnessSessionToAsdSession,
   readCliRecentSessions,
 } from "../src/core/session-tracker.ts";
@@ -207,5 +208,104 @@ test("CR-04: MCP handlePlan create/update switches driver when called from anoth
     db.close();
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("T1.3: Codex notify (thread-id / thread_id via argv and stdin) and Cursor hooks (conversation_id / chat_id / composer_id) fixture tests record cli-recent.json", () => {
+  const root = makeTempProject("asd-codex-cursor-fixtures-");
+  const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "asd-fixture-home-"));
+  try {
+    const env = {
+      ...process.env,
+      ASD_HOME_DIR: tmpHome,
+    };
+    delete env.ASD_DRIVER_ID;
+    delete env.ASD_MAIN_SESSION_ID;
+    delete env.ASD_SESSION_ROLE;
+
+    // 1. Unit-test extractHookSessionInfo on Codex & Cursor payload variants
+    const codexNotifyFixture = {
+      type: "agent-turn-complete",
+      "thread-id": "codex-thread-kebab-001",
+      "turn-id": "turn-01",
+      cwd: root,
+      "input-messages": ["Implement session demotion CLI"],
+      "last-assistant-message": "Done implementing asd resume.",
+    };
+    const codexExtracted = extractHookSessionInfo(codexNotifyFixture, "codex");
+    assert.equal(codexExtracted.harness, "codex");
+    assert.equal(codexExtracted.harnessSessionId, "codex-thread-kebab-001");
+    assert.equal(codexExtracted.projectRoot, path.resolve(root));
+    assert.equal(codexExtracted.summary, "Implement session demotion CLI");
+
+    const cursorShellFixture = {
+      conversation_id: "cursor-conv-uuid-101",
+      hook_event_name: "beforeShellExecution",
+      workspace_roots: [root],
+      model: "claude-3.7-sonnet",
+      command: "npm test",
+    };
+    const cursorExtracted = extractHookSessionInfo(cursorShellFixture, "cursor");
+    assert.equal(cursorExtracted.harness, "cursor");
+    assert.equal(cursorExtracted.harnessSessionId, "cursor-conv-uuid-101");
+    assert.equal(cursorExtracted.model, "claude-3.7-sonnet");
+    assert.equal(cursorExtracted.projectRoot, path.resolve(root));
+    assert.equal(cursorExtracted.summary, "Shell: npm test");
+
+    const cursorComposerFixture = {
+      composer_id: "cursor-composer-202",
+      workspace_roots: [root],
+      prompt: "Fix hooks schema",
+    };
+    const composerExtracted = extractHookSessionInfo(cursorComposerFixture, "cursor");
+    assert.equal(composerExtracted.harnessSessionId, "cursor-composer-202");
+    assert.equal(composerExtracted.summary, "Fix hooks schema");
+
+    // 2. End-to-end CLI hook execution: Codex notify passes JSON payload as final argv (no stdin)
+    const codexArgvRes = child_process.spawnSync(
+      process.execPath,
+      [
+        "--no-warnings",
+        cliEntry,
+        "hook",
+        "stop",
+        "--harness",
+        "codex",
+        JSON.stringify(codexNotifyFixture),
+      ],
+      { encoding: "utf8", env, cwd: root }
+    );
+    assert.equal(codexArgvRes.status, 0, `codex argv hook stderr: ${codexArgvRes.stderr}`);
+
+    // 3. End-to-end CLI hook execution: Cursor stop hook passes chat_id payload via stdin
+    const cursorStopFixture = {
+      chat_id: "cursor-chat-stdin-303",
+      hook_event_name: "stop",
+      workspace_roots: [root],
+      model: "gpt-5.4",
+      prompt: "Verify cursor hook session tracking",
+    };
+    const cursorStdinRes = child_process.spawnSync(
+      process.execPath,
+      ["--no-warnings", cliEntry, "hook", "stop", "--harness", "cursor"],
+      { input: JSON.stringify(cursorStopFixture), encoding: "utf8", env, cwd: root }
+    );
+    assert.equal(cursorStdinRes.status, 0, `cursor stdin hook stderr: ${cursorStdinRes.stderr}`);
+
+    // 4. Assert cli-recent.json contains both Codex and Cursor sessions
+    const recent = readCliRecentSessions(root);
+    const codexRec = recent.find((r) => r.harnessSessionId === "codex-thread-kebab-001");
+    assert.ok(codexRec, "Codex notify argv session must be recorded in cli-recent.json");
+    assert.equal(codexRec.harness, "codex");
+    assert.equal(codexRec.summary, "Implement session demotion CLI");
+
+    const cursorRec = recent.find((r) => r.harnessSessionId === "cursor-chat-stdin-303");
+    assert.ok(cursorRec, "Cursor stop hook session must be recorded in cli-recent.json");
+    assert.equal(cursorRec.harness, "cursor");
+    assert.equal(cursorRec.model, "gpt-5.4");
+    assert.equal(cursorRec.summary, "Verify cursor hook session tracking");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(tmpHome, { recursive: true, force: true });
   }
 });
