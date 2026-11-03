@@ -697,12 +697,16 @@ function syncJsonMcpConfigFile(options: {
   safeWriteJson(filePath, config);
 }
 
-function buildCodexManagedTomlBlock(options: {
+export function buildCodexManagedTomlBlock(options: {
   unmanagedToml: string;
   catalog: Record<string, CatalogMcpEntry>;
   nativeCapabilities: Set<string>;
+  asdCliPath?: string;
 }): string {
   const { unmanagedToml, catalog, nativeCapabilities } = options;
+  const resolvedCliPath = (
+    options.asdCliPath || path.join(getAsdRoot(), "src", "cli", "index.ts")
+  ).replaceAll("\\", "/");
 
   // Detect any [mcp_servers.<name>] already defined outside ASD fence
   const existingKeys = new Set<string>();
@@ -715,6 +719,15 @@ function buildCodexManagedTomlBlock(options: {
   }
 
   const blocks: string[] = [];
+
+  // Codex notify hook: receives turn-complete JSON payload as final argv (and/or stdin)
+  const hasUnmanagedNotify = /^\s*notify\s*=/m.test(unmanagedToml);
+  if (!hasUnmanagedNotify) {
+    blocks.push(
+      `notify = ["node", "--no-warnings", "${resolvedCliPath}", "hook", "stop", "--harness", "codex"]`
+    );
+  }
+
   for (const [serverName, def] of Object.entries(catalog)) {
     if (serverName === "asd-core") continue;
     const lowerName = serverName.toLowerCase();
@@ -1078,6 +1091,7 @@ export async function syncHarnessConfigs(
           unmanagedToml,
           catalog: catalogMcpServers,
           nativeCapabilities: nativeCaps,
+          asdCliPath,
         });
         const mergedToml = upsertTomlFence(existingToml, managedTomlBlock, ASD_VERSION);
         safeWriteText(configTomlPath, mergedToml);
@@ -1269,37 +1283,60 @@ export async function syncHarnessConfigs(
             existingHooks = {};
           }
         }
-        const preHooks = Array.isArray(existingHooks.PreToolUse)
-          ? existingHooks.PreToolUse.filter(
+        // Clean up any legacy flat Claude-style keys from older ASD syncs
+        for (const legacyKey of ["SessionStart", "PreToolUse", "Stop"] as const) {
+          if (Array.isArray(existingHooks[legacyKey])) {
+            const remaining = (existingHooks[legacyKey] as unknown[]).filter(
               (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
-            )
-          : [];
-        preHooks.push({
-          command: `node --no-warnings "${asdCliPath}" hook pre-tool-use --harness cursor`,
-          _asdManaged: true,
-        });
-        const stopHooks = Array.isArray(existingHooks.Stop)
-          ? existingHooks.Stop.filter(
-              (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
-            )
-          : [];
-        stopHooks.push({
-          command: `node --no-warnings "${asdCliPath}" hook stop --harness cursor`,
-          _asdManaged: true,
-        });
-        existingHooks.SessionStart = [
-          ...(Array.isArray(existingHooks.SessionStart)
-            ? existingHooks.SessionStart.filter(
+            );
+            if (remaining.length === 0) {
+              delete existingHooks[legacyKey];
+            } else {
+              existingHooks[legacyKey] = remaining;
+            }
+          }
+        }
+
+        const nestedHooks: Record<string, unknown> =
+          existingHooks.hooks &&
+          typeof existingHooks.hooks === "object" &&
+          !Array.isArray(existingHooks.hooks)
+            ? { ...(existingHooks.hooks as Record<string, unknown>) }
+            : {};
+
+        const upsertCursorHook = (eventKey: string, cmd: string) => {
+          const prev = Array.isArray(nestedHooks[eventKey])
+            ? (nestedHooks[eventKey] as unknown[]).filter(
                 (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
               )
-            : []),
-          {
-            command: `node --no-warnings "${asdCliPath}" hook session-start --harness cursor`,
+            : [];
+          prev.push({
+            command: cmd,
             _asdManaged: true,
-          },
-        ];
-        existingHooks.PreToolUse = preHooks;
-        existingHooks.Stop = stopHooks;
+          });
+          nestedHooks[eventKey] = prev;
+        };
+
+        upsertCursorHook(
+          "sessionStart",
+          `node --no-warnings "${asdCliPath}" hook session-start --harness cursor`
+        );
+        upsertCursorHook(
+          "preToolUse",
+          `node --no-warnings "${asdCliPath}" hook pre-tool-use --harness cursor`
+        );
+        upsertCursorHook(
+          "beforeShellExecution",
+          `node --no-warnings "${asdCliPath}" hook pre-tool-use --harness cursor`
+        );
+        upsertCursorHook(
+          "stop",
+          `node --no-warnings "${asdCliPath}" hook stop --harness cursor`
+        );
+
+        existingHooks.version =
+          typeof existingHooks.version === "number" ? existingHooks.version : 1;
+        existingHooks.hooks = nestedHooks;
         safeWriteJson(hooksJsonPath, existingHooks);
         written.push(hooksJsonPath);
 
@@ -1700,23 +1737,32 @@ export async function uninstallHarnessConfigs(
   if (fs.existsSync(cursorHooksJson)) {
     try {
       const hJson = JSON.parse(fs.readFileSync(cursorHooksJson, "utf8")) as Record<string, unknown>;
-      if (Array.isArray(hJson.SessionStart)) {
-        hJson.SessionStart = hJson.SessionStart.filter(
-          (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
-        );
-        if ((hJson.SessionStart as unknown[]).length === 0) delete hJson.SessionStart;
+      for (const legacyKey of ["SessionStart", "PreToolUse", "Stop"] as const) {
+        if (Array.isArray(hJson[legacyKey])) {
+          hJson[legacyKey] = (hJson[legacyKey] as unknown[]).filter(
+            (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+          );
+          if ((hJson[legacyKey] as unknown[]).length === 0) delete hJson[legacyKey];
+        }
       }
-      if (Array.isArray(hJson.PreToolUse)) {
-        hJson.PreToolUse = hJson.PreToolUse.filter(
-          (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
-        );
-        if ((hJson.PreToolUse as unknown[]).length === 0) delete hJson.PreToolUse;
+      if (hJson.hooks && typeof hJson.hooks === "object" && !Array.isArray(hJson.hooks)) {
+        const nested = hJson.hooks as Record<string, unknown>;
+        for (const key of Object.keys(nested)) {
+          if (Array.isArray(nested[key])) {
+            nested[key] = (nested[key] as unknown[]).filter(
+              (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+            );
+            if ((nested[key] as unknown[]).length === 0) {
+              delete nested[key];
+            }
+          }
+        }
+        if (Object.keys(nested).length === 0) {
+          delete hJson.hooks;
+        }
       }
-      if (Array.isArray(hJson.Stop)) {
-        hJson.Stop = hJson.Stop.filter(
-          (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
-        );
-        if ((hJson.Stop as unknown[]).length === 0) delete hJson.Stop;
+      if (!hJson.hooks && Object.keys(hJson).every((k) => k === "version")) {
+        delete hJson.version;
       }
       removeBackupFile(cursorHooksJson);
       if (Object.keys(hJson).length === 0) {

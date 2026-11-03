@@ -18,6 +18,7 @@ import { after, before, describe, test } from "node:test";
 
 import {
   autoSyncIfNeeded,
+  buildCodexManagedTomlBlock,
   doctorProbe,
   runAsdDoctor,
   runAsdSync,
@@ -164,9 +165,34 @@ describe("Installer & Sync Engine", () => {
       assert.ok(fs.existsSync(configToml));
       const toml = fs.readFileSync(configToml, "utf8");
       assert.ok(toml.includes("# >>> BEGIN MANAGED BY ASD-V2"));
+      assert.ok(
+        toml.includes('notify = ["node", "--no-warnings",') &&
+          toml.includes('"hook", "stop", "--harness", "codex"]'),
+        "Codex config.toml managed block must include notify hook"
+      );
+      assert.ok(
+        toml.indexOf("notify =") < toml.indexOf("[mcp_servers."),
+        "notify must appear before any [mcp_servers.*] table header"
+      );
       assert.ok(!toml.includes("[mcp_servers.asd-core]"));
       assert.ok(toml.includes("[mcp_servers.context7]"));
       assert.ok(toml.includes("# <<< END MANAGED BY ASD-V2 <<<"));
+    });
+
+    test("Cursor targets exist and hooks.json uses nested { version: 1, hooks: {...} } schema", () => {
+      const cursorDir = path.join(tmpHome, ".cursor");
+      const hooksJsonPath = path.join(cursorDir, "hooks.json");
+      assert.ok(fs.existsSync(hooksJsonPath));
+      const parsedHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf8"));
+      assert.equal(parsedHooks.version, 1);
+      assert.ok(parsedHooks.hooks && typeof parsedHooks.hooks === "object");
+      assert.ok(Array.isArray(parsedHooks.hooks.sessionStart));
+      assert.ok(Array.isArray(parsedHooks.hooks.preToolUse));
+      assert.ok(Array.isArray(parsedHooks.hooks.beforeShellExecution));
+      assert.ok(Array.isArray(parsedHooks.hooks.stop));
+      assert.equal(parsedHooks.SessionStart, undefined);
+      assert.equal(parsedHooks.PreToolUse, undefined);
+      assert.equal(parsedHooks.Stop, undefined);
     });
 
     test("Antigravity targets exist and contain agents, skills, hooks, and MCP config", () => {
@@ -413,6 +439,17 @@ describe("Installer & Sync Engine", () => {
       assert.equal(runAsdSync, syncHarnessConfigs);
       assert.equal(runAsdUninstall, uninstallHarnessConfigs);
       assert.equal(runAsdDoctor, doctorProbe);
+    });
+
+    test("buildCodexManagedTomlBlock skips notify when unmanagedToml already defines notify", () => {
+      const withCustomNotify = buildCodexManagedTomlBlock({
+        unmanagedToml: 'model = "gpt-5"\nnotify = ["custom-notify"]\n',
+        catalog: { context7: { command: "npx", args: ["-y", "@upstash/context7-mcp"] } },
+        nativeCapabilities: new Set(),
+        asdCliPath: "/tmp/asd/src/cli/index.ts",
+      });
+      assert.equal(withCustomNotify.includes("notify ="), false);
+      assert.ok(withCustomNotify.includes("[mcp_servers.context7]"));
     });
   });
 });

@@ -483,5 +483,22 @@ describe("Harness Adapters", () => {
       const cleaned = removeTomlFence(merged);
       assert.equal(cleaned, original);
     });
+
+    test("cursor: formatPreToolUseDeny and formatStopBlock follow JSON decision contract", () => {
+      const adapter = new CursorAdapter({ binaryName: "agent" });
+      const deny = adapter.formatPreToolUseDeny("Restricted file");
+      assert.equal(deny.exitCode, 2);
+      assert.deepEqual(JSON.parse(deny.stdout ?? "{}"), {
+        decision: "deny",
+        reason: "Restricted file",
+      });
+
+      const stop = adapter.formatStopBlock("Continue working");
+      assert.equal(stop.exitCode, 0);
+      assert.deepEqual(JSON.parse(stop.stdout ?? "{}"), {
+        decision: "block",
+        reason: "Continue working",
+      });
+    });
   });
 });
