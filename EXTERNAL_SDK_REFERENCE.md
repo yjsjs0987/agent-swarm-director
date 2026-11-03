@@ -1,11 +1,11 @@
 # ASD v2.4.0 외부 SDK 및 단일 DB 전환 통합 레퍼런스 (`EXTERNAL_SDK_REFERENCE.md`)
 
 > **버전**: `2.4.0` (단일 공유 SQLite DB 및 v2.4.0 신규 SDK 통합본 — `2.3.x` 이하와 DB 비호환)  
-> **대상**: `asd-gui` 등 외부 애플리케이션 및 라이브러리 연동 개발자  
+> **대상**: [**ASD-Nexus (`asd-gui`)**](https://github.com/yjsjs0987/ASD-Nexus) 등 외부 애플리케이션 및 라이브러리 연동 개발자  
 > **런타임 의존성**: `0개` (`dependencies: {}`, 순수 Node.js `>=22.13.0` 내장 모듈만 사용)  
 > **메인 엔트리포인트**: [`src/index.ts`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/index.ts) (`import { ... } from "agent-swarm-director"`)
 
-[📖 README (한국어)](./README_ko.md) | [📖 README (EN)](./README.md) | [🏛️ 프로젝트 아키텍처 및 파일·함수 상세](./PROJECT_STATUS.md) | [🤖 AI 작업 지침 프롬프트](./AI_WORKFLOW_PROMPT.md) | [📋 패치 노트 (KR)](./PATCH_NOTES_ko.md)
+[📖 README (한국어)](./README_ko.md) | [📖 README (EN)](./README.md) | [🖥️ ASD-Nexus (공식 GUI)](https://github.com/yjsjs0987/ASD-Nexus) | [🏛️ 프로젝트 아키텍처 및 파일·함수 상세](./PROJECT_STATUS.md) | [🤖 AI 작업 지침 프롬프트](./AI_WORKFLOW_PROMPT.md) | [📋 패치 노트 (KR)](./PATCH_NOTES_ko.md)
 
 ---
 

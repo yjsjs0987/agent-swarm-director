@@ -1,10 +1,15 @@
 # Agent Swarm Director (`agent-swarm-director` / ASD v2.4.0)
 
-**English** | [한국어](./README_ko.md) | [🏛️ Architecture & Code Reference](./PROJECT_STATUS.md) | [🔌 External SDK & DB Reference](./EXTERNAL_SDK_REFERENCE.md) | [📋 Patch Notes](./PATCH_NOTES.md) | [📋 패치 노트 (KR)](./PATCH_NOTES_ko.md)
+**English** | [한국어](./README_ko.md) | [🖥️ ASD-Nexus (Official GUI)](https://github.com/yjsjs0987/ASD-Nexus) | [🏛️ Architecture & Code Reference](./PROJECT_STATUS.md) | [🔌 External SDK & DB Reference](./EXTERNAL_SDK_REFERENCE.md) | [📋 Patch Notes](./PATCH_NOTES.md) | [📋 패치 노트 (KR)](./PATCH_NOTES_ko.md)
 
 > **Zero-dependency universal multi-agent orchestration harness and SDK across Claude Code, OpenCode, Codex CLI, Antigravity, and Cursor CLI.**
 
 Agent Swarm Director (**ASD v2.4.0**) is the universal multi-harness successor to `agy-agent-swarm-director`. Built purely on native Node.js (`>=22.13.0`) TypeScript execution and `node:sqlite` (WAL mode) with **zero external npm runtime dependencies**, ASD coordinates heterogeneous AI coding harnesses under a single deterministic control plane and exposes a full Node.js SDK for external GUI/IDE integration.
+
+> [!TIP]
+> ### 🖥️ Official Desktop / Web GUI Companion — **[ASD-Nexus](https://github.com/yjsjs0987/ASD-Nexus)**
+> Looking for a full visual workspace to manage 5-harness CLI sessions, inspect 4-way structured transcripts (Thinking / Tool Use / Tool Result / Assistant), stream live multi-harness turns, and promote/demote ASD sessions with one click?  
+> 👉 **[Visit the official GUI project: `yjsjs0987/ASD-Nexus`](https://github.com/yjsjs0987/ASD-Nexus)**
 
 ---
 
