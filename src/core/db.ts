@@ -301,11 +301,11 @@ export class SqliteDriver {
   constructor(dbPath: string, projectRoot?: string) {
     this.scopeProjectRoot = projectRoot ?? null;
     fs.mkdirSync(path.dirname(dbPath), { recursive: true });
-    this.db = new DatabaseSync(dbPath);
-    // Separate statements; the busy_timeout result row key is "timeout".
+    this.db = new DatabaseSync(dbPath, { timeout: 5000 });
+    // Set busy_timeout FIRST so concurrent connections on the shared DB wait instead of failing with SQLITE_BUSY on journal_mode/DDL.
+    this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA synchronous = NORMAL;");
-    this.db.exec("PRAGMA busy_timeout = 5000;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(DDL);
     try {
