@@ -7,7 +7,9 @@ import { openProjectDb } from "../src/core/db.ts";
 import {
   attachDriver,
   getActiveDriver,
+  parseDriverStreamLine,
   runDriverTurn,
+  type DriverStreamEvent,
 } from "../src/core/drivers.ts";
 
 function makeTempDir(prefix = "asd-driver-runner-"): string {
@@ -197,6 +199,105 @@ test("CR-03: runDriverTurn injects briefing once when switching to a new driver 
 
     releaseSlow();
     await runningPromise;
+
+    db.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("T2.2: runDriverTurn emits structured onEvent callbacks for thinking, tool_use, tool_result, and text across harnesses", async () => {
+  const root = makeTempDir("asd-driver-events-");
+  try {
+    const db = openProjectDb(root);
+    const sessionId = "asd-20261103-184500-evnt";
+    db.createOrGetSession({
+      sessionId,
+      projectRoot: root,
+      mainHarness: "claude-code",
+      mainModel: "claude-sonnet-4-6",
+    });
+
+    const events: DriverStreamEvent[] = [];
+    const res = await runDriverTurn({
+      projectRoot: root,
+      db,
+      sessionId,
+      prompt: "Stream everything",
+      streamJson: true,
+      onEvent: (ev) => events.push(ev),
+      commandRunner: {
+        async run(_cmd, args, opts) {
+          assert.ok(args.includes("stream-json"), "streamJson should switch claude output format to stream-json");
+          opts.onStdout(
+            JSON.stringify({
+              type: "assistant",
+              session_id: "cc-stream-1",
+              message: {
+                role: "assistant",
+                content: [
+                  { type: "thinking", thinking: "Step 1: inspect files" },
+                  { type: "tool_use", id: "tu_1", name: "Bash", input: { command: "ls" } },
+                ],
+              },
+            }) + "\n"
+          );
+          opts.onStdout(
+            JSON.stringify({
+              type: "user",
+              message: {
+                role: "user",
+                content: [
+                  { type: "tool_result", tool_use_id: "tu_1", content: "file1.ts\nfile2.ts" },
+                ],
+              },
+            }) + "\n"
+          );
+          opts.onStdout(
+            JSON.stringify({
+              type: "result",
+              session_id: "cc-stream-1",
+              result: "Completed inspection.",
+            }) + "\n"
+          );
+          return { exitCode: 0, pid: 60001 };
+        },
+      },
+    });
+
+    assert.equal(res.exitCode, 0);
+    assert.equal(res.harnessSessionId, "cc-stream-1");
+    assert.equal(events.length, 4);
+    assert.equal(events[0]?.type, "thinking");
+    assert.equal(events[0]?.thinking, "Step 1: inspect files");
+    assert.equal(events[1]?.type, "tool_use");
+    assert.equal(events[1]?.toolName, "Bash");
+    assert.equal(events[2]?.type, "tool_result");
+    assert.equal(events[2]?.toolOutput, "file1.ts\nfile2.ts");
+    assert.equal(events[3]?.type, "text");
+    assert.equal(events[3]?.text, "Completed inspection.");
+
+    // Verify parseDriverStreamLine for Codex & OpenCode & Antigravity
+    const codexEvents = parseDriverStreamLine(
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "command_execution", id: "cmd_1", command: "npm test", aggregated_output: "PASS", exit_code: 0 },
+      }),
+      "codex"
+    );
+    assert.equal(codexEvents[0]?.type, "tool_result");
+    assert.equal(codexEvents[0]?.toolOutput, "PASS");
+
+    const ocEvents = parseDriverStreamLine(
+      JSON.stringify({
+        type: "tool",
+        part: { type: "tool", tool: "read", callID: "c1", state: { status: "completed", input: { path: "a.ts" }, output: "content" } },
+      }),
+      "opencode"
+    );
+    assert.equal(ocEvents.length, 2);
+    assert.equal(ocEvents[0]?.type, "tool_use");
+    assert.equal(ocEvents[1]?.type, "tool_result");
 
     db.close();
   } finally {

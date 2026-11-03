@@ -557,6 +557,370 @@ function pruneDriverRuns(runsDir: string, maxRuns = 50): void {
   }
 }
 
+export type DriverStreamEventType =
+  | "thinking"
+  | "tool_use"
+  | "tool_result"
+  | "text"
+  | "status"
+  | "raw";
+
+export interface DriverStreamEvent {
+  type: DriverStreamEventType;
+  harness: HarnessId;
+  text?: string;
+  thinking?: string;
+  toolName?: string;
+  toolId?: string;
+  toolInput?: string;
+  toolOutput?: string;
+  isError?: boolean;
+  harnessSessionId?: string;
+  timestamp: number;
+}
+
+/**
+ * Parses a single redacted stdout/stderr line from a running harness CLI
+ * (`claude`, `codex`, `opencode`, `agy`, `agent`) into zero or more structured
+ * `DriverStreamEvent` objects for real-time GUI rendering.
+ */
+export function parseDriverStreamLine(
+  rawLine: string,
+  harness: HarnessId,
+  now = Date.now()
+): DriverStreamEvent[] {
+  const trimmed = rawLine.trim();
+  if (!trimmed) return [];
+  if (!trimmed.startsWith("{")) {
+    return [{ type: "raw", harness, text: trimmed, timestamp: now }];
+  }
+
+  let obj: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return [{ type: "raw", harness, text: trimmed, timestamp: now }];
+    }
+    obj = parsed as Record<string, unknown>;
+  } catch {
+    return [{ type: "raw", harness, text: trimmed, timestamp: now }];
+  }
+
+  const events: DriverStreamEvent[] = [];
+  const lineType = typeof obj.type === "string" ? obj.type : "";
+
+  // 1. Claude Code / Cursor stream-json & json formats
+  if (lineType === "content_block_delta" && obj.delta && typeof obj.delta === "object") {
+    const delta = obj.delta as Record<string, unknown>;
+    if (delta.type === "thinking_delta" && typeof delta.thinking === "string" && delta.thinking) {
+      events.push({ type: "thinking", harness, thinking: delta.thinking, timestamp: now });
+      return events;
+    }
+    if (delta.type === "text_delta" && typeof delta.text === "string" && delta.text) {
+      events.push({ type: "text", harness, text: delta.text, timestamp: now });
+      return events;
+    }
+  }
+
+  if (obj.message && typeof obj.message === "object") {
+    const msg = obj.message as Record<string, unknown>;
+    if (Array.isArray(msg.content)) {
+      for (const block of msg.content) {
+        if (!block || typeof block !== "object") continue;
+        const b = block as Record<string, unknown>;
+        if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking.trim()) {
+          events.push({ type: "thinking", harness, thinking: b.thinking.trim(), timestamp: now });
+        } else if (b.type === "tool_use") {
+          const toolName = typeof b.name === "string" ? b.name : "tool";
+          const toolId = typeof b.id === "string" ? b.id : undefined;
+          const toolInput =
+            b.input !== undefined
+              ? typeof b.input === "string"
+                ? b.input
+                : JSON.stringify(b.input)
+              : undefined;
+          events.push({
+            type: "tool_use",
+            harness,
+            toolName,
+            ...(toolId ? { toolId } : {}),
+            ...(toolInput !== undefined ? { toolInput } : {}),
+            timestamp: now,
+          });
+        } else if (b.type === "tool_result") {
+          const toolId = typeof b.tool_use_id === "string" ? b.tool_use_id : undefined;
+          const out =
+            typeof b.content === "string"
+              ? b.content
+              : Array.isArray(b.content)
+                ? b.content
+                    .map((p: unknown) =>
+                      p && typeof p === "object" && typeof (p as Record<string, unknown>).text === "string"
+                        ? String((p as Record<string, unknown>).text)
+                        : ""
+                    )
+                    .filter(Boolean)
+                    .join("\n")
+                : "";
+          events.push({
+            type: "tool_result",
+            harness,
+            toolOutput: out,
+            ...(toolId ? { toolId } : {}),
+            ...(b.is_error === true ? { isError: true } : {}),
+            timestamp: now,
+          });
+        } else if (typeof b.text === "string" && b.text.trim()) {
+          events.push({ type: "text", harness, text: b.text, timestamp: now });
+        }
+      }
+      if (events.length > 0) return events;
+    } else if (typeof msg.content === "string" && msg.content.trim()) {
+      events.push({ type: "text", harness, text: msg.content, timestamp: now });
+      return events;
+    }
+  }
+
+  if (lineType === "result" && typeof obj.result === "string" && obj.result.trim()) {
+    events.push({
+      type: "text",
+      harness,
+      text: obj.result,
+      ...(typeof obj.session_id === "string" ? { harnessSessionId: obj.session_id } : {}),
+      timestamp: now,
+    });
+    return events;
+  }
+
+  // 2. Codex `--json` events (`item.started`, `item.completed`, `response_item`, `event_msg`)
+  const codexItem =
+    (obj.item && typeof obj.item === "object" ? (obj.item as Record<string, unknown>) : undefined) ??
+    (obj.payload && typeof obj.payload === "object" ? (obj.payload as Record<string, unknown>) : undefined);
+  if (codexItem) {
+    const itemType = typeof codexItem.type === "string" ? codexItem.type : "";
+    if (itemType === "reasoning" || itemType === "agent_reasoning") {
+      let th = typeof codexItem.text === "string" ? codexItem.text : "";
+      if (!th && Array.isArray(codexItem.summary)) {
+        th = codexItem.summary
+          .map((s: unknown) =>
+            s && typeof s === "object" && typeof (s as Record<string, unknown>).text === "string"
+              ? String((s as Record<string, unknown>).text)
+              : ""
+          )
+          .filter(Boolean)
+          .join("\n");
+      }
+      if (th.trim()) {
+        events.push({ type: "thinking", harness, thinking: th.trim(), timestamp: now });
+        return events;
+      }
+    }
+    if (itemType === "agent_message" || (itemType === "message" && codexItem.role === "assistant")) {
+      const txt =
+        typeof codexItem.text === "string"
+          ? codexItem.text
+          : typeof codexItem.message === "string"
+            ? codexItem.message
+            : Array.isArray(codexItem.content)
+              ? codexItem.content
+                  .map((c: unknown) =>
+                    c && typeof c === "object" && typeof (c as Record<string, unknown>).text === "string"
+                      ? String((c as Record<string, unknown>).text)
+                      : ""
+                  )
+                  .filter(Boolean)
+                  .join("\n")
+              : "";
+      if (txt.trim()) {
+        events.push({ type: "text", harness, text: txt, timestamp: now });
+        return events;
+      }
+    }
+    if (
+      itemType === "command_execution" ||
+      itemType === "function_call" ||
+      itemType === "custom_tool_call" ||
+      itemType === "mcp_tool_call"
+    ) {
+      const toolName =
+        typeof codexItem.name === "string"
+          ? codexItem.name
+          : itemType === "command_execution"
+            ? "shell"
+            : itemType;
+      const toolId =
+        typeof codexItem.call_id === "string"
+          ? codexItem.call_id
+          : typeof codexItem.id === "string"
+            ? codexItem.id
+            : undefined;
+      if (
+        lineType === "item.completed" &&
+        typeof codexItem.aggregated_output === "string"
+      ) {
+        events.push({
+          type: "tool_result",
+          harness,
+          toolName,
+          toolOutput: codexItem.aggregated_output,
+          ...(toolId ? { toolId } : {}),
+          ...(typeof codexItem.exit_code === "number" && codexItem.exit_code !== 0
+            ? { isError: true }
+            : {}),
+          timestamp: now,
+        });
+        return events;
+      }
+      const rawIn = codexItem.command ?? codexItem.arguments ?? codexItem.input;
+      const toolInput =
+        rawIn !== undefined
+          ? typeof rawIn === "string"
+            ? rawIn
+            : JSON.stringify(rawIn)
+          : undefined;
+      events.push({
+        type: "tool_use",
+        harness,
+        toolName,
+        ...(toolId ? { toolId } : {}),
+        ...(toolInput !== undefined ? { toolInput } : {}),
+        timestamp: now,
+      });
+      return events;
+    }
+    if (itemType === "function_call_output" || itemType === "custom_tool_call_output") {
+      const toolId = typeof codexItem.call_id === "string" ? codexItem.call_id : undefined;
+      const out = typeof codexItem.output === "string" ? codexItem.output : JSON.stringify(codexItem.output ?? "");
+      events.push({
+        type: "tool_result",
+        harness,
+        toolOutput: out,
+        ...(toolId ? { toolId } : {}),
+        timestamp: now,
+      });
+      return events;
+    }
+  }
+
+  // 3. OpenCode `--format json` events (`part` wrapper or direct `type`)
+  const ocPart = obj.part && typeof obj.part === "object" ? (obj.part as Record<string, unknown>) : obj;
+  const ocType = typeof ocPart.type === "string" ? ocPart.type : lineType;
+  if (ocType === "reasoning" || ocType === "thinking") {
+    const th =
+      typeof ocPart.thinking === "string"
+        ? ocPart.thinking
+        : typeof ocPart.reasoning === "string"
+          ? ocPart.reasoning
+          : typeof ocPart.text === "string"
+            ? ocPart.text
+            : "";
+    if (th.trim()) {
+      events.push({ type: "thinking", harness, thinking: th.trim(), timestamp: now });
+      return events;
+    }
+  }
+  if (ocType === "tool" || ocType === "tool_use" || ocType === "tool-invocation") {
+    const toolName =
+      typeof ocPart.tool === "string"
+        ? ocPart.tool
+        : typeof ocPart.name === "string"
+          ? ocPart.name
+          : "tool";
+    const toolId =
+      typeof ocPart.callID === "string"
+        ? ocPart.callID
+        : typeof ocPart.id === "string"
+          ? ocPart.id
+          : undefined;
+    const state =
+      ocPart.state && typeof ocPart.state === "object"
+        ? (ocPart.state as Record<string, unknown>)
+        : ocPart;
+    const inVal = state.input ?? ocPart.input ?? ocPart.args;
+    const outVal = state.output ?? ocPart.output ?? ocPart.result;
+    events.push({
+      type: "tool_use",
+      harness,
+      toolName,
+      ...(toolId ? { toolId } : {}),
+      ...(inVal !== undefined
+        ? { toolInput: typeof inVal === "string" ? inVal : JSON.stringify(inVal) }
+        : {}),
+      timestamp: now,
+    });
+    if (outVal !== undefined && outVal !== null) {
+      events.push({
+        type: "tool_result",
+        harness,
+        toolName,
+        ...(toolId ? { toolId } : {}),
+        toolOutput: typeof outVal === "string" ? outVal : JSON.stringify(outVal),
+        ...(state.status === "error" ? { isError: true } : {}),
+        timestamp: now,
+      });
+    }
+    return events;
+  }
+
+  // 4. Antigravity PLANNER_RESPONSE / TOOL_RESPONSE
+  if (lineType === "PLANNER_RESPONSE") {
+    if (typeof obj.thinking === "string" && obj.thinking.trim()) {
+      events.push({ type: "thinking", harness, thinking: obj.thinking.trim(), timestamp: now });
+    }
+    if (Array.isArray(obj.tool_calls)) {
+      for (const tc of obj.tool_calls) {
+        if (!tc || typeof tc !== "object") continue;
+        const t = tc as Record<string, unknown>;
+        const toolName = typeof t.name === "string" ? t.name : "tool";
+        const toolId = typeof t.id === "string" ? t.id : undefined;
+        const inVal = t.args ?? t.arguments ?? t.input;
+        events.push({
+          type: "tool_use",
+          harness,
+          toolName,
+          ...(toolId ? { toolId } : {}),
+          ...(inVal !== undefined
+            ? { toolInput: typeof inVal === "string" ? inVal : JSON.stringify(inVal) }
+            : {}),
+          timestamp: now,
+        });
+      }
+    }
+    if (typeof obj.content === "string" && obj.content.trim()) {
+      events.push({ type: "text", harness, text: obj.content, timestamp: now });
+    }
+    if (events.length > 0) return events;
+  }
+  if (lineType === "TOOL_RESPONSE") {
+    const out = typeof obj.content === "string" ? obj.content : JSON.stringify(obj.content ?? "");
+    events.push({
+      type: "tool_result",
+      harness,
+      ...(typeof obj.tool_name === "string" ? { toolName: obj.tool_name } : {}),
+      ...(typeof obj.tool_call_id === "string" ? { toolId: obj.tool_call_id } : {}),
+      toolOutput: out,
+      timestamp: now,
+    });
+    return events;
+  }
+
+  // 5. Generic text fallback
+  const fallbackText =
+    typeof ocPart.text === "string"
+      ? ocPart.text
+      : typeof obj.text === "string"
+        ? obj.text
+        : typeof obj.content === "string"
+          ? obj.content
+          : "";
+  if (fallbackText.trim()) {
+    events.push({ type: "text", harness, text: fallbackText, timestamp: now });
+    return events;
+  }
+
+  return [];
+}
+
 export async function runDriverTurn(input: {
   projectRoot: string;
   homeDir?: string;
@@ -569,6 +933,8 @@ export async function runDriverTurn(input: {
   idleTimeoutMs?: number;
   signal?: AbortSignal;
   onOutput?: (chunk: string) => void;
+  onEvent?: (event: DriverStreamEvent) => void;
+  streamJson?: boolean;
   commandRunner?: CommandRunner;
 }): Promise<DriverRunResult> {
   if (!isValidAsdSessionId(input.sessionId)) {
@@ -668,7 +1034,7 @@ export async function runDriverTurn(input: {
         effectiveModel
       );
       command = built.cmd;
-      args = built.args;
+      args = [...built.args];
     } else {
       const built = buildResumeHarnessCommand({
         harness: driver.harness,
@@ -677,8 +1043,33 @@ export async function runDriverTurn(input: {
         model: driver.model ?? effectiveModel,
       });
       command = built.command;
-      args = built.args;
+      args = [...built.args];
     }
+
+    const useStreamJson =
+      input.streamJson ?? Boolean(input.onEvent && !input.commandRunner);
+    if (useStreamJson && driver.harness === "claude-code") {
+      const fmtIdx = args.indexOf("--output-format");
+      if (fmtIdx >= 0 && args[fmtIdx + 1] === "json") {
+        args.splice(fmtIdx, 2, "--output-format", "stream-json", "--verbose");
+      }
+    }
+
+    let lineBuffer = "";
+    const handleOutputChunk = (chunk: string): void => {
+      input.onOutput?.(chunk);
+      if (!input.onEvent) return;
+      lineBuffer += chunk;
+      let nlIdx = lineBuffer.indexOf("\n");
+      while (nlIdx !== -1) {
+        const line = lineBuffer.slice(0, nlIdx);
+        lineBuffer = lineBuffer.slice(nlIdx + 1);
+        for (const ev of parseDriverStreamLine(line, driver.harness)) {
+          input.onEvent(ev);
+        }
+        nlIdx = lineBuffer.indexOf("\n");
+      }
+    };
 
     const runId = generateDriverRunId();
     const runDir = path.join(runsBaseDir, runId);
@@ -747,7 +1138,7 @@ export async function runDriverTurn(input: {
       timeoutMs: input.timeoutMs,
       idleTimeoutMs: input.idleTimeoutMs,
       commandRunner: input.commandRunner,
-      onOutput: input.onOutput,
+      onOutput: handleOutputChunk,
       onSpawn: (pid) => {
         meta = { ...meta, pid };
         writeMeta();
@@ -756,6 +1147,12 @@ export async function runDriverTurn(input: {
         recordDetectedSid(extracted);
       },
       onBeforeStreamEnd: (res) => {
+        if (input.onEvent && lineBuffer.trim().length > 0) {
+          for (const ev of parseDriverStreamLine(lineBuffer, driver.harness)) {
+            input.onEvent(ev);
+          }
+          lineBuffer = "";
+        }
         if (res.harnessSessionId && !currentSid) {
           recordDetectedSid(res.harnessSessionId);
         }

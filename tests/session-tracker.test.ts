@@ -6,7 +6,10 @@ import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openProjectDb } from "../src/core/db.ts";
 import {
+  buildSessionDemotion,
   linkHarnessSessionToAsdSession,
+  promoteCliSessionToAsd,
+  readCliRecentSessions,
   recordCliRecentSession,
   syncLocalHarnessTranscripts,
 } from "../src/core/session-tracker.ts";
@@ -245,6 +248,44 @@ test("T1.1: linkHarnessSessionToAsdSession falls back to syncLocalHarnessTranscr
     assert.equal(activeDriver?.harness, "codex");
     assert.equal(activeDriver?.harness_session_id, "codex-fresh-777");
     db.close();
+  } finally {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("T2.2: promoteCliSessionToAsd promotes a plain CLI session into an ASD session and round-trips with buildSessionDemotion", () => {
+  const homeDir = makeTempDir("asd-t22-promo-home-");
+  const projectRoot = makeTempDir("asd-t22-promo-proj-");
+  try {
+    const promoted = promoteCliSessionToAsd({
+      projectRoot,
+      homeDir,
+      harness: "antigravity",
+      harnessSessionId: "agy-conv-promo-888",
+      model: "gemini-3.1-pro-high",
+      title: "Promote CLI session test",
+      autoApprove: true,
+    });
+
+    assert.ok(promoted.asdSessionId.startsWith("asd-"));
+    assert.ok(promoted.driverId.startsWith("drv-"));
+    assert.equal(promoted.harness, "antigravity");
+    assert.equal(promoted.harnessSessionId, "agy-conv-promo-888");
+    assert.ok(fs.existsSync(promoted.mainJsonPath));
+
+    const recent = readCliRecentSessions(projectRoot);
+    assert.equal(recent[0]?.harnessSessionId, "agy-conv-promo-888");
+    assert.equal(recent[0]?.asdSessionId, promoted.asdSessionId);
+
+    // Demoting back to CLI session must return `agy --resume agy-conv-promo-888`
+    const demoted = buildSessionDemotion({
+      projectRoot,
+      homeDir,
+      sessionId: promoted.asdSessionId,
+    });
+    assert.equal(demoted.command, "agy");
+    assert.deepEqual(demoted.args, ["--resume", "agy-conv-promo-888", "--model", "gemini-3.1-pro-high"]);
   } finally {
     fs.rmSync(homeDir, { recursive: true, force: true });
     fs.rmSync(projectRoot, { recursive: true, force: true });

@@ -28,7 +28,13 @@ import {
   resolveAsdPaths,
   resolveHomeDir,
 } from "./config.ts";
-import { openProjectDb, SqliteDriver, type SessionRow } from "./db.ts";
+import {
+  generateAsdSessionId,
+  isValidAsdSessionId,
+  openProjectDb,
+  SqliteDriver,
+  type SessionRow,
+} from "./db.ts";
 import { attachDriver, type DriverSource } from "./drivers.ts";
 import { atomicWriteFileSync } from "./render.ts";
 import type {
@@ -1588,6 +1594,155 @@ export function linkHarnessSessionToAsdSession(options: {
     harnessSessionId: effectiveHarnessSessionId,
     mainModel: effectiveModel,
   };
+}
+
+export interface PromoteCliSessionOptions {
+  projectRoot: string;
+  homeDir?: string;
+  harness: HarnessId;
+  harnessSessionId: string;
+  model?: string | null;
+  title?: string | null;
+  memo?: string | null;
+  transcriptPath?: string | null;
+  asdSessionId?: string;
+  autoApprove?: boolean;
+  source?: DriverSource;
+  db?: SqliteDriver;
+}
+
+export interface PromoteCliSessionResult {
+  asdSessionId: string;
+  driverId: string;
+  harness: HarnessId;
+  harnessSessionId: string;
+  model: string | null;
+  mainJsonPath: string;
+}
+
+/**
+ * Explicitly promotes a plain CLI/harness session (`harness` + `harnessSessionId`)
+ * into a full ASD orchestration session (`asd-...`), creating or updating the
+ * session row in `core.db`, attaching the active driver in `session_drivers`,
+ * writing `<projectRoot>/.asd/sessions/<asdSessionId>/main.json`, and linking
+ * `asdSessionId` back into `<projectRoot>/.asd/sessions/cli-recent.json`.
+ */
+export function promoteCliSessionToAsd(
+  options: PromoteCliSessionOptions
+): PromoteCliSessionResult {
+  const projectRoot = path.resolve(options.projectRoot);
+  const harnessSessionId = (options.harnessSessionId || "").trim();
+  if (!harnessSessionId) {
+    throw new Error("MISSING_HARNESS_SESSION_ID");
+  }
+
+  const asdSessionId =
+    options.asdSessionId && options.asdSessionId.trim()
+      ? options.asdSessionId.trim()
+      : generateAsdSessionId();
+  if (!isValidAsdSessionId(asdSessionId)) {
+    throw new Error("INVALID_SESSION_ID");
+  }
+
+  let db = options.db;
+  let ownsDb = false;
+  try {
+    if (!db) {
+      db = openProjectDb(projectRoot, options.homeDir);
+      ownsDb = true;
+    }
+
+    const recentList = readCliRecentSessionsRaw(projectRoot);
+    const matchedRecent = recentList.find(
+      (r) => r.harness === options.harness && r.harnessSessionId === harnessSessionId
+    );
+    const effectiveModel =
+      (options.model && options.model.trim()) ||
+      matchedRecent?.model ||
+      null;
+    const effectiveMemo =
+      (options.memo && options.memo.trim()) ||
+      (options.title && options.title.trim()) ||
+      matchedRecent?.summary ||
+      null;
+
+    db.createOrGetSession({
+      sessionId: asdSessionId,
+      projectRoot,
+      mainHarness: options.harness,
+      mainModel: effectiveModel,
+      harnessSessionId,
+      memo: effectiveMemo,
+      autoApprove: options.autoApprove,
+    });
+
+    if (effectiveMemo) {
+      db.updateSessionMemo(asdSessionId, effectiveMemo);
+    }
+
+    const driverRow = attachDriver(db, {
+      projectRoot,
+      sessionId: asdSessionId,
+      harness: options.harness,
+      model: effectiveModel,
+      harnessSessionId,
+      source: options.source ?? "cli-asd",
+    });
+
+    const mainJsonPath = path.join(
+      projectRoot,
+      ".asd",
+      "sessions",
+      asdSessionId,
+      "main.json"
+    );
+    if (fs.existsSync(mainJsonPath)) {
+      try {
+        const current = JSON.parse(fs.readFileSync(mainJsonPath, "utf8")) as Record<
+          string,
+          unknown
+        >;
+        if (effectiveMemo && !current.memo) {
+          current.memo = effectiveMemo;
+        }
+        if (options.autoApprove !== undefined) {
+          current.autoApprove = options.autoApprove;
+        }
+        atomicWriteFileSync(mainJsonPath, JSON.stringify(current, null, 2) + "\n");
+      } catch {
+        // Ignore main.json enrichment error
+      }
+    }
+
+    recordCliRecentSession(
+      projectRoot,
+      {
+        harnessSessionId,
+        harness: options.harness,
+        model: effectiveModel,
+        summary: effectiveMemo || "",
+        transcriptPath:
+          options.transcriptPath ?? matchedRecent?.transcriptPath ?? null,
+        asdSessionId,
+      },
+      { forceCreateDir: true }
+    );
+
+    return {
+      asdSessionId,
+      driverId: driverRow.driver.driver_id,
+      harness: options.harness,
+      harnessSessionId,
+      model: effectiveModel,
+      mainJsonPath,
+    };
+  } finally {
+    if (ownsDb && db) {
+      try {
+        db.close();
+      } catch {}
+    }
+  }
 }
 
 /**
