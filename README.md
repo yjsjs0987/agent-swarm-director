@@ -8,6 +8,25 @@ Agent Swarm Director (**ASD v2.4.0**) is the universal multi-harness successor t
 
 ---
 
+> [!IMPORTANT]
+> ## 🚨 [For Legacy Users ≤ v2.3.2] Automatic SQLite DB Migration Tool
+>
+> Starting in **ASD v2.3.3 / v2.4.0**, the per-project hash DB layout (`~/.asd/state/<12-hex-hash>/core.db`) was unified into a **single shared SQLite SSOT (`~/.asd/state/core.db`)**.
+>
+> If you used **ASD v2.3.2 or earlier** and want to automatically migrate all existing sessions, tasks, debates, and drivers into the new shared DB (with automatic backup and idempotent safety), download and run the official migration tool below:
+>
+> ### 👉 **[📥 Download ASD DB Migration Tool (Google Drive)](https://drive.google.com/drive/u/0/folders/1knUQzIY8HDzIKYkxrhsCxgorQDn_B3nU)**
+>
+> ```bash
+> # Run migration (automatically backs up shared DB before importing)
+> node asd-db-migrate.mjs
+>
+> # Optional: rename migrated legacy hash folders to *.migrated after completion
+> node asd-db-migrate.mjs --prune
+> ```
+
+---
+
 ## Key Features
 
 - **Zero External Dependencies (`dependencies: {}`)**: Runs directly on Node.js `>=22.13.0` native TypeScript strip-types, `node:sqlite`, and standard library modules.

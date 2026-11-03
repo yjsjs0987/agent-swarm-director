@@ -8,6 +8,25 @@
 
 ---
 
+> [!IMPORTANT]
+> ## 🚨 [구버전(v2.3.2 이하) 사용자 필수 안내] DB 자동 마이그레이션 툴 배포
+>
+> **ASD v2.3.3 / v2.4.0**부터 기존 프로젝트 해시별 분산 DB(`~/.asd/state/<12자리해시>/core.db`) 구조가 **단일 공유 SQLite DB(`~/.asd/state/core.db`)** 구조로 통합되었습니다.
+>
+> **v2.3.2 이하 구버전**을 사용 중이셨던 분들은 아래 구글 드라이브에서 **DB 자동 마이그레이션 툴(`asd-db-migrate.mjs`)**을 다운로드하여 실행하시면, 기존 세션·태스크·토론·드라이버 기록이 백업과 함께 최신 통합 DB로 안전하게 자동 이관됩니다.
+>
+> ### 👉 **[📥 ASD DB 자동 마이그레이션 툴 다운로드 (Google Drive)](https://drive.google.com/drive/u/0/folders/1knUQzIY8HDzIKYkxrhsCxgorQDn_B3nU)**
+>
+> ```bash
+> # 기본 실행 (기존 공유 DB 자동 백업 후 레거시 DB 전체 자동 통합, 재실행 시 중복 자동 스킵)
+> node asd-db-migrate.mjs
+>
+> # 선택 옵션: 이관 성공 후 기존 해시 폴더를 *.migrated 로 이름 변경 정리
+> node asd-db-migrate.mjs --prune
+> ```
+
+---
+
 ## 핵심 기능
 
 - **외부 런타임 의존성 0개 (`dependencies: {}`)**
