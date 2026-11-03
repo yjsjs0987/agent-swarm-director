@@ -136,14 +136,19 @@ describe("Harness Transcripts (CR-10)", () => {
       assert.ok(loc.transcriptPath && loc.transcriptPath.includes("rollout-"));
     });
 
-    test("read extracts response_item messages and skips meta/events", () => {
+    test("read extracts response_item messages and tool_use and skips meta/events", () => {
       const result = readHarnessTranscript("codex", threadId, { homeDir: home });
       assert.equal(result.found, true);
-      assert.equal(result.messages.length, 2);
+      assert.equal(result.messages.length, 3);
       assert.equal(result.messages[0]?.role, "user");
+      assert.equal(result.messages[0]?.category, "user");
       assert.equal(result.messages[0]?.text, "what is 2+2?");
       assert.equal(result.messages[1]?.role, "assistant");
+      assert.equal(result.messages[1]?.category, "assistant");
       assert.equal(result.messages[1]?.text, "4");
+      assert.equal(result.messages[2]?.role, "assistant");
+      assert.equal(result.messages[2]?.category, "tool_use");
+      assert.equal(result.messages[2]?.toolUse?.[0]?.name, "shell");
     });
   });
 
@@ -427,6 +432,229 @@ describe("Harness Transcripts (CR-10)", () => {
       const corrupt = readHarnessTranscript("opencode", "ghost", { homeDir: emptyHome });
       assert.equal(corrupt.found, false);
       assert.ok(corrupt.error);
+    });
+  });
+
+  describe("7. T2.1 4-way classification (Thinking, Tool Use, Tool Result, User/Assistant)", () => {
+    test("Claude Code separates thinking, tool_use, tool_result, and assistant text", () => {
+      const home = makeHome();
+      const sid = "cc-4way-1";
+      const file = path.join(home, ".claude", "projects", "proj", `${sid}.jsonl`);
+      writeJsonl(file, [
+        JSON.stringify({
+          type: "user",
+          message: { role: "user", content: "Inspect package.json" },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "Let me read package.json first." },
+              { type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "package.json" } },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "toolu_1", content: '{"name":"asd"}' },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "The package name is asd." }],
+          },
+        }),
+      ]);
+
+      const res = readHarnessTranscript("claude-code", sid, { homeDir: home });
+      assert.equal(res.found, true);
+      assert.equal(res.messages.length, 4);
+      assert.equal(res.messages[0]?.category, "user");
+      assert.equal(res.messages[1]?.category, "tool_use");
+      assert.equal(res.messages[1]?.thinking, "Let me read package.json first.");
+      assert.equal(res.messages[1]?.toolUse?.[0]?.name, "Read");
+      assert.equal(res.messages[2]?.category, "tool_result");
+      assert.equal(res.messages[2]?.role, "tool");
+      assert.equal(res.messages[2]?.toolResult?.[0]?.toolUseId, "toolu_1");
+      assert.equal(res.messages[3]?.category, "assistant");
+      assert.equal(res.messages[3]?.text, "The package name is asd.");
+    });
+
+    test("Antigravity parses USER_INPUT, PLANNER_RESPONSE (with transcript_full.jsonl fallback), and TOOL_RESPONSE", () => {
+      const home = makeHome();
+      const sid = "agy-4way-1";
+      const logDir = path.join(
+        home,
+        ".gemini",
+        "antigravity-cli",
+        "brain",
+        sid,
+        ".system_generated",
+        "logs"
+      );
+      const compactPath = path.join(logDir, "transcript.jsonl");
+      const fullPath = path.join(logDir, "transcript_full.jsonl");
+
+      writeJsonl(compactPath, [
+        JSON.stringify({
+          step_index: 0,
+          type: "USER_INPUT",
+          content: "<CONTEXT_SUMMARY>old</CONTEXT_SUMMARY><USER_REQUEST>Run unit tests</USER_REQUEST><ADDITIONAL_METADATA>meta</ADDITIONAL_METADATA>",
+          created_at: "2026-11-03T10:00:00Z",
+        }),
+        JSON.stringify({
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          thinking: "trunc...",
+          content: "",
+          tool_calls: [{ id: "call_1", name: "run_command", args: { CommandLine: "npm test" } }],
+          truncated_fields: ["thinking"],
+          created_at: "2026-11-03T10:00:01Z",
+        }),
+        JSON.stringify({
+          step_index: 2,
+          type: "TOOL_RESPONSE",
+          tool_name: "run_command",
+          tool_call_id: "call_1",
+          content: "All 310 tests passed",
+          created_at: "2026-11-03T10:00:02Z",
+        }),
+      ]);
+
+      writeJsonl(fullPath, [
+        JSON.stringify({
+          step_index: 0,
+          type: "USER_INPUT",
+          content: "<USER_REQUEST>Run unit tests</USER_REQUEST>",
+        }),
+        JSON.stringify({
+          step_index: 1,
+          type: "PLANNER_RESPONSE",
+          thinking: "Full untruncated thinking from transcript_full.jsonl",
+          content: "",
+          tool_calls: [{ id: "call_1", name: "run_command", args: { CommandLine: "npm test" } }],
+        }),
+      ]);
+
+      const res = readHarnessTranscript("antigravity", sid, { homeDir: home });
+      assert.equal(res.found, true);
+      assert.equal(res.messages.length, 3);
+      assert.equal(res.messages[0]?.role, "user");
+      assert.equal(res.messages[0]?.category, "user");
+      assert.equal(res.messages[0]?.text, "Run unit tests");
+
+      assert.equal(res.messages[1]?.role, "assistant");
+      assert.equal(res.messages[1]?.category, "tool_use");
+      assert.equal(res.messages[1]?.thinking, "Full untruncated thinking from transcript_full.jsonl");
+      assert.equal(res.messages[1]?.toolUse?.[0]?.name, "run_command");
+
+      assert.equal(res.messages[2]?.role, "tool");
+      assert.equal(res.messages[2]?.category, "tool_result");
+      assert.equal(res.messages[2]?.toolResult?.[0]?.output, "All 310 tests passed");
+    });
+
+    test("OpenCode SQLite separates reasoning, tool, and text parts", () => {
+      const home = makeHome();
+      const sid = "oc-4way-1";
+      const dbPath = path.join(home, ".local", "share", "opencode", "opencode.db");
+      fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+      const db = new DatabaseSync(dbPath);
+      try {
+        db.exec(
+          "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);" +
+            "CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL, session_id TEXT NOT NULL, data TEXT NOT NULL);"
+        );
+        db.prepare("INSERT INTO message (id, session_id, data) VALUES (?, ?, ?)").run(
+          "m1",
+          sid,
+          JSON.stringify({ id: "m1", sessionID: sid, role: "assistant" })
+        );
+        db.prepare("INSERT INTO part (id, message_id, session_id, data) VALUES (?, ?, ?, ?)").run(
+          "p1",
+          "m1",
+          sid,
+          JSON.stringify({ id: "p1", messageID: "m1", sessionID: sid, type: "reasoning", text: "Thinking about OpenCode parts" })
+        );
+        db.prepare("INSERT INTO part (id, message_id, session_id, data) VALUES (?, ?, ?, ?)").run(
+          "p2",
+          "m1",
+          sid,
+          JSON.stringify({
+            id: "p2",
+            messageID: "m1",
+            sessionID: sid,
+            type: "tool",
+            tool: "bash",
+            callID: "call_oc_1",
+            state: { status: "completed", input: { command: "ls" }, output: "README.md" },
+          })
+        );
+        db.prepare("INSERT INTO part (id, message_id, session_id, data) VALUES (?, ?, ?, ?)").run(
+          "p3",
+          "m1",
+          sid,
+          JSON.stringify({ id: "p3", messageID: "m1", sessionID: sid, type: "text", text: "Found README.md" })
+        );
+      } finally {
+        db.close();
+      }
+
+      const res = readHarnessTranscript("opencode", sid, { homeDir: home });
+      assert.equal(res.found, true);
+      assert.equal(res.messages.length, 1);
+      assert.equal(res.messages[0]?.thinking, "Thinking about OpenCode parts");
+      assert.equal(res.messages[0]?.toolUse?.[0]?.name, "bash");
+      assert.equal(res.messages[0]?.toolResult?.[0]?.output, "README.md");
+      assert.equal(res.messages[0]?.text, "Found README.md");
+    });
+
+    test("Codex separates reasoning, custom_tool_call, and function_call_output", () => {
+      const home = makeHome();
+      const tid = "codex-4way-99";
+      const file = path.join(home, ".codex", "sessions", `rollout-2026-11-03T12-00-00-${tid}.jsonl`);
+      writeJsonl(file, [
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "reasoning",
+            summary: [{ type: "summary_text", text: "Analyzing patch requirements" }],
+          },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call",
+            call_id: "ct_1",
+            name: "apply_patch",
+            input: "*** Begin Patch",
+          },
+        }),
+        JSON.stringify({
+          type: "response_item",
+          payload: {
+            type: "custom_tool_call_output",
+            call_id: "ct_1",
+            output: "Success. Updated 1 file.",
+          },
+        }),
+      ]);
+
+      const res = readHarnessTranscript("codex", tid, { homeDir: home });
+      assert.equal(res.found, true);
+      assert.equal(res.messages.length, 3);
+      assert.equal(res.messages[0]?.category, "thinking");
+      assert.equal(res.messages[0]?.thinking, "Analyzing patch requirements");
+      assert.equal(res.messages[1]?.category, "tool_use");
+      assert.equal(res.messages[1]?.toolUse?.[0]?.name, "apply_patch");
+      assert.equal(res.messages[2]?.category, "tool_result");
+      assert.equal(res.messages[2]?.toolResult?.[0]?.output, "Success. Updated 1 file.");
     });
   });
 });

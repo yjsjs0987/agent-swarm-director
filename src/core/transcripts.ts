@@ -30,14 +30,46 @@ import * as path from "node:path";
 import { redactSecrets } from "./redact.ts";
 import type { HarnessId } from "./types.ts";
 
+/** Structured tool invocation extracted from a harness transcript turn. */
+export interface TranscriptToolUseItem {
+  id?: string;
+  name: string;
+  input?: string;
+}
+
+/** Structured tool execution result extracted from a harness transcript turn. */
+export interface TranscriptToolResultItem {
+  toolUseId?: string;
+  name?: string;
+  output: string;
+  isError?: boolean;
+}
+
+/** High-level message classification category for GUI rendering. */
+export type TranscriptMessageCategory =
+  | "user"
+  | "assistant"
+  | "thinking"
+  | "tool_use"
+  | "tool_result"
+  | "system";
+
 /** One normalized transcript message. `index` is the stable pagination cursor. */
 export interface TranscriptMessage {
   /** 0-based position in the source transcript (JSONL line number or source order). */
   index: number;
-  /** "user" | "assistant" | "system" | ... (lowercased source role). */
+  /** "user" | "assistant" | "tool" | "system" | ... (lowercased source role). */
   role: string;
+  /** Primary classification category ("user" | "assistant" | "thinking" | "tool_use" | "tool_result" | "system"). */
+  category?: TranscriptMessageCategory;
   /** Concatenated text content, already run through redactSecrets. */
   text: string;
+  /** Extracted reasoning / thinking text (redacted), when present on this turn/step. */
+  thinking?: string;
+  /** Extracted tool invocations on this turn/step (redacted). */
+  toolUse?: TranscriptToolUseItem[];
+  /** Extracted tool execution results on this turn/step (redacted). */
+  toolResult?: TranscriptToolResultItem[];
   /** ISO timestamp when the source provides one. */
   timestamp?: string;
 }
@@ -147,72 +179,359 @@ function epochToIso(v: unknown): string | undefined {
 
 function normalizeRole(role: string): string {
   const r = role.trim().toLowerCase();
-  if (r === "user_message") return "user";
-  if (r === "agent_message") return "assistant";
+  if (r === "user_message" || r === "user_input" || r === "human") return "user";
+  if (r === "agent_message" || r === "planner_response" || r === "model") return "assistant";
+  if (r === "tool_response" || r === "function_call_output" || r === "custom_tool_call_output") return "tool";
   return r || "unknown";
 }
 
+function cleanAntigravityUserText(raw: string): string {
+  const match = /<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/i.exec(raw);
+  const base = match ? match[1]! : raw;
+  return base
+    .replace(/<CONTEXT_SUMMARY>[\s\S]*?<\/CONTEXT_SUMMARY>/gi, "")
+    .replace(/<ADDITIONAL_METADATA>[\s\S]*$/i, "")
+    .replace(/<\/?USER_REQUEST>/gi, "")
+    .trim();
+}
+
+function serializeToolInput(val: unknown): string | undefined {
+  if (val === undefined || val === null) return undefined;
+  if (typeof val === "string") return redactSecrets(val);
+  try {
+    return redactSecrets(JSON.stringify(val));
+  } catch {
+    return redactSecrets(String(val));
+  }
+}
+
+interface ExtractedMessageFields {
+  role: string;
+  category: TranscriptMessageCategory;
+  text: string;
+  thinking?: string;
+  toolUse?: TranscriptToolUseItem[];
+  toolResult?: TranscriptToolResultItem[];
+  timestamp?: string;
+}
+
+function deriveCategory(
+  role: string,
+  text: string,
+  thinking: string | undefined,
+  toolUse: TranscriptToolUseItem[] | undefined,
+  toolResult: TranscriptToolResultItem[] | undefined
+): TranscriptMessageCategory {
+  if (role === "user") {
+    if (!text.trim() && toolResult && toolResult.length > 0) return "tool_result";
+    return "user";
+  }
+  if (role === "tool") return "tool_result";
+  if (role === "system" || role === "developer") return "system";
+  if (text.trim()) return "assistant";
+  if (toolUse && toolUse.length > 0) return "tool_use";
+  if (thinking && thinking.trim()) return "thinking";
+  if (toolResult && toolResult.length > 0) return "tool_result";
+  return "assistant";
+}
+
 /**
- * Extract { role, text, timestamp } from one parsed JSONL line, tolerating
- * claude-code, codex, antigravity and generic shapes. Returns null when the
- * line carries no readable message text (meta events, malformed lines, ...).
+ * Extract structured message fields (role, category, text, thinking, toolUse, toolResult, timestamp)
+ * from one parsed JSONL line across Claude Code, Codex, Antigravity, and generic shapes.
  */
-function extractLineMessage(line: Rec): { role: string; text: string; timestamp?: string } | null {
-  // codex rollout: {"type":"response_item","payload":{"type":"message","role":...,"content":[...]}}
-  if (getStr(line, "type") === "response_item") {
-    const payload = getRec(line, "payload");
-    if (payload && getStr(payload, "type") === "message") {
-      const text = contentToText(payload.content);
-      if (text.trim()) {
-        return { role: normalizeRole(getStr(payload, "role") ?? "unknown"), text };
-      }
+function extractLineMessage(line: Rec): ExtractedMessageFields | null {
+  const lineType = getStr(line, "type");
+  const lineTs =
+    getStr(line, "timestamp") ??
+    getStr(line, "created_at") ??
+    getStr(line, "ts") ??
+    epochToIso(line.time);
+
+  // 1. Antigravity native step types: USER_INPUT, PLANNER_RESPONSE, TOOL_RESPONSE
+  if (lineType === "USER_INPUT") {
+    const rawContent = contentToText(line.content) || getStr(line, "text") || "";
+    const cleaned = cleanAntigravityUserText(rawContent);
+    if (!cleaned) return null;
+    return {
+      role: "user",
+      category: "user",
+      text: cleaned,
+      timestamp: lineTs,
+    };
+  }
+
+  if (lineType === "PLANNER_RESPONSE") {
+    const text = (contentToText(line.content) || getStr(line, "text") || "").trim();
+    const thinking = (getStr(line, "thinking") ?? "").trim();
+    const rawToolCalls = Array.isArray(line.tool_calls) ? line.tool_calls : [];
+    const toolUse: TranscriptToolUseItem[] = [];
+    for (const tc of rawToolCalls) {
+      if (!isRec(tc)) continue;
+      const name = getStr(tc, "name") ?? getStr(tc, "tool_name") ?? "";
+      if (!name) continue;
+      const item: TranscriptToolUseItem = { name };
+      const id = getStr(tc, "id") ?? getStr(tc, "call_id");
+      if (id) item.id = id;
+      const input = serializeToolInput(tc.args ?? tc.arguments ?? tc.input);
+      if (input !== undefined) item.input = input;
+      toolUse.push(item);
     }
+    if (!text && !thinking && toolUse.length === 0) return null;
+    const category = deriveCategory(
+      "assistant",
+      text,
+      thinking || undefined,
+      toolUse.length > 0 ? toolUse : undefined,
+      undefined
+    );
+    return {
+      role: "assistant",
+      category,
+      text,
+      thinking: thinking || undefined,
+      toolUse: toolUse.length > 0 ? toolUse : undefined,
+      timestamp: lineTs,
+    };
+  }
+
+  if (lineType === "TOOL_RESPONSE") {
+    const output = (
+      contentToText(line.content) ||
+      getStr(line, "output") ||
+      getStr(line, "result") ||
+      getStr(line, "text") ||
+      ""
+    ).trim();
+    const toolName = getStr(line, "tool_name") ?? getStr(line, "name");
+    const toolUseId = getStr(line, "tool_call_id") ?? getStr(line, "id");
+    if (!output && !toolName) return null;
+    const tr: TranscriptToolResultItem = {
+      output,
+      ...(toolUseId ? { toolUseId } : {}),
+      ...(toolName ? { name: toolName } : {}),
+      ...(line.status === "ERROR" || line.is_error === true ? { isError: true } : {}),
+    };
+    return {
+      role: "tool",
+      category: "tool_result",
+      text: output,
+      toolResult: [tr],
+      timestamp: lineTs,
+    };
+  }
+
+  if (lineType === "SYSTEM_MESSAGE") {
     return null;
   }
 
-  // codex event stream: {"type":"event_msg","payload":{"type":"user_message"|"agent_message","message":"..."}}
-  if (getStr(line, "type") === "event_msg") {
+  // 2. Codex rollout: {"type":"response_item","payload":{...}}
+  if (lineType === "response_item") {
+    const payload = getRec(line, "payload");
+    if (!payload) return null;
+    const payloadType = getStr(payload, "type");
+
+    if (payloadType === "message") {
+      const role = normalizeRole(getStr(payload, "role") ?? "unknown");
+      if (role === "developer" || role === "system") return null;
+      const text = contentToText(payload.content).trim();
+      if (!text) return null;
+      return {
+        role,
+        category: role === "user" ? "user" : "assistant",
+        text,
+        timestamp: lineTs,
+      };
+    }
+
+    if (payloadType === "reasoning") {
+      const summaryParts: string[] = [];
+      if (Array.isArray(payload.summary)) {
+        for (const s of payload.summary) {
+          if (isRec(s) && typeof s.text === "string" && s.text.trim()) {
+            summaryParts.push(s.text.trim());
+          }
+        }
+      }
+      const fallbackThinking = contentToText(payload.content) || getStr(payload, "text") || "";
+      const thinking = (summaryParts.join("\n") || fallbackThinking).trim();
+      if (!thinking) return null;
+      return {
+        role: "assistant",
+        category: "thinking",
+        text: "",
+        thinking,
+        timestamp: lineTs,
+      };
+    }
+
+    if (payloadType === "function_call" || payloadType === "custom_tool_call") {
+      const name = getStr(payload, "name") ?? "tool";
+      const id = getStr(payload, "call_id") ?? getStr(payload, "id");
+      const input = serializeToolInput(payload.arguments ?? payload.input);
+      const item: TranscriptToolUseItem = {
+        name,
+        ...(id ? { id } : {}),
+        ...(input !== undefined ? { input } : {}),
+      };
+      return {
+        role: "assistant",
+        category: "tool_use",
+        text: "",
+        toolUse: [item],
+        timestamp: lineTs,
+      };
+    }
+
+    if (payloadType === "function_call_output" || payloadType === "custom_tool_call_output") {
+      const toolUseId = getStr(payload, "call_id") ?? getStr(payload, "id");
+      const output = (
+        contentToText(payload.output) ||
+        getStr(payload, "output") ||
+        ""
+      ).trim();
+      const item: TranscriptToolResultItem = {
+        output,
+        ...(toolUseId ? { toolUseId } : {}),
+      };
+      return {
+        role: "tool",
+        category: "tool_result",
+        text: output,
+        toolResult: [item],
+        timestamp: lineTs,
+      };
+    }
+
+    return null;
+  }
+
+  // 3. Codex event stream: {"type":"event_msg","payload":{"type":"user_message"|"agent_message"|"agent_reasoning",...}}
+  if (lineType === "event_msg") {
     const payload = getRec(line, "payload");
     const kind = payload ? getStr(payload, "type") : undefined;
     if (kind === "user_message" || kind === "agent_message") {
-      const text = getStr(payload, "message") ?? "";
-      if (text.trim()) {
-        return { role: normalizeRole(kind), text, timestamp: getStr(line, "timestamp") };
+      const text = (getStr(payload!, "message") ?? "").trim();
+      if (text) {
+        const role = normalizeRole(kind);
+        return {
+          role,
+          category: role === "user" ? "user" : "assistant",
+          text,
+          timestamp: lineTs,
+        };
+      }
+    }
+    if (kind === "agent_reasoning") {
+      const thinking = (getStr(payload!, "text") ?? getStr(payload!, "message") ?? "").trim();
+      if (thinking) {
+        return {
+          role: "assistant",
+          category: "thinking",
+          text: "",
+          thinking,
+          timestamp: lineTs,
+        };
       }
     }
     return null;
   }
 
-  // claude-code: {"type":"user","message":{"role":"user","content":"..."},"timestamp":"..."}
+  // 4. Claude Code: {"type":"user"|"assistant","message":{"role":...,"content":[...]},"timestamp":"..."}
   const message = getRec(line, "message");
   if (message) {
-    const text = contentToText(message.content);
-    if (text.trim()) {
-      return {
-        role: normalizeRole(getStr(message, "role") ?? getStr(line, "type") ?? "unknown"),
-        text,
-        timestamp: getStr(line, "timestamp") ?? getStr(message, "timestamp"),
-      };
+    const rawRole = normalizeRole(getStr(message, "role") ?? lineType ?? "unknown");
+    const ts = lineTs ?? getStr(message, "timestamp");
+    const textParts: string[] = [];
+    const thinkingParts: string[] = [];
+    const toolUse: TranscriptToolUseItem[] = [];
+    const toolResult: TranscriptToolResultItem[] = [];
+
+    if (typeof message.content === "string") {
+      if (message.content.trim()) textParts.push(message.content);
+    } else if (Array.isArray(message.content)) {
+      for (const block of message.content) {
+        if (typeof block === "string") {
+          if (block.trim()) textParts.push(block);
+          continue;
+        }
+        if (!isRec(block)) continue;
+        const bType = getStr(block, "type");
+        if (bType === "thinking" || bType === "reasoning") {
+          const th = (getStr(block, "thinking") ?? getStr(block, "text") ?? "").trim();
+          if (th) thinkingParts.push(th);
+        } else if (bType === "tool_use") {
+          const name = getStr(block, "name") ?? "tool";
+          const id = getStr(block, "id");
+          const input = serializeToolInput(block.input ?? block.arguments);
+          toolUse.push({
+            name,
+            ...(id ? { id } : {}),
+            ...(input !== undefined ? { input } : {}),
+          });
+        } else if (bType === "tool_result") {
+          const toolUseId = getStr(block, "tool_use_id") ?? getStr(block, "id");
+          const output = (
+            contentToText(block.content) ||
+            getStr(block, "output") ||
+            ""
+          ).trim();
+          toolResult.push({
+            output,
+            ...(toolUseId ? { toolUseId } : {}),
+            ...(block.is_error === true ? { isError: true } : {}),
+          });
+        } else if (typeof block.text === "string" && block.text) {
+          textParts.push(block.text);
+        }
+      }
     }
-    return null;
+
+    const text = textParts.join("\n").trim();
+    const thinking = thinkingParts.join("\n").trim();
+    if (!text && !thinking && toolUse.length === 0 && toolResult.length === 0) {
+      return null;
+    }
+
+    const category = deriveCategory(
+      rawRole,
+      text,
+      thinking || undefined,
+      toolUse.length > 0 ? toolUse : undefined,
+      toolResult.length > 0 ? toolResult : undefined
+    );
+    const effectiveRole = category === "tool_result" && !text ? "tool" : rawRole;
+    return {
+      role: effectiveRole,
+      category,
+      text,
+      thinking: thinking || undefined,
+      toolUse: toolUse.length > 0 ? toolUse : undefined,
+      toolResult: toolResult.length > 0 ? toolResult : undefined,
+      timestamp: ts,
+    };
   }
 
-  // antigravity / generic: {"role":"user","content":"..."} or {"text":"..."}
-  const text = contentToText(line.content) || getStr(line, "text") || "";
-  if (text.trim()) {
+  // 5. Generic / legacy Antigravity shape: {"role":"user","content":"..."} or {"text":"..."}
+  const text = (contentToText(line.content) || getStr(line, "text") || "").trim();
+  const thinking = (getStr(line, "thinking") ?? "").trim();
+  if (text || thinking) {
+    const role = normalizeRole(getStr(line, "role") ?? lineType ?? "unknown");
     return {
-      role: normalizeRole(getStr(line, "role") ?? getStr(line, "type") ?? "unknown"),
+      role,
+      category: deriveCategory(role, text, thinking || undefined, undefined, undefined),
       text,
-      timestamp:
-        getStr(line, "timestamp") ??
-        getStr(line, "ts") ??
-        epochToIso(line.time),
+      thinking: thinking || undefined,
+      timestamp: lineTs,
     };
   }
   return null;
 }
 
-function parseJsonlLine(raw: string): { role: string; text: string; timestamp?: string } | null {
+function parseJsonlLine(
+  raw: string,
+  fullLinesByStepOrIndex?: { byLine: string[]; byStep: Map<number, Rec> },
+  lineIndex?: number
+): ExtractedMessageFields | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   let parsed: unknown;
@@ -222,9 +541,49 @@ function parseJsonlLine(raw: string): { role: string; text: string; timestamp?: 
     return null; // malformed line: skipped gracefully
   }
   if (!isRec(parsed)) return null;
-  const extracted = extractLineMessage(parsed);
+
+  let record = parsed;
+  if (
+    fullLinesByStepOrIndex &&
+    Array.isArray(record.truncated_fields) &&
+    record.truncated_fields.length > 0
+  ) {
+    const stepIdx = typeof record.step_index === "number" ? record.step_index : undefined;
+    let fullRec: Rec | undefined =
+      stepIdx !== undefined ? fullLinesByStepOrIndex.byStep.get(stepIdx) : undefined;
+    if (!fullRec && lineIndex !== undefined && lineIndex < fullLinesByStepOrIndex.byLine.length) {
+      fullRec = parseJsonObject(fullLinesByStepOrIndex.byLine[lineIndex]);
+    }
+    if (fullRec) {
+      record = { ...record, ...fullRec };
+    }
+  }
+
+  const extracted = extractLineMessage(record);
   if (!extracted) return null;
-  return { role: extracted.role, text: redactSecrets(extracted.text), timestamp: extracted.timestamp };
+  return {
+    role: extracted.role,
+    category: extracted.category,
+    text: redactSecrets(extracted.text),
+    ...(extracted.thinking ? { thinking: redactSecrets(extracted.thinking) } : {}),
+    ...(extracted.toolUse
+      ? {
+          toolUse: extracted.toolUse.map((tu) => ({
+            ...tu,
+            ...(tu.input ? { input: redactSecrets(tu.input) } : {}),
+          })),
+        }
+      : {}),
+    ...(extracted.toolResult
+      ? {
+          toolResult: extracted.toolResult.map((tr) => ({
+            ...tr,
+            output: redactSecrets(tr.output),
+          })),
+        }
+      : {}),
+    ...(extracted.timestamp ? { timestamp: extracted.timestamp } : {}),
+  };
 }
 
 // ============================================================================
@@ -258,6 +617,32 @@ function countNewlinesBefore(filePath: string, endOffset: number): number {
 interface JsonlWindow {
   messages: TranscriptMessage[];
   truncated: boolean;
+}
+
+function loadFullTranscriptSibling(
+  filePath: string
+): { byLine: string[]; byStep: Map<number, Rec> } | undefined {
+  try {
+    if (path.basename(filePath) !== "transcript.jsonl") return undefined;
+    const fullPath = path.join(path.dirname(filePath), "transcript_full.jsonl");
+    if (!fs.existsSync(fullPath)) return undefined;
+    const stat = fs.statSync(fullPath);
+    if (!stat.isFile() || stat.size === 0 || stat.size > DEFAULT_MAX_READ_BYTES) {
+      return undefined;
+    }
+    const raw = fs.readFileSync(fullPath, "utf8");
+    const byLine = raw.split("\n");
+    const byStep = new Map<number, Rec>();
+    for (const line of byLine) {
+      const obj = parseJsonObject(line.trim());
+      if (obj && typeof obj.step_index === "number") {
+        byStep.set(obj.step_index, obj);
+      }
+    }
+    return { byLine, byStep };
+  } catch {
+    return undefined;
+  }
 }
 
 // ponytail: before-pagination on >20MB files only sees the last 20MB window;
@@ -305,13 +690,23 @@ function readJsonlWindow(
   }
 
   const lines = raw.split("\n");
+  const hasTruncatedFields = raw.includes('"truncated_fields"');
+  const fullLookup = hasTruncatedFields ? loadFullTranscriptSibling(filePath) : undefined;
   const messages: TranscriptMessage[] = [];
   for (let i = 0; i < lines.length; i++) {
     const index = baseIndex + i;
     if (options.before !== undefined && index >= options.before) continue;
-    const parsed = parseJsonlLine(lines[i] ?? "");
+    const parsed = parseJsonlLine(lines[i] ?? "", fullLookup, index);
     if (!parsed) continue;
-    const msg: TranscriptMessage = { index, role: parsed.role, text: parsed.text };
+    const msg: TranscriptMessage = {
+      index,
+      role: parsed.role,
+      category: parsed.category,
+      text: parsed.text,
+    };
+    if (parsed.thinking) msg.thinking = parsed.thinking;
+    if (parsed.toolUse && parsed.toolUse.length > 0) msg.toolUse = parsed.toolUse;
+    if (parsed.toolResult && parsed.toolResult.length > 0) msg.toolResult = parsed.toolResult;
     if (parsed.timestamp) msg.timestamp = parsed.timestamp;
     messages.push(msg);
   }
@@ -471,7 +866,54 @@ interface OpencodeRawMessage {
   id: string;
   role: string;
   text: string;
+  thinking?: string;
+  toolUse?: TranscriptToolUseItem[];
+  toolResult?: TranscriptToolResultItem[];
   timestamp?: string;
+}
+
+interface OpencodePartAccumulator {
+  texts: string[];
+  thinkings: string[];
+  toolUse: TranscriptToolUseItem[];
+  toolResult: TranscriptToolResultItem[];
+}
+
+function accumulateOpencodePart(acc: OpencodePartAccumulator, data: Rec): void {
+  const partType = (getStr(data, "type") ?? "text").toLowerCase();
+  if (partType === "reasoning" || partType === "thinking") {
+    const th = (getStr(data, "text") ?? getStr(data, "reasoning") ?? "").trim();
+    if (th) acc.thinkings.push(th);
+    return;
+  }
+  if (partType === "tool" || partType === "tool-invocation" || partType === "tool_use") {
+    const name = getStr(data, "tool") ?? getStr(data, "name") ?? "tool";
+    const id = getStr(data, "callID") ?? getStr(data, "call_id") ?? getStr(data, "id");
+    const state = getRec(data, "state") ?? data;
+    const inputVal = state.input ?? data.input ?? data.args;
+    const outputVal = state.output ?? data.output ?? data.result;
+    const inputStr = serializeToolInput(inputVal);
+    acc.toolUse.push({
+      name,
+      ...(id ? { id } : {}),
+      ...(inputStr !== undefined ? { input: inputStr } : {}),
+    });
+    if (outputVal !== undefined && outputVal !== null) {
+      const outStr =
+        typeof outputVal === "string"
+          ? outputVal
+          : contentToText(outputVal) || JSON.stringify(outputVal);
+      acc.toolResult.push({
+        output: outStr,
+        ...(id ? { toolUseId: id } : {}),
+        ...(name ? { name } : {}),
+        ...(state.status === "error" || Boolean(state.error) ? { isError: true } : {}),
+      });
+    }
+    return;
+  }
+  const text = getStr(data, "text");
+  if (text) acc.texts.push(text);
 }
 
 function readOpencodeDbMessages(dbPath: string, sessionId: string): OpencodeRawMessage[] | null {
@@ -489,16 +931,17 @@ function readOpencodeDbMessages(dbPath: string, sessionId: string): OpencodeRawM
       .prepare("SELECT message_id, data FROM part WHERE session_id = ? ORDER BY rowid")
       .all(sessionId) as Array<{ message_id: unknown; data: unknown }>;
 
-    const partsByMessage = new Map<string, string[]>();
+    const partsByMessage = new Map<string, OpencodePartAccumulator>();
     for (const row of partRows) {
       if (typeof row.message_id !== "string") continue;
       const data = parseJsonObject(row.data);
       if (!data) continue;
-      const text = getStr(data, "text");
-      if (!text) continue;
-      const list = partsByMessage.get(row.message_id) ?? [];
-      list.push(text);
-      partsByMessage.set(row.message_id, list);
+      let acc = partsByMessage.get(row.message_id);
+      if (!acc) {
+        acc = { texts: [], thinkings: [], toolUse: [], toolResult: [] };
+        partsByMessage.set(row.message_id, acc);
+      }
+      accumulateOpencodePart(acc, data);
     }
 
     const messages: OpencodeRawMessage[] = [];
@@ -508,10 +951,25 @@ function readOpencodeDbMessages(dbPath: string, sessionId: string): OpencodeRawM
       const role = normalizeRole((data && getStr(data, "role")) || "unknown");
       const timeRec = data ? getRec(data, "time") : undefined;
       const created = timeRec ? timeRec.created : undefined;
-      const parts = partsByMessage.get(row.id);
-      const text = parts && parts.length > 0 ? parts.join("\n") : data ? contentToText(data.content) : "";
-      if (!text.trim()) continue;
-      const msg: OpencodeRawMessage = { id: row.id, role, text: text };
+      const acc = partsByMessage.get(row.id);
+      const text =
+        acc && acc.texts.length > 0
+          ? acc.texts.join("\n")
+          : data
+            ? contentToText(data.content)
+            : "";
+      const thinking = acc && acc.thinkings.length > 0 ? acc.thinkings.join("\n") : undefined;
+      const toolUse = acc && acc.toolUse.length > 0 ? acc.toolUse : undefined;
+      const toolResult = acc && acc.toolResult.length > 0 ? acc.toolResult : undefined;
+      if (!text.trim() && !thinking && !toolUse && !toolResult) continue;
+      const msg: OpencodeRawMessage = {
+        id: row.id,
+        role,
+        text,
+        ...(thinking ? { thinking } : {}),
+        ...(toolUse ? { toolUse } : {}),
+        ...(toolResult ? { toolResult } : {}),
+      };
       const ts = epochToIso(created);
       if (ts) msg.timestamp = ts;
       messages.push(msg);
@@ -570,11 +1028,9 @@ function readOpencodeStorageMessages(storageDir: string, sessionId: string): Ope
 
   // Collect parts once, grouped by messageId (matched by field or path segment).
   const partFiles = walkJsonFiles(path.join(storageDir, "part"));
-  const partsByMessage = new Map<string, Array<{ order: number; text: string }>>();
+  const partsByMessage = new Map<string, Array<{ order: number; record: Rec }>>();
   for (const { file, data } of partFiles) {
     const record = getRec(data, "data") ?? data;
-    const text = getStr(record, "text");
-    if (!text) continue;
     let mid = getStr(record, "messageID") ?? getStr(record, "message_id");
     if (!mid) {
       const segments = file.split(/[\\/]/);
@@ -589,21 +1045,31 @@ function readOpencodeStorageMessages(storageDir: string, sessionId: string): Ope
     const idSuffix = /(\d+)\s*$/.exec(getStr(record, "id") ?? path.basename(file, ".json"));
     const order = idSuffix ? Number.parseInt(idSuffix[1] ?? "0", 10) : Number.MAX_SAFE_INTEGER;
     const list = partsByMessage.get(mid) ?? [];
-    list.push({ order, text });
+    list.push({ order, record });
     partsByMessage.set(mid, list);
   }
 
   const messages: OpencodeRawMessage[] = [];
   for (const entry of found) {
     const parts = (partsByMessage.get(entry.id) ?? []).sort((a, b) => a.order - b.order);
-    const text = parts.length > 0 ? parts.map((p) => p.text).join("\n") : contentToText(entry.data.content);
-    if (!text.trim()) continue;
+    const acc: OpencodePartAccumulator = { texts: [], thinkings: [], toolUse: [], toolResult: [] };
+    for (const p of parts) {
+      accumulateOpencodePart(acc, p.record);
+    }
+    const text = acc.texts.length > 0 ? acc.texts.join("\n") : contentToText(entry.data.content);
+    const thinking = acc.thinkings.length > 0 ? acc.thinkings.join("\n") : undefined;
+    const toolUse = acc.toolUse.length > 0 ? acc.toolUse : undefined;
+    const toolResult = acc.toolResult.length > 0 ? acc.toolResult : undefined;
+    if (!text.trim() && !thinking && !toolUse && !toolResult) continue;
     const timeRec = getRec(entry.data, "time");
     const created = timeRec ? timeRec.created : undefined;
     const msg: OpencodeRawMessage = {
       id: entry.id,
       role: normalizeRole(getStr(entry.data, "role") ?? "unknown"),
       text,
+      ...(thinking ? { thinking } : {}),
+      ...(toolUse ? { toolUse } : {}),
+      ...(toolResult ? { toolResult } : {}),
     };
     const ts = epochToIso(created);
     if (ts) msg.timestamp = ts;
@@ -621,7 +1087,26 @@ function toTranscriptMessages(raw: OpencodeRawMessage[]): TranscriptMessage[] {
   for (let i = 0; i < raw.length; i++) {
     const item = raw[i];
     if (!item) continue;
-    const msg: TranscriptMessage = { index: i, role: item.role, text: redactSecrets(item.text) };
+    const text = redactSecrets(item.text);
+    const thinking = item.thinking ? redactSecrets(item.thinking) : undefined;
+    const toolUse = item.toolUse?.map((tu) => ({
+      ...tu,
+      ...(tu.input ? { input: redactSecrets(tu.input) } : {}),
+    }));
+    const toolResult = item.toolResult?.map((tr) => ({
+      ...tr,
+      output: redactSecrets(tr.output),
+    }));
+    const category = deriveCategory(item.role, text, thinking, toolUse, toolResult);
+    const msg: TranscriptMessage = {
+      index: i,
+      role: item.role,
+      category,
+      text,
+      ...(thinking ? { thinking } : {}),
+      ...(toolUse && toolUse.length > 0 ? { toolUse } : {}),
+      ...(toolResult && toolResult.length > 0 ? { toolResult } : {}),
+    };
     if (item.timestamp) msg.timestamp = item.timestamp;
     out.push(msg);
   }
