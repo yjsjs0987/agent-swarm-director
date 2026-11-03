@@ -51,6 +51,7 @@ export {
 export {
   collectDashboardSnapshot,
   discoverHarnessModels,
+  getModelsDiskCachePath,
   saveSessionMemo,
   saveProjectRoutingConfig,
   runSubagentControlAction,

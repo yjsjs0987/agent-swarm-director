@@ -1745,6 +1745,167 @@ export function promoteCliSessionToAsd(
   }
 }
 
+const projectFsCache = new Map<
+  string,
+  { hash: string; existsOnDisk: boolean; checkedAt: number }
+>();
+const PROJECT_FS_CACHE_TTL_MS = 15_000;
+
+function getCachedProjectFsInfo(
+  projectRoot: string,
+  skipDiskCheck = false
+): { hash: string; existsOnDisk: boolean } {
+  if (skipDiskCheck) {
+    const cached = projectFsCache.get(projectRoot);
+    if (cached) return { hash: cached.hash, existsOnDisk: cached.existsOnDisk };
+    return { hash: computeProjectHash(projectRoot), existsOnDisk: true };
+  }
+  const now = Date.now();
+  const cached = projectFsCache.get(projectRoot);
+  if (cached && now - cached.checkedAt <= PROJECT_FS_CACHE_TTL_MS) {
+    return { hash: cached.hash, existsOnDisk: cached.existsOnDisk };
+  }
+  const existsOnDisk = fs.existsSync(projectRoot);
+  const hash = computeProjectHash(projectRoot);
+  projectFsCache.set(projectRoot, { hash, existsOnDisk, checkedAt: now });
+  return { hash, existsOnDisk };
+}
+
+/**
+ * Discovers all plain CLI/harness sessions executed in `projectRoot` across
+ * Claude Code, Codex, OpenCode, Antigravity, and Cursor, even when `<projectRoot>/.asd`
+ * does not exist yet. Merges local transcript discovery, `cli-recent.json`, and
+ * `core.db` driver bindings, sorted by `updatedAt DESC`.
+ */
+export function discoverProjectCliSessions(
+  projectRoot: string,
+  options?: {
+    homeDir?: string;
+    harnesses?: HarnessId[];
+    limit?: number;
+    persist?: boolean;
+    db?: SqliteDriver;
+  }
+): CliRecentSessionEntry[] {
+  const resolvedRoot = path.resolve(projectRoot);
+  if (!fs.existsSync(resolvedRoot)) return [];
+
+  const homeDir = options?.homeDir ? path.resolve(options.homeDir) : os.homedir();
+  const harnessFilter = options?.harnesses ? new Set(options.harnesses) : null;
+  const maxItems = options?.limit && options.limit > 0 ? options.limit : MAX_RECENT_CLI_SESSIONS;
+
+  const discovered: DiscoveredLocalTranscript[] = [];
+  if (!harnessFilter || harnessFilter.has("antigravity")) {
+    scanAntigravityLocalSessions(resolvedRoot, homeDir, discovered);
+  }
+  if (!harnessFilter || harnessFilter.has("claude-code")) {
+    scanClaudeCodeLocalSessions(resolvedRoot, homeDir, discovered);
+  }
+  if (!harnessFilter || harnessFilter.has("codex")) {
+    scanCodexLocalSessions(resolvedRoot, homeDir, discovered);
+  }
+  if (!harnessFilter || harnessFilter.has("opencode")) {
+    scanOpenCodeLocalSessions(resolvedRoot, homeDir, discovered);
+  }
+
+  const byKey = new Map<string, CliRecentSessionEntry>();
+  for (const existing of readCliRecentSessionsRaw(resolvedRoot)) {
+    if (harnessFilter && !harnessFilter.has(existing.harness)) continue;
+    byKey.set(`${existing.harness}::${existing.harnessSessionId}`, { ...existing });
+  }
+
+  for (const item of discovered) {
+    const key = `${item.harness}::${item.harnessSessionId}`;
+    const prev = byKey.get(key);
+    if (prev) {
+      if (!prev.summary && item.summary) prev.summary = item.summary;
+      if (!prev.model && item.model) prev.model = item.model;
+      if (!prev.transcriptPath && item.transcriptPath) prev.transcriptPath = item.transcriptPath;
+      if (item.updatedAt > prev.updatedAt) prev.updatedAt = item.updatedAt;
+    } else {
+      byKey.set(key, {
+        harnessSessionId: item.harnessSessionId,
+        harness: item.harness,
+        model: item.model ?? null,
+        summary: item.summary,
+        transcriptPath: item.transcriptPath,
+        asdSessionId: null,
+        projectRoot: resolvedRoot,
+        startedAt: item.startedAt,
+        updatedAt: item.updatedAt,
+      });
+    }
+  }
+
+  // Enrich with linked ASD sessions from core.db if available
+  let db = options?.db;
+  let ownsDb = false;
+  try {
+    if (!db) {
+      const paths = resolveAsdPaths(resolvedRoot, homeDir);
+      if (fs.existsSync(paths.dbPath)) {
+        db = openProjectDb(resolvedRoot, homeDir);
+        ownsDb = true;
+      }
+    }
+    if (db) {
+      const sessions = db.listSessions();
+      for (const s of sessions) {
+        if (s.main_harness_session_id && (!harnessFilter || harnessFilter.has(s.main_harness))) {
+          const key = `${s.main_harness}::${s.main_harness_session_id}`;
+          const existing = byKey.get(key);
+          if (existing) {
+            if (!existing.asdSessionId) existing.asdSessionId = s.session_id;
+            if (!existing.model && s.main_model) existing.model = s.main_model;
+            if (!existing.summary && s.memo) existing.summary = s.memo;
+          } else {
+            byKey.set(key, {
+              harnessSessionId: s.main_harness_session_id,
+              harness: s.main_harness,
+              model: s.main_model ?? null,
+              summary: s.memo || `${s.main_harness} session (${s.main_harness_session_id.slice(0, 8)})`,
+              transcriptPath: null,
+              asdSessionId: s.session_id,
+              projectRoot: resolvedRoot,
+              startedAt: s.created_at || Date.now(),
+              updatedAt: s.updated_at || s.created_at || Date.now(),
+            });
+          }
+        }
+      }
+    }
+  } catch {
+    // Ignore DB enrichment errors
+  } finally {
+    if (ownsDb && db) {
+      try {
+        db.close();
+      } catch {}
+    }
+  }
+
+  const merged = [...byKey.values()]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, maxItems);
+
+  const asdDir = path.join(resolvedRoot, ".asd");
+  if ((options?.persist || fs.existsSync(asdDir)) && merged.length > 0 && !harnessFilter) {
+    try {
+      const filePath = getCliRecentSessionsPath(resolvedRoot);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      ensureGitExclude(resolvedRoot, ".asd/");
+      atomicWriteFileSync(
+        filePath,
+        JSON.stringify({ sessions: merged }, null, 2) + "\n"
+      );
+    } catch {
+      // Best-effort cache write
+    }
+  }
+
+  return merged;
+}
+
 /**
  * Discovers all projects that have used ASD by querying the shared state DB
  * (one entry per distinct sessions.project_root) — no directory scanning.
@@ -1752,17 +1913,24 @@ export function promoteCliSessionToAsd(
 export function listKnownProjects(options?: {
   homeDir?: string;
   extraProjectRoots?: string[];
+  skipDiskCheck?: boolean;
+  db?: SqliteDriver;
 }): KnownProjectSummary[] {
   const home = resolveHomeDir(options?.homeDir);
   const stateRoot = path.join(home, ".asd", "state");
   const dbPath = path.join(stateRoot, "core.db");
   const byHash = new Map<string, KnownProjectSummary>();
+  const skipDiskCheck = Boolean(options?.skipDiskCheck);
 
-  if (fs.existsSync(dbPath)) {
+  if (options?.db || fs.existsSync(dbPath)) {
     // Unscoped on purpose: discovery is inherently cross-project.
-    let db: SqliteDriver | undefined;
+    let db = options?.db;
+    let ownsDb = false;
     try {
-      db = new SqliteDriver(dbPath); // unscoped: cross-project discovery
+      if (!db) {
+        db = new SqliteDriver(dbPath); // unscoped: cross-project discovery
+        ownsDb = true;
+      }
       const sessions = db.listSessions();
       const perProject = new Map<string, SessionRow[]>();
       for (const s of sessions) {
@@ -1772,12 +1940,12 @@ export function listKnownProjects(options?: {
       }
       for (const [projectRoot, projectSessions] of perProject) {
         const latest = projectSessions[0]!;
-        const hash = computeProjectHash(projectRoot);
+        const { hash, existsOnDisk } = getCachedProjectFsInfo(projectRoot, skipDiskCheck);
         byHash.set(hash, {
           projectHash: hash,
           projectRoot,
           dbPath,
-          existsOnDisk: fs.existsSync(projectRoot),
+          existsOnDisk,
           sessionCount: projectSessions.length,
           latestSessionId: latest.session_id,
           latestHarness: latest.main_harness,
@@ -1788,21 +1956,24 @@ export function listKnownProjects(options?: {
     } catch {
       // Ignore unreadable DB
     } finally {
-      try {
-        db?.close();
-      } catch {}
+      if (ownsDb && db) {
+        try {
+          db.close();
+        } catch {}
+      }
     }
   }
 
   for (const extraRoot of options?.extraProjectRoots ?? []) {
     if (!extraRoot || !extraRoot.trim()) continue;
-    const paths = resolveAsdPaths(extraRoot, home);
-    if (!byHash.has(paths.projectHash)) {
-      byHash.set(paths.projectHash, {
-        projectHash: paths.projectHash,
-        projectRoot: path.resolve(extraRoot),
-        dbPath: paths.dbPath,
-        existsOnDisk: fs.existsSync(extraRoot),
+    const resolvedExtra = path.resolve(extraRoot);
+    const { hash, existsOnDisk } = getCachedProjectFsInfo(resolvedExtra, skipDiskCheck);
+    if (!byHash.has(hash)) {
+      byHash.set(hash, {
+        projectHash: hash,
+        projectRoot: resolvedExtra,
+        dbPath,
+        existsOnDisk,
         sessionCount: 0,
         latestSessionId: null,
         latestHarness: null,

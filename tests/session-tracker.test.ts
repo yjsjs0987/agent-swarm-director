@@ -7,7 +7,9 @@ import { DatabaseSync } from "node:sqlite";
 import { openProjectDb } from "../src/core/db.ts";
 import {
   buildSessionDemotion,
+  discoverProjectCliSessions,
   linkHarnessSessionToAsdSession,
+  listKnownProjects,
   promoteCliSessionToAsd,
   readCliRecentSessions,
   recordCliRecentSession,
@@ -286,6 +288,53 @@ test("T2.2: promoteCliSessionToAsd promotes a plain CLI session into an ASD sess
     });
     assert.equal(demoted.command, "agy");
     assert.deepEqual(demoted.args, ["--resume", "agy-conv-promo-888", "--model", "gemini-3.1-pro-high"]);
+  } finally {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("T2.3: discoverProjectCliSessions finds CLI sessions even without .asd dir and enriches promoted asdSessionId, while listKnownProjects supports skipDiskCheck", () => {
+  const homeDir = makeTempDir("asd-t23-home-");
+  const projectRoot = makeTempDir("asd-t23-proj-");
+  try {
+    // 1. Create a Claude Code transcript for projectRoot WITHOUT creating <projectRoot>/.asd first
+    const encodedDir = projectRoot.replace(/[:\\/]/g, "-");
+    const claudeDir = path.join(homeDir, ".claude", "projects", encodedDir);
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, "cc-no-asd-500.jsonl"),
+      JSON.stringify({
+        type: "user",
+        cwd: projectRoot,
+        message: { role: "user", content: "Explore project before ASD init" },
+      }) + "\n",
+      "utf8"
+    );
+
+    const beforeAsdInit = discoverProjectCliSessions(projectRoot, { homeDir });
+    assert.equal(beforeAsdInit.length, 1);
+    assert.equal(beforeAsdInit[0]?.harness, "claude-code");
+    assert.equal(beforeAsdInit[0]?.harnessSessionId, "cc-no-asd-500");
+    assert.equal(beforeAsdInit[0]?.asdSessionId, null);
+
+    // 2. Promote that CLI session to ASD and re-run discoverProjectCliSessions
+    const promo = promoteCliSessionToAsd({
+      projectRoot,
+      homeDir,
+      harness: "claude-code",
+      harnessSessionId: "cc-no-asd-500",
+      model: "claude-sonnet-4-6",
+    });
+
+    const afterPromo = discoverProjectCliSessions(projectRoot, { homeDir });
+    assert.equal(afterPromo[0]?.harnessSessionId, "cc-no-asd-500");
+    assert.equal(afterPromo[0]?.asdSessionId, promo.asdSessionId);
+
+    // 3. listKnownProjects with skipDiskCheck returns project summary quickly
+    const projects = listKnownProjects({ homeDir, skipDiskCheck: true });
+    assert.equal(projects.length, 1);
+    assert.equal(projects[0]?.latestSessionId, promo.asdSessionId);
   } finally {
     fs.rmSync(homeDir, { recursive: true, force: true });
     fs.rmSync(projectRoot, { recursive: true, force: true });
