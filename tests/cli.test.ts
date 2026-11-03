@@ -1106,4 +1106,81 @@ describe("ASD CLI (src/cli/index.ts)", () => {
       }
     });
   });
+
+  // ==========================================================================
+  // 11. Session Demotion CLI (`asd resume`)
+  // ==========================================================================
+  describe("11. Session Demotion CLI (`asd resume`)", () => {
+    test("asd resume [--session <id>] [--print] [--json] outputs demotion CLI command and handles errors", () => {
+      const resHome = createTempDir("asd-cli-resume-home-");
+      const resProj = createTempDir("asd-cli-resume-proj-");
+      initGitRepo(resProj);
+
+      try {
+        // 1. No session -> exits 1 with NO_SESSION
+        const emptyRes = runCli(["resume", "--json", "--home", resHome], {
+          cwd: resProj,
+          env: { ASD_HOME_DIR: resHome },
+        });
+        assert.equal(emptyRes.exitCode, 1);
+        const emptyJson = JSON.parse(emptyRes.stdout) as { error: string; message: string };
+        assert.equal(emptyJson.error, "NO_SESSION");
+
+        const db = openProjectDb(resProj, resHome);
+        // 2. Session without harness_session_id -> exits 1 with NO_HARNESS_SESSION
+        db.createOrGetSession({
+          sessionId: "asd-20261103-110000-nosid",
+          projectRoot: resProj,
+          mainHarness: "claude-code",
+          mainModel: "claude-sonnet-4-6",
+          harnessSessionId: null,
+        });
+        // 3. Session with valid driver + harness_session_id
+        db.createOrGetSession({
+          sessionId: "asd-20261103-110001-ok01",
+          projectRoot: resProj,
+          mainHarness: "codex",
+          mainModel: "gpt-5.4",
+          harnessSessionId: "thread-xyz-99",
+        });
+        db.close();
+
+        const noSidRes = runCli(
+          ["resume", "--session", "asd-20261103-110000-nosid", "--json", "--home", resHome],
+          { cwd: resProj, env: { ASD_HOME_DIR: resHome } }
+        );
+        assert.equal(noSidRes.exitCode, 1);
+        const noSidJson = JSON.parse(noSidRes.stdout) as { error: string };
+        assert.equal(noSidJson.error, "NO_HARNESS_SESSION");
+
+        const printRes = runCli(["resume", "--print", "--home", resHome], {
+          cwd: resProj,
+          env: { ASD_HOME_DIR: resHome },
+        });
+        assert.equal(printRes.exitCode, 0, `resume --print stderr: ${printRes.stderr}`);
+        assert.equal(printRes.stdout.trim(), "codex resume thread-xyz-99 -m gpt-5.4");
+
+        const jsonRes = runCli(
+          ["resume", "--session", "asd-20261103-110001-ok01", "--json", "--home", resHome],
+          { cwd: resProj, env: { ASD_HOME_DIR: resHome } }
+        );
+        assert.equal(jsonRes.exitCode, 0, `resume --json stderr: ${jsonRes.stderr}`);
+        const parsed = JSON.parse(jsonRes.stdout) as {
+          sessionId: string;
+          harness: string;
+          harnessSessionId: string;
+          model: string;
+          cliString: string;
+        };
+        assert.equal(parsed.sessionId, "asd-20261103-110001-ok01");
+        assert.equal(parsed.harness, "codex");
+        assert.equal(parsed.harnessSessionId, "thread-xyz-99");
+        assert.equal(parsed.model, "gpt-5.4");
+        assert.equal(parsed.cliString, "codex resume thread-xyz-99 -m gpt-5.4");
+      } finally {
+        removeTempDir(resHome);
+        removeTempDir(resProj);
+      }
+    });
+  });
 });

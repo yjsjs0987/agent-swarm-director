@@ -28,6 +28,7 @@ process.env.NODE_NO_WARNINGS = "1";
  * - Zero external runtime npm dependencies.
  */
 
+import * as child_process from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { finalizeSubagentArtifacts } from "../core/spawner.ts";
@@ -66,6 +67,7 @@ import {
   type HarnessId,
 } from "../core/types.ts";
 import {
+  buildSessionDemotion,
   extractHookProjectRoot,
   extractHookSessionInfo,
   linkHarnessSessionToAsdSession,
@@ -90,6 +92,7 @@ export interface CliArgs {
     noPath?: boolean;
     fromMarkdown?: boolean;
     diff?: boolean;
+    print?: boolean;
   };
   options: {
     home?: string;
@@ -147,6 +150,8 @@ export function parseCliArgs(args: string[]): CliArgs {
       flags.fromMarkdown = true;
     } else if (arg === "--diff") {
       flags.diff = true;
+    } else if (arg === "--print" || arg === "-p") {
+      flags.print = true;
     } else if (arg === "--home" || arg.startsWith("--home=")) {
       options.home = readOptVal(arg, "--home", next);
     } else if (arg === "--harness" || arg.startsWith("--harness=")) {
@@ -624,6 +629,7 @@ Commands:
   sync [--force] [--no-path]             Sync ASD harnesses globally and install 'asd' CLI to PATH
   update                                 Pull latest ASD release from GitHub and sync configs
   status [--json]                        Display current session progress board and warnings
+  resume [--session <id>] [--print]      Demote/resume active ASD session in interactive CLI
   logs [taskId] [--json]                 Inspect latest (or task-specific) subagent prompt & output log
   ui [--port <num>] [--json]             Launch lightweight local web dashboard (default port: 3847)
   doctor [--json]                        Verify environment, tools, and policy health
@@ -814,6 +820,43 @@ export async function main(
         return 0;
       }
 
+      case "resume": {
+        const targetSessionId = options.session || subcommand;
+        try {
+          const demotion = buildSessionDemotion({
+            projectRoot,
+            homeDir,
+            sessionId: targetSessionId,
+          });
+          if (flags.json) {
+            console.log(JSON.stringify(demotion, null, 2));
+            return 0;
+          }
+          if (flags.print || !process.stdin.isTTY || !process.stdout.isTTY) {
+            console.log(demotion.cliString);
+            return 0;
+          }
+          console.log(
+            `Resuming ${demotion.harness} session (${demotion.harnessSessionId}): ${demotion.cliString}`
+          );
+          const child = child_process.spawnSync(demotion.command, demotion.args, {
+            cwd: projectRoot,
+            stdio: "inherit",
+            shell: process.platform === "win32",
+          });
+          return child.status ?? (child.error ? 1 : 0);
+        } catch (err: unknown) {
+          const code = (err as { code?: string })?.code || "RESUME_ERROR";
+          const message = err instanceof Error ? err.message : String(err);
+          if (flags.json) {
+            console.log(JSON.stringify({ error: code, message }, null, 2));
+          } else {
+            console.error(`Error executing 'asd resume': ${message}`);
+          }
+          return 1;
+        }
+      }
+
       case "logs": {
         const res = runAsdLogs({
           taskId: subcommand,
@@ -996,6 +1039,12 @@ export async function main(
         }
         if (!rawPayload && options.payload) {
           rawPayload = options.payload;
+        }
+        if (!rawPayload && parsed.rest.length > 0) {
+          const lastArg = parsed.rest[parsed.rest.length - 1]?.trim();
+          if (lastArg && lastArg.startsWith("{")) {
+            rawPayload = lastArg;
+          }
         }
 
         let payload: Record<string, unknown> = {};

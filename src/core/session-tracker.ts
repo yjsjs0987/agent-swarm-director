@@ -209,6 +209,120 @@ export function buildInteractiveResumeHarnessCommand(
   };
 }
 
+export interface SessionDemotionOptions {
+  projectRoot: string;
+  homeDir?: string;
+  sessionId?: string;
+  db?: SqliteDriver;
+}
+
+export interface SessionDemotionResult {
+  sessionId: string;
+  driverId: string;
+  harness: HarnessId;
+  harnessSessionId: string;
+  model: string | null;
+  command: string;
+  args: string[];
+  cliString: string;
+}
+
+function createDemotionError(code: string, message: string): Error & { code: string } {
+  const err = new Error(`${code}: ${message}`) as Error & { code: string };
+  err.code = code;
+  return err;
+}
+
+/**
+ * Resolves the active driver of an ASD session (or latest project session)
+ * and builds the interactive CLI command to demote/resume that session directly in a terminal.
+ */
+export function buildSessionDemotion(
+  options: SessionDemotionOptions
+): SessionDemotionResult {
+  const projectRoot = path.resolve(options.projectRoot);
+  let db = options.db;
+  let ownsDb = false;
+
+  try {
+    if (!db) {
+      db = openProjectDb(projectRoot, options.homeDir);
+      ownsDb = true;
+    }
+
+    const requestedSessionId = options.sessionId?.trim();
+    const session = requestedSessionId
+      ? db.getSession(requestedSessionId)
+      : db.getLatestSession();
+
+    if (!session) {
+      throw createDemotionError(
+        "NO_SESSION",
+        requestedSessionId
+          ? `Session '${requestedSessionId}' not found in project '${projectRoot}'`
+          : `No ASD session found for project '${projectRoot}'`
+      );
+    }
+
+    const activeDriver = db.getActiveDriver(session.session_id);
+    if (!activeDriver) {
+      throw createDemotionError(
+        "NO_ACTIVE_DRIVER",
+        `Session '${session.session_id}' has no active driver`
+      );
+    }
+
+    const harness = (activeDriver.harness ||
+      session.main_harness ||
+      "claude-code") as HarnessId;
+    const harnessSessionId = (
+      activeDriver.harness_session_id ??
+      (activeDriver.harness === session.main_harness
+        ? session.harness_session_id
+        : null) ??
+      ""
+    ).trim();
+
+    if (!harnessSessionId) {
+      throw createDemotionError(
+        "NO_HARNESS_SESSION",
+        `Active driver '${activeDriver.driver_id}' (${harness}) for session '${session.session_id}' has no bound harness_session_id`
+      );
+    }
+
+    const model =
+      activeDriver.model ??
+      (activeDriver.harness === session.main_harness
+        ? (session.main_model ?? null)
+        : null);
+
+    const built = buildInteractiveResumeHarnessCommand({
+      harness,
+      harnessSessionId,
+      model,
+    });
+
+    return {
+      sessionId: session.session_id,
+      driverId: activeDriver.driver_id,
+      harness,
+      harnessSessionId,
+      model: model ?? null,
+      command: built.command,
+      args: built.args,
+      cliString: built.cliString,
+    };
+  } finally {
+    if (ownsDb && db) {
+      try {
+        db.close();
+      } catch {
+        // Ignore close error
+      }
+    }
+  }
+}
+
 /**
  * Extracts a native harness session ID from headless JSON or JSONL stdout/stderr output.
  */
