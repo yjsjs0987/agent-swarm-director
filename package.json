@@ -22,6 +22,6 @@
     "asd": "./src/cli/index.ts"
   },
   "scripts": {
-    "test": "node --no-warnings --test tests/*.test.ts"
+    "test": "node --no-warnings scripts/run-tests.mjs"
   }
 }

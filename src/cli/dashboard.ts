@@ -887,21 +887,21 @@ export async function runSubagentControlAction(options: {
                 const r1Bundle = JSON.parse(debRow.round1_bundle_json);
                 reconstructedPrompt = buildRound2Prompt(
                   debRow.topic,
-                  debRow.proposal,
+                  debRow.proposal ?? "",
                   r1Bundle,
                   debRow.task_id ?? undefined
                 );
               } catch {
                 reconstructedPrompt = buildRound1Prompt(
                   debRow.topic,
-                  debRow.proposal,
+                  debRow.proposal ?? "",
                   debRow.task_id ?? undefined
                 );
               }
             } else {
               reconstructedPrompt = buildRound1Prompt(
                 debRow.topic,
-                debRow.proposal,
+                debRow.proposal ?? "",
                 debRow.task_id ?? undefined
               );
             }

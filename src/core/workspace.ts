@@ -168,7 +168,7 @@ function normalizeLockKey(projectRoot: string): string {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
-function isPidAlive(pid: number): boolean {
+export function isPidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   if (pid === process.pid) return true;
   try {

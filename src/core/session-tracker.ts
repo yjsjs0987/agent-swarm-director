@@ -35,8 +35,8 @@ import {
   SqliteDriver,
   type SessionRow,
 } from "./db.ts";
-import { attachDriver, detachDriver, type DriverSource } from "./drivers.ts";
-import { atomicWriteFileSync } from "./render.ts";
+import { attachDriver, detachDriver, type DriverRow, type DriverSource } from "./drivers.ts";
+import { atomicWriteFileSync, setForegroundSession } from "./render.ts";
 import type {
   CliRecentSessionEntry,
   HarnessId,
@@ -49,6 +49,57 @@ export {
 } from "./db.ts";
 
 const MAX_RECENT_CLI_SESSIONS = 100;
+
+export interface HeadlessHarnessCommandOptions {
+  harness: HarnessId;
+  prompt: string;
+  model?: string | null;
+  thinkingEffort?: string | null;
+  reasoningEffort?: string | null;
+}
+
+/**
+ * Builds headless one-shot execution commands for each harness without importing `src/adapters/*`.
+ */
+export function buildHeadlessHarnessCommand(
+  options: HeadlessHarnessCommandOptions
+): { command: string; args: string[] } {
+  const textPrompt = options.prompt ?? "";
+  const resolvedModel = options.model ?? null;
+  const resolvedEffort = options.thinkingEffort ?? options.reasoningEffort ?? null;
+
+  switch (options.harness) {
+    case "claude-code": {
+      const args = ["-p", textPrompt, "--output-format", "json"];
+      if (resolvedModel) args.push("--model", resolvedModel);
+      return { command: "claude", args };
+    }
+    case "opencode": {
+      const args = ["run", textPrompt, "--format", "json"];
+      if (resolvedModel) args.push("--model", resolvedModel);
+      return { command: "opencode", args };
+    }
+    case "codex": {
+      const args = ["exec", textPrompt, "--json"];
+      if (resolvedModel) args.push("-m", resolvedModel);
+      if (resolvedEffort) {
+        args.push("-c", `model_reasoning_effort=${resolvedEffort}`);
+      }
+      return { command: "codex", args };
+    }
+    case "antigravity": {
+      const args = ["-p", textPrompt, "--output-format", "json"];
+      if (resolvedModel) args.push("--model", resolvedModel);
+      if (resolvedEffort) args.push("--effort", resolvedEffort);
+      return { command: "agy", args };
+    }
+    case "cursor": {
+      const args = ["-p", textPrompt, "--force", "--output-format", "json"];
+      if (resolvedModel) args.push("--model", resolvedModel);
+      return { command: "agent", args };
+    }
+  }
+}
 
 export interface ResumeHarnessCommandOptions {
   harness: HarnessId;
@@ -273,19 +324,20 @@ export function buildSessionDemotion(
     }
 
     const activeDriver = db.getActiveDriver(session.session_id);
-    if (!activeDriver) {
+    const fallbackHarnessSid = (session.harness_session_id ?? "").trim();
+    if (!activeDriver && !fallbackHarnessSid) {
       throw createDemotionError(
         "NO_ACTIVE_DRIVER",
         `Session '${session.session_id}' has no active driver`
       );
     }
 
-    const harness = (activeDriver.harness ||
+    const harness = (activeDriver?.harness ||
       session.main_harness ||
       "claude-code") as HarnessId;
     const harnessSessionId = (
-      activeDriver.harness_session_id ??
-      (activeDriver.harness === session.main_harness
+      activeDriver?.harness_session_id ??
+      (!activeDriver || activeDriver.harness === session.main_harness
         ? session.harness_session_id
         : null) ??
       ""
@@ -294,13 +346,13 @@ export function buildSessionDemotion(
     if (!harnessSessionId) {
       throw createDemotionError(
         "NO_HARNESS_SESSION",
-        `Active driver '${activeDriver.driver_id}' (${harness}) for session '${session.session_id}' has no bound harness_session_id`
+        `Active driver '${activeDriver?.driver_id ?? "session-fallback"}' (${harness}) for session '${session.session_id}' has no bound harness_session_id`
       );
     }
 
     const model =
-      activeDriver.model ??
-      (activeDriver.harness === session.main_harness
+      activeDriver?.model ??
+      (!activeDriver || activeDriver.harness === session.main_harness
         ? (session.main_model ?? null)
         : null);
 
@@ -312,7 +364,7 @@ export function buildSessionDemotion(
 
     return {
       sessionId: session.session_id,
-      driverId: activeDriver.driver_id,
+      driverId: activeDriver?.driver_id ?? "",
       harness,
       harnessSessionId,
       model: model ?? null,
@@ -1805,14 +1857,20 @@ export interface PromoteCliSessionOptions {
   memo?: string | null;
   transcriptPath?: string | null;
   asdSessionId?: string;
+  sessionId?: string;
   autoApprove?: boolean;
+  makeForeground?: boolean;
   source?: DriverSource;
   db?: SqliteDriver;
 }
 
 export interface PromoteCliSessionResult {
+  sessionId: string;
   asdSessionId: string;
+  created: boolean;
   driverId: string;
+  driver: DriverRow;
+  session: SessionRow;
   harness: HarnessId;
   harnessSessionId: string;
   model: string | null;
@@ -1835,14 +1893,6 @@ export function promoteCliSessionToAsd(
     throw new Error("MISSING_HARNESS_SESSION_ID");
   }
 
-  const asdSessionId =
-    options.asdSessionId && options.asdSessionId.trim()
-      ? options.asdSessionId.trim()
-      : generateAsdSessionId();
-  if (!isValidAsdSessionId(asdSessionId)) {
-    throw new Error("INVALID_SESSION_ID");
-  }
-
   let db = options.db;
   let ownsDb = false;
   try {
@@ -1855,6 +1905,21 @@ export function promoteCliSessionToAsd(
     const matchedRecent = recentList.find(
       (r) => r.harness === options.harness && r.harnessSessionId === harnessSessionId
     );
+
+    const existingMappedSession = db.findSessionByHarnessSessionId(
+      harnessSessionId,
+      options.harness
+    );
+    const explicitId = (options.asdSessionId || options.sessionId || "").trim();
+    const asdSessionId =
+      explicitId ||
+      existingMappedSession?.session_id ||
+      (matchedRecent?.asdSessionId && matchedRecent.asdSessionId.trim()) ||
+      generateAsdSessionId();
+    if (!isValidAsdSessionId(asdSessionId)) {
+      throw new Error("INVALID_SESSION_ID");
+    }
+
     const effectiveModel =
       (options.model && options.model.trim()) ||
       matchedRecent?.model ||
@@ -1865,6 +1930,7 @@ export function promoteCliSessionToAsd(
       matchedRecent?.summary ||
       null;
 
+    const existedBefore = Boolean(db.getSession(asdSessionId));
     db.createOrGetSession({
       sessionId: asdSessionId,
       projectRoot,
@@ -1887,6 +1953,18 @@ export function promoteCliSessionToAsd(
       harnessSessionId,
       source: options.source ?? "cli-asd",
     });
+
+    if (options.makeForeground) {
+      try {
+        setForegroundSession({
+          db,
+          projectRoot,
+          sessionId: asdSessionId,
+        });
+      } catch {
+        // Ignore foreground switch errors
+      }
+    }
 
     const mainJsonPath = path.join(
       projectRoot,
@@ -1927,9 +2005,14 @@ export function promoteCliSessionToAsd(
       { forceCreateDir: true }
     );
 
+    const sessionRow = db.getSession(asdSessionId)!;
     return {
+      sessionId: asdSessionId,
       asdSessionId,
+      created: !existedBefore,
       driverId: driverRow.driver.driver_id,
+      driver: driverRow.driver,
+      session: sessionRow,
       harness: options.harness,
       harnessSessionId,
       model: effectiveModel,

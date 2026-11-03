@@ -14,13 +14,14 @@ import {
 import { resolveAsdPaths } from "./config.ts";
 import { redactSecrets } from "./redact.ts";
 import { atomicWriteFileSync, renderProgressBoard } from "./render.ts";
-import { getAdapter } from "../adapters/registry.ts";
 import {
+  buildHeadlessHarnessCommand,
   buildResumeHarnessCommand,
   isValidAsdSessionId,
   recordCliRecentSession,
 } from "./session-tracker.ts";
 import { type CommandRunner, executeHarnessProcess } from "./spawner.ts";
+import { isPidAlive } from "./workspace.ts";
 import type {
   HarnessId,
   MainSessionDriverMeta,
@@ -246,17 +247,25 @@ export function detachDriver(
   db: SqliteDriver,
   input: {
     projectRoot: string;
-    driverId: string;
+    driverId?: string;
+    sessionId?: string;
     reason: DriverDetachReason;
   }
 ): void {
   const sessionId = db.withImmediateTx(() => {
-    const existing = db.getDriver(input.driverId);
+    const existing = input.driverId
+      ? db.getDriver(input.driverId)
+      : input.sessionId
+        ? db.getActiveDriver(input.sessionId)
+        : undefined;
     if (!existing) {
-      throw new Error(`Driver not found: ${input.driverId}`);
+      if (input.sessionId && !input.driverId) {
+        return input.sessionId;
+      }
+      throw new Error(`Driver not found: ${input.driverId ?? input.sessionId ?? "unknown"}`);
     }
     if (existing.detached_at === null) {
-      db.detachDriverRow(input.driverId, input.reason, Date.now());
+      db.detachDriverRow(existing.driver_id, input.reason, Date.now());
       db.incrementStateVersion(existing.session_id);
     }
     return existing.session_id;
@@ -478,18 +487,6 @@ export interface DriverRunResult {
 }
 
 const activeDriverRuns = new Set<string>();
-
-function isProcessAliveForDriver(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  if (pid === process.pid) return true;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err: unknown) {
-    const code = (err as NodeJS.ErrnoException)?.code;
-    return code === "EPERM";
-  }
-}
 
 function getDefaultModelForHarness(harness: HarnessId): string {
   switch (harness) {
@@ -982,7 +979,7 @@ export async function runDriverTurn(input: {
           parsed.status === "running" &&
           typeof parsed.pid === "number" &&
           parsed.pid > 0 &&
-          isProcessAliveForDriver(parsed.pid)
+          isPidAlive(parsed.pid)
         ) {
           throw new Error("DRIVER_BUSY");
         }
@@ -1029,11 +1026,12 @@ export async function runDriverTurn(input: {
     let command: string;
     let args: string[];
     if (!driver.harness_session_id) {
-      const built = getAdapter(driver.harness).buildHeadlessCommand(
-        effectivePrompt,
-        effectiveModel
-      );
-      command = built.cmd;
+      const built = buildHeadlessHarnessCommand({
+        harness: driver.harness,
+        prompt: effectivePrompt,
+        model: effectiveModel,
+      });
+      command = built.command;
       args = [...built.args];
     } else {
       const built = buildResumeHarnessCommand({

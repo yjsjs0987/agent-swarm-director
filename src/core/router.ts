@@ -647,7 +647,7 @@ export interface RunWithFallbacksResult<T> {
 }
 
 export async function runWithFallbacks<
-  T extends { exitCode: number | null; timedOut?: boolean; metaPath: string },
+  T extends { exitCode: number | null; timedOut?: boolean; metaPath: string; durationMs?: number },
 >(options: RunWithFallbacksOptions<T>): Promise<RunWithFallbacksResult<T>> {
   let route = options.initialRoute;
   let result = await options.attempt(route, options.baseSubSessionId);

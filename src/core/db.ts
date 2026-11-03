@@ -451,7 +451,7 @@ export class SqliteDriver {
             `SELECT s.* FROM sessions s
              JOIN session_drivers d ON d.session_id = s.session_id
              WHERE s.project_root = ? AND d.harness = ? AND d.harness_session_id = ?
-             ORDER BY d.last_seen_at DESC LIMIT 1`
+             ORDER BY d.attached_at DESC LIMIT 1`
           )
           .get(this.scopeProjectRoot, harness, trimmed) as unknown as
           | SessionRow
@@ -470,7 +470,7 @@ export class SqliteDriver {
           `SELECT s.* FROM sessions s
            JOIN session_drivers d ON d.session_id = s.session_id
            WHERE s.project_root = ? AND d.harness_session_id = ?
-           ORDER BY d.last_seen_at DESC LIMIT 1`
+           ORDER BY d.attached_at DESC LIMIT 1`
         )
         .get(this.scopeProjectRoot, trimmed) as unknown as SessionRow | undefined;
     }
@@ -488,7 +488,7 @@ export class SqliteDriver {
           `SELECT s.* FROM sessions s
            JOIN session_drivers d ON d.session_id = s.session_id
            WHERE d.harness = ? AND d.harness_session_id = ?
-           ORDER BY d.last_seen_at DESC LIMIT 1`
+           ORDER BY d.attached_at DESC LIMIT 1`
         )
         .get(harness, trimmed) as unknown as SessionRow | undefined;
     }
@@ -505,7 +505,7 @@ export class SqliteDriver {
         `SELECT s.* FROM sessions s
          JOIN session_drivers d ON d.session_id = s.session_id
          WHERE d.harness_session_id = ?
-         ORDER BY d.last_seen_at DESC LIMIT 1`
+         ORDER BY d.attached_at DESC LIMIT 1`
       )
       .get(trimmed) as unknown as SessionRow | undefined;
   }

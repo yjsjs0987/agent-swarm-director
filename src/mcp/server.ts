@@ -841,8 +841,8 @@ export class AsdMcpServer {
       input.sessionId?.trim() ||
       this.db.getLatestSession()?.session_id ||
       input.sessionId;
-    let session = this.db.getSession(sessionId);
-    if (!session) {
+    let sessionRow = this.db.getSession(sessionId);
+    if (!sessionRow) {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
@@ -856,13 +856,14 @@ export class AsdMcpServer {
         projectRoot: this.projectRoot,
         homeDir: this.homeDir,
         asdSessionId: sessionId,
-        harness: (input.harness || session.main_harness) as HarnessId,
+        harness: (input.harness || sessionRow.main_harness) as HarnessId,
         source: "cli-asd",
         db: this.db,
       });
-      session = this.db.getSession(sessionId) ?? session;
+      sessionRow = this.db.getSession(sessionId) ?? sessionRow;
     }
 
+    const session = sessionRow;
     // Baseline prep: ensure git baseline exists
     prepareBaseline(this.projectRoot, { sessionId, db: this.db });
 
@@ -1414,7 +1415,7 @@ export class AsdMcpServer {
     const allDone = finalSessionTasks.length > 0 && finalSessionTasks.every((t) => t.status === "done");
     if (allDone) {
       this.db.updateSessionPhase(sessionId, "done");
-      session = this.db.getSession(sessionId) ?? session;
+      sessionRow = this.db.getSession(sessionId) ?? sessionRow;
       const sessionDebates = this.db.getSessionDebates(sessionId);
       renderSessionSummaryMd(
         session,
@@ -1764,11 +1765,12 @@ export class AsdMcpServer {
       input.sessionId?.trim() ||
       this.db.getLatestSession()?.session_id ||
       input.sessionId;
-    let session = this.db.getSession(sessionId);
-    if (!session) {
+    let sessionRow = this.db.getSession(sessionId);
+    if (!sessionRow) {
       throw new Error(`Session not found: ${sessionId}`);
     }
 
+    const session: SessionRow = sessionRow;
     const task = this.db.getTask(sessionId, taskId);
     if (!task) {
       throw new Error(`Task not found: ${taskId} in session ${sessionId}`);
@@ -1864,7 +1866,7 @@ export class AsdMcpServer {
 
     if (allDone) {
       this.db.updateSessionPhase(sessionId, "done");
-      session = this.db.getSession(sessionId) ?? session;
+      sessionRow = this.db.getSession(sessionId) ?? sessionRow;
       const sessionDebates = this.db.getSessionDebates(sessionId);
       renderSessionSummaryMd(
         session,
