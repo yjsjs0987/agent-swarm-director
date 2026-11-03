@@ -17,14 +17,16 @@
 - **실시간 스트리밍 턴 실행 (`runDriverTurn` & `parseDriverStreamLine` — `ea92b73`)**:
   - [`src/core/drivers.ts`](./src/core/drivers.ts)의 `runDriverTurn`에 `onEvent?: (event: DriverStreamEvent) => void` 콜백과 `streamJson?: boolean`(기본값 `true`) 옵션을 추가했습니다.
   - Claude Code·Cursor(`--output-format stream-json --verbose`), Codex(`--json`), OpenCode(`--format json`) 실행 중 발생하는 실시간 Thinking 과정, Tool Use 과정, Tool Result, 응답 텍스트를 즉시 스트리밍합니다.
-- **CLI ↔ ASD 세션 양방향 승격(`promoteCliSessionToAsd`) 및 하강(`demoteAsdSession`, `asd resume` — `ea92b73`, `31421ba`)**:
+- **CLI ↔ ASD 세션 양방향 승격(`promoteCliSessionToAsd`), 하강(`unlinkHarnessSessionFromAsdSession`, `asd resume`) 및 세션 삭제(`deleteSession`)**:
   - 일반 CLI 세션을 ASD 세션으로 즉시 승격(멱등성 보장 및 활성 드라이버 자동 부착)하는 `promoteCliSessionToAsd()`를 추가했습니다.
-  - ASD 세션을 일시정지하고 활성 드라이버를 해제한 뒤 원래 하네스의 네이티브 CLI 세션으로 복귀시키는 `demoteAsdSession()` 및 `asd resume` CLI 명령어를 추가했습니다.
+  - ASD 세션에서 활성 드라이버를 해제하고 `cli-recent.json`의 `asdSessionId`를 `null`로 초기화해 일반 CLI 세션으로 복귀시키는 `unlinkHarnessSessionFromAsdSession()`, 대화형 복귀 명령을 생성하는 `buildSessionDemotion()` 및 `asd resume` CLI 명령어를 추가했습니다.
+  - [`src/core/db.ts`](./src/core/db.ts)의 `SqliteDriver`에 네이티브 세션 ID 기반 조회 메서드 `findSessionByHarnessSessionId()`와 하위 테이블 연쇄 삭제 트랜잭션 메서드 `deleteSession()`을 추가했습니다.
 - **프로젝트 경로 내 5대 하네스 CLI 세션 통합 탐색 (`discoverProjectCliSessions` — `c29200b`, `0e26088`)**:
   - 현재 프로젝트에서 실행된 5대 하네스의 로컬 CLI 세션을 모두 찾고 ASD 세션 승격 여부(`isPromotedToAsd`, `asdSessionId`, `asdPhase`)를 결합해 반환하는 `discoverProjectCliSessions()`를 추가했습니다.
-  - `syncLocalHarnessTranscripts()`를 Antigravity뿐만 아니라 **Claude Code**(`~/.claude/projects`), **Codex**(`~/.codex/sessions`), **OpenCode**(`opencode.db`)까지 확장하고, `recordCliRecentSession()`에서 이후 훅 호출 시에도 첫 프롬프트 `summary`와 `transcriptPath`가 덮어씌워지지 않도록 개선했습니다.
-- **모델 탐색 디스크 캐시 및 프로젝트 목록 로딩 최적화 (`fa59456`, `c29200b`)**:
+  - `syncLocalHarnessTranscripts()`를 Antigravity뿐만 아니라 **Claude Code**(`~/.claude/projects`), **Codex**(`~/.codex/sessions`), **OpenCode**(`opencode.db`)까지 확장하고 파일 `mtimeMs` 기반 인메모리 캐시(`transcriptDiscoveryCache`)를 적용했으며, `recordCliRecentSession()`에서 이후 훅 호출 시에도 첫 프롬프트 `summary`와 `transcriptPath`가 덮어씌워지지 않도록 개선했습니다.
+- **모델 탐색 디스크 캐시, 워크트리 상태 캐시 및 프로젝트 목록 로딩 최적화 (`fa59456`, `c29200b`)**:
   - [`src/cli/dashboard.ts`](./src/cli/dashboard.ts)의 `discoverHarnessModels()`를 비동기 병렬 실행(`Promise.all`) + `~/.asd/state/models-cache.json`(10분 TTL) 디스크 캐시 구조로 최적화하여 초기 로딩 지연을 해소했습니다.
+  - `collectDashboardSnapshot()`에 3.5초 TTL 워크트리 상태 캐시(`worktreeStatusCache`) 및 `skipCliSpawn` 옵션을 추가하여 폴링 시 `git status --short` 반복 실행 병목을 제거했습니다.
   - `listKnownProjects()`에 15초 인메모리 FS stat 캐시, `skipDiskCheck`, `db` 재사용 옵션을 추가했습니다.
 - **Codex `notify` 훅 및 Cursor 중첩 `hooks.json` 스키마 지원 (`aad8d91`, `8d68e01`)**:
   - `~/.codex/config.toml`에 Codex `notify` 훅을 자동 등록하고, `~/.cursor/hooks.json`을 Cursor 공식 중첩 스키마(`{"version": 1, "hooks": {...}}`)로 생성하도록 수정했습니다.

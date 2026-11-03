@@ -17,14 +17,16 @@ Complete chronological patch history for **Agent Swarm Director (ASD v2.4.0)**, 
 - **Real-Time Streaming Turn Execution (`runDriverTurn` & `parseDriverStreamLine` — `ea92b73`)**:
   - Added `onEvent?: (event: DriverStreamEvent) => void` and `streamJson?: boolean` (default `true`) to `runDriverTurn` in `src/core/drivers.ts`.
   - Automatically passes `--output-format stream-json --verbose` for Claude Code / Cursor, `--json` for Codex, and `--format json` for OpenCode, emitting real-time `thinking`, `tool_use`, `tool_result`, and `assistant` events while the CLI turn is running.
-- **Bidirectional CLI ↔ ASD Session Promotion & Demotion (`ea92b73`, `31421ba`)**:
+- **Bidirectional CLI ↔ ASD Session Promotion, Demotion & Deletion (`ea92b73`, `31421ba`)**:
   - Added `promoteCliSessionToAsd()` in `src/core/session-tracker.ts` to promote any standalone CLI session into an ASD session in `core.db` (idempotent if already promoted) and optionally attach an active driver lease.
-  - Added `demoteAsdSession()`, `buildSessionDemotion()`, and the `asd resume` CLI command to pause an ASD session, detach active drivers, record the native session in `cli-recent.json`, and return/execute the interactive native CLI resume command.
+  - Added `unlinkHarnessSessionFromAsdSession()`, `buildSessionDemotion()`, and the `asd resume` CLI command to detach active drivers, reset `asdSessionId: null` in `cli-recent.json`, and return/execute the interactive native CLI resume command.
+  - Added `SqliteDriver.findSessionByHarnessSessionId(sid, harness?)` and transactional cascade `SqliteDriver.deleteSession(sessionId)` in `src/core/db.ts`.
 - **Project-Scoped Multi-Harness CLI Session Discovery (`discoverProjectCliSessions` — `c29200b`, `0e26088`)**:
   - Added `discoverProjectCliSessions()` to discover all local CLI sessions executed in a project across all 5 harnesses and cross-reference `core.db` (`isPromotedToAsd`, `asdSessionId`, `asdPhase`).
-  - Expanded `syncLocalHarnessTranscripts()` from Antigravity-only to also scan **Claude Code** (`~/.claude/projects`), **Codex** (`~/.codex/sessions`), and **OpenCode** (`opencode.db`), and preserved first-prompt `summary` and `transcriptPath` across subsequent `PreToolUse`/`Stop` hook updates in `recordCliRecentSession()`.
-- **Fast Model & Project Loading Optimizations (`fa59456`, `c29200b`)**:
+  - Expanded `syncLocalHarnessTranscripts()` from Antigravity-only to also scan **Claude Code** (`~/.claude/projects`), **Codex** (`~/.codex/sessions`), and **OpenCode** (`opencode.db`) with `mtimeMs`-based per-file caching (`transcriptDiscoveryCache`), and preserved first-prompt `summary` and `transcriptPath` across subsequent `PreToolUse`/`Stop` hook updates in `recordCliRecentSession()`.
+- **Fast Model, Worktree Status & Project Loading Optimizations (`fa59456`, `c29200b`)**:
   - Optimized `discoverHarnessModels()` in `src/cli/dashboard.ts` with parallel async probes (`Promise.all`) and a persistent 10-minute disk cache at `~/.asd/state/models-cache.json` (`getModelsDiskCachePath`).
+  - Added `worktreeStatusCache` (3.5s TTL) and `skipCliSpawn` option to `collectDashboardSnapshot()` in `src/cli/dashboard.ts` to eliminate repeated `git status --short` subprocess bottlenecks.
   - Optimized `listKnownProjects()` in `src/core/session-tracker.ts` with a 15-second in-memory FS stat cache, `skipDiskCheck`, and `db` instance reuse.
 - **Codex Notify Hook & Cursor Nested Hook Schema (`aad8d91`, `8d68e01`)**:
   - Added Codex `notify` hook installation in `~/.codex/config.toml` and updated Cursor `~/.cursor/hooks.json` to the official nested `{"version": 1, "hooks": {...}}` schema with full payload extraction tests.

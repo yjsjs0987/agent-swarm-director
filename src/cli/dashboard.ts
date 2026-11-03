@@ -1276,9 +1276,16 @@ export async function runSubagentControlAction(options: {
   };
 }
 
+const worktreeStatusCache = new Map<
+  string,
+  { lines: string[]; expiresAt: number }
+>();
+const WORKTREE_STATUS_CACHE_TTL_MS = 3500;
+
 export async function collectDashboardSnapshot(options?: {
   projectRoot?: string;
   homeDir?: string;
+  skipCliSpawn?: boolean;
 }): Promise<DashboardSnapshot> {
   const projectRoot = path.resolve(options?.projectRoot || process.cwd());
   const homeDir = options?.homeDir;
@@ -1434,12 +1441,21 @@ export async function collectDashboardSnapshot(options?: {
   const availableModels = await discoverHarnessModels({
     projectRoot,
     homeDir,
-    skipCliSpawn: false,
+    skipCliSpawn: options?.skipCliSpawn ?? false,
   });
 
   const worktreeStatuses: Record<string, string[]> = {};
+  const nowMs = Date.now();
   for (const t of allTasks) {
     if (t.worktree_path && fs.existsSync(t.worktree_path)) {
+      const wtKey = path.resolve(t.worktree_path);
+      const cachedWt = worktreeStatusCache.get(wtKey);
+      if (cachedWt && cachedWt.expiresAt > nowMs) {
+        if (cachedWt.lines.length > 0) {
+          worktreeStatuses[`${t.session_id}::${t.task_id}`] = cachedWt.lines;
+        }
+        continue;
+      }
       try {
         const res = child_process.spawnSync("git", ["status", "--short"], {
           cwd: t.worktree_path,
@@ -1447,11 +1463,18 @@ export async function collectDashboardSnapshot(options?: {
           timeout: 1500,
           windowsHide: true,
         });
-        if (res.status === 0 && res.stdout) {
-          worktreeStatuses[`${t.session_id}::${t.task_id}`] = res.stdout
+        if (res.status === 0 && typeof res.stdout === "string") {
+          const lines = res.stdout
             .split(/\r?\n/)
             .map((l) => l.trimEnd())
             .filter((l) => l.length > 0 && !l.includes("node_modules"));
+          worktreeStatusCache.set(wtKey, {
+            lines,
+            expiresAt: nowMs + WORKTREE_STATUS_CACHE_TTL_MS,
+          });
+          if (lines.length > 0) {
+            worktreeStatuses[`${t.session_id}::${t.task_id}`] = lines;
+          }
         }
       } catch {
         // ignore worktree status errors

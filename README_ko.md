@@ -134,6 +134,7 @@ node --no-warnings src/cli/index.ts ui
 
 - 🏛️ **[프로젝트 아키텍처 및 파일·함수 상세 레퍼런스 (`PROJECT_STATUS.md`)](./PROJECT_STATUS.md)** — 프로젝트 전체 디렉토리 구조, 2-Path 및 단일 DB 설계, 모든 소스 파일별·주요 함수별 상세 해설 및 `asd ui` 명세.
 - 🔌 **[외부 SDK 및 단일 DB 전환 통합 레퍼런스 (`EXTERNAL_SDK_REFERENCE.md`)](./EXTERNAL_SDK_REFERENCE.md)** — `asd-gui` 등 외부 프로그램 연동을 위한 Node.js SDK, 단일 DB 전환 가이드, CLI/MCP/HTTP API 전체 명세.
+- 🤖 **[AI 에이전트 작업 지침 프롬프트 (`AI_WORKFLOW_PROMPT.md`)](./AI_WORKFLOW_PROMPT.md)** — 다른 AI 에이전트에게 프로젝트 작업을 맡길 때 바로 복사해서 사용할 수 있는 핵심 규칙 및 절차 프롬프트.
 - 📋 **[패치 노트 (한국어)](./PATCH_NOTES_ko.md)** | **[Patch Notes (English)](./PATCH_NOTES.md)** — 초기 구축부터 v2.4.0까지의 전체 버전별 패치 내역.
 
 ---

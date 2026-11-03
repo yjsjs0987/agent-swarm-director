@@ -14,6 +14,7 @@ import {
   readCliRecentSessions,
   recordCliRecentSession,
   syncLocalHarnessTranscripts,
+  unlinkHarnessSessionFromAsdSession,
 } from "../src/core/session-tracker.ts";
 
 function makeTempDir(prefix = "asd-session-tracker-"): string {
@@ -335,6 +336,35 @@ test("T2.3: discoverProjectCliSessions finds CLI sessions even without .asd dir 
     const projects = listKnownProjects({ homeDir, skipDiskCheck: true });
     assert.equal(projects.length, 1);
     assert.equal(projects[0]?.latestSessionId, promo.asdSessionId);
+
+    // 4. findSessionByHarnessSessionId finds the promoted session in DB
+    const db = openProjectDb(projectRoot, homeDir);
+    try {
+      const found = db.findSessionByHarnessSessionId("cc-no-asd-500", "claude-code");
+      assert.equal(found?.session_id, promo.asdSessionId);
+
+      // 5. unlinkHarnessSessionFromAsdSession detaches active driver & resets asdSessionId: null in cli-recent.json
+      const unlinked = unlinkHarnessSessionFromAsdSession({
+        projectRoot,
+        homeDir,
+        asdSessionId: promo.asdSessionId,
+        db,
+      });
+      assert.equal(unlinked.unlinked, true);
+      assert.equal(unlinked.harnessSessionId, "cc-no-asd-500");
+
+      const afterUnlink = discoverProjectCliSessions(projectRoot, { homeDir, db });
+      assert.equal(afterUnlink[0]?.harnessSessionId, "cc-no-asd-500");
+      assert.equal(afterUnlink[0]?.asdSessionId, null);
+
+      // 6. deleteSession cascade-deletes the session and its drivers
+      const deleted = db.deleteSession(promo.asdSessionId);
+      assert.equal(deleted, true);
+      assert.equal(db.getSession(promo.asdSessionId), undefined);
+      assert.equal(db.listDrivers(promo.asdSessionId).length, 0);
+    } finally {
+      db.close();
+    }
   } finally {
     fs.rmSync(homeDir, { recursive: true, force: true });
     fs.rmSync(projectRoot, { recursive: true, force: true });

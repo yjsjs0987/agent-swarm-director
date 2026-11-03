@@ -423,6 +423,114 @@ export class SqliteDriver {
       .get(sessionId) as unknown as SessionRow | undefined;
   }
 
+  /**
+   * Look up an ASD session by its native harness session ID (`harness_session_id`),
+   * checking both `sessions.harness_session_id` and `session_drivers.harness_session_id`.
+   * Respects `scopeProjectRoot` when set on this `SqliteDriver`.
+   */
+  findSessionByHarnessSessionId(
+    harnessSessionId: string,
+    harness?: HarnessId
+  ): SessionRow | undefined {
+    const trimmed = (harnessSessionId || "").trim();
+    if (!trimmed) return undefined;
+
+    if (this.scopeProjectRoot !== null) {
+      if (harness) {
+        const direct = this.db
+          .prepare(
+            "SELECT * FROM sessions WHERE project_root = ? AND main_harness = ? AND harness_session_id = ? ORDER BY updated_at DESC LIMIT 1"
+          )
+          .get(this.scopeProjectRoot, harness, trimmed) as unknown as
+          | SessionRow
+          | undefined;
+        if (direct) return direct;
+
+        return this.db
+          .prepare(
+            `SELECT s.* FROM sessions s
+             JOIN session_drivers d ON d.session_id = s.session_id
+             WHERE s.project_root = ? AND d.harness = ? AND d.harness_session_id = ?
+             ORDER BY d.last_seen_at DESC LIMIT 1`
+          )
+          .get(this.scopeProjectRoot, harness, trimmed) as unknown as
+          | SessionRow
+          | undefined;
+      }
+
+      const direct = this.db
+        .prepare(
+          "SELECT * FROM sessions WHERE project_root = ? AND harness_session_id = ? ORDER BY updated_at DESC LIMIT 1"
+        )
+        .get(this.scopeProjectRoot, trimmed) as unknown as SessionRow | undefined;
+      if (direct) return direct;
+
+      return this.db
+        .prepare(
+          `SELECT s.* FROM sessions s
+           JOIN session_drivers d ON d.session_id = s.session_id
+           WHERE s.project_root = ? AND d.harness_session_id = ?
+           ORDER BY d.last_seen_at DESC LIMIT 1`
+        )
+        .get(this.scopeProjectRoot, trimmed) as unknown as SessionRow | undefined;
+    }
+
+    if (harness) {
+      const direct = this.db
+        .prepare(
+          "SELECT * FROM sessions WHERE main_harness = ? AND harness_session_id = ? ORDER BY updated_at DESC LIMIT 1"
+        )
+        .get(harness, trimmed) as unknown as SessionRow | undefined;
+      if (direct) return direct;
+
+      return this.db
+        .prepare(
+          `SELECT s.* FROM sessions s
+           JOIN session_drivers d ON d.session_id = s.session_id
+           WHERE d.harness = ? AND d.harness_session_id = ?
+           ORDER BY d.last_seen_at DESC LIMIT 1`
+        )
+        .get(harness, trimmed) as unknown as SessionRow | undefined;
+    }
+
+    const direct = this.db
+      .prepare(
+        "SELECT * FROM sessions WHERE harness_session_id = ? ORDER BY updated_at DESC LIMIT 1"
+      )
+      .get(trimmed) as unknown as SessionRow | undefined;
+    if (direct) return direct;
+
+    return this.db
+      .prepare(
+        `SELECT s.* FROM sessions s
+         JOIN session_drivers d ON d.session_id = s.session_id
+         WHERE d.harness_session_id = ?
+         ORDER BY d.last_seen_at DESC LIMIT 1`
+      )
+      .get(trimmed) as unknown as SessionRow | undefined;
+  }
+
+  /**
+   * Delete an ASD session and cascade-delete all associated `session_drivers`,
+   * `tasks`, and `debates` rows inside an immediate transaction.
+   * Returns `true` if a session row was deleted, or `false` if not found.
+   */
+  deleteSession(sessionId: string): boolean {
+    const trimmed = (sessionId || "").trim();
+    if (!trimmed) return false;
+    return this.withImmediateTx(() => {
+      this.db
+        .prepare("DELETE FROM session_drivers WHERE session_id = ?")
+        .run(trimmed);
+      this.db.prepare("DELETE FROM tasks WHERE session_id = ?").run(trimmed);
+      this.db.prepare("DELETE FROM debates WHERE session_id = ?").run(trimmed);
+      const res = this.db
+        .prepare("DELETE FROM sessions WHERE session_id = ?")
+        .run(trimmed);
+      return Number(res.changes ?? 0) > 0;
+    });
+  }
+
   /** Return the most recently created session for this project, or undefined. */
   getLatestSession(): SessionRow | undefined {
     if (this.scopeProjectRoot !== null) {

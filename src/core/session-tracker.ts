@@ -35,7 +35,7 @@ import {
   SqliteDriver,
   type SessionRow,
 } from "./db.ts";
-import { attachDriver, type DriverSource } from "./drivers.ts";
+import { attachDriver, detachDriver, type DriverSource } from "./drivers.ts";
 import { atomicWriteFileSync } from "./render.ts";
 import type {
   CliRecentSessionEntry,
@@ -791,6 +791,20 @@ function readFileHeadUtf8(filePath: string, maxBytes = 32768): { headText: strin
   }
 }
 
+interface CachedTranscriptDiscoveryEntry {
+  mtimeMs: number;
+  isSubagent?: boolean;
+  normCwd?: string;
+  lowerHead?: string;
+  harnessSessionId?: string;
+  model: string | null;
+  summary: string;
+  startedAt: number;
+  updatedAt: number;
+}
+
+const transcriptDiscoveryCache = new Map<string, CachedTranscriptDiscoveryEntry>();
+
 function scanAntigravityLocalSessions(
   resolvedRoot: string,
   homeDir: string,
@@ -823,20 +837,42 @@ function scanAntigravityLocalSessions(
         "logs",
         "transcript.jsonl"
       );
-      if (!fs.existsSync(transcriptPath)) continue;
-
-      const headInfo = readFileHeadUtf8(transcriptPath, 32768);
-      if (!headInfo) continue;
-      const { headText, stat } = headInfo;
-
-      // Skip subagent conversations (whose step 0 is a SYSTEM_MESSAGE from a parent agent)
-      const firstNewline = headText.indexOf("\n");
-      const firstLine = (firstNewline >= 0 ? headText.slice(0, firstNewline) : headText).trim();
-      if (firstLine.includes('"type":"SYSTEM_MESSAGE"') && firstLine.includes("sender=")) {
+      let stat: fs.Stats;
+      try {
+        stat = fs.statSync(transcriptPath);
+        if (stat.size <= 0) continue;
+      } catch {
         continue;
       }
 
-      const lowerHead = headText.toLowerCase();
+      let cached = transcriptDiscoveryCache.get(transcriptPath);
+      if (!cached || cached.mtimeMs !== stat.mtimeMs) {
+        const headInfo = readFileHeadUtf8(transcriptPath, 32768);
+        if (!headInfo) continue;
+        const { headText } = headInfo;
+        const firstNewline = headText.indexOf("\n");
+        const firstLine = (firstNewline >= 0 ? headText.slice(0, firstNewline) : headText).trim();
+        const isSubagent =
+          firstLine.includes('"type":"SYSTEM_MESSAGE"') && firstLine.includes("sender=");
+        const summary = isSubagent
+          ? ""
+          : extractSummaryFromTranscriptFile(transcriptPath) ||
+            `Antigravity session (${convId.slice(0, 8)})`;
+        cached = {
+          mtimeMs: stat.mtimeMs,
+          isSubagent,
+          lowerHead: isSubagent ? "" : headText.toLowerCase(),
+          harnessSessionId: convId,
+          model: null,
+          summary,
+          startedAt: Math.round(stat.birthtimeMs || stat.mtimeMs),
+          updatedAt: Math.round(stat.mtimeMs),
+        };
+        transcriptDiscoveryCache.set(transcriptPath, cached);
+      }
+
+      if (cached.isSubagent) continue;
+      const lowerHead = cached.lowerHead ?? "";
       if (
         !lowerHead.includes(normSlash) &&
         !lowerHead.includes(normBackslash) &&
@@ -845,15 +881,14 @@ function scanAntigravityLocalSessions(
         continue;
       }
 
-      const summary = extractSummaryFromTranscriptFile(transcriptPath);
       discovered.push({
         harnessSessionId: convId,
         harness: "antigravity",
-        model: null,
-        summary: summary || `Antigravity session (${convId.slice(0, 8)})`,
+        model: cached.model,
+        summary: cached.summary,
         transcriptPath,
-        startedAt: Math.round(stat.birthtimeMs || stat.mtimeMs),
-        updatedAt: Math.round(stat.mtimeMs),
+        startedAt: cached.startedAt,
+        updatedAt: cached.updatedAt,
       });
     }
   }
@@ -922,47 +957,62 @@ function scanClaudeCodeLocalSessions(
     files = files.slice(0, maxFilesPerDir);
 
     for (const fileInfo of files) {
-      const head = readFileHeadUtf8(fileInfo.fullPath, 16384);
-      if (!head) continue;
+      const sessionId = path.basename(fileInfo.name, ".jsonl");
+      let cached = transcriptDiscoveryCache.get(fileInfo.fullPath);
+      if (!cached || cached.mtimeMs !== fileInfo.mtimeMs) {
+        const head = readFileHeadUtf8(fileInfo.fullPath, 16384);
+        if (!head) continue;
 
-      let matchesProject = dirNameMatch;
-      let detectedModel: string | null = null;
-      const lines = head.headText.split(/\r?\n/);
-      for (const rawLine of lines) {
-        const line = rawLine.trim();
-        if (!line.startsWith("{")) continue;
-        try {
-          const obj = JSON.parse(line) as Record<string, unknown>;
-          if (!matchesProject && typeof obj.cwd === "string" && obj.cwd.trim()) {
-            if (normalizePathForCompare(obj.cwd) === targetNorm) {
-              matchesProject = true;
-            } else {
-              // Explicit cwd for another project -> skip immediately
-              break;
+        let detectedCwd = "";
+        let detectedModel: string | null = null;
+        const lines = head.headText.split(/\r?\n/);
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line.startsWith("{")) continue;
+          try {
+            const obj = JSON.parse(line) as Record<string, unknown>;
+            if (!detectedCwd && typeof obj.cwd === "string" && obj.cwd.trim()) {
+              detectedCwd = normalizePathForCompare(obj.cwd);
             }
-          }
-          if (!detectedModel && obj.message && typeof obj.message === "object") {
-            const msgModel = (obj.message as Record<string, unknown>).model;
-            if (typeof msgModel === "string" && msgModel.trim()) {
-              detectedModel = msgModel.trim();
+            if (!detectedModel && obj.message && typeof obj.message === "object") {
+              const msgModel = (obj.message as Record<string, unknown>).model;
+              if (typeof msgModel === "string" && msgModel.trim()) {
+                detectedModel = msgModel.trim();
+              }
             }
+          } catch {
+            // ignore
           }
-        } catch {
-          // ignore
         }
+
+        const summary =
+          extractSummaryFromTranscriptFile(fileInfo.fullPath) ||
+          `Claude session (${sessionId.slice(0, 8)})`;
+        cached = {
+          mtimeMs: fileInfo.mtimeMs,
+          normCwd: detectedCwd,
+          harnessSessionId: sessionId,
+          model: detectedModel,
+          summary,
+          startedAt: Math.round(fileInfo.birthtimeMs),
+          updatedAt: Math.round(fileInfo.mtimeMs),
+        };
+        transcriptDiscoveryCache.set(fileInfo.fullPath, cached);
       }
 
+      const matchesProject = cached.normCwd
+        ? cached.normCwd === targetNorm
+        : dirNameMatch;
       if (!matchesProject) continue;
-      const sessionId = path.basename(fileInfo.name, ".jsonl");
-      const summary = extractSummaryFromTranscriptFile(fileInfo.fullPath);
+
       discovered.push({
         harnessSessionId: sessionId,
         harness: "claude-code",
-        model: detectedModel,
-        summary: summary || `Claude session (${sessionId.slice(0, 8)})`,
+        model: cached.model,
+        summary: cached.summary,
         transcriptPath: fileInfo.fullPath,
-        startedAt: Math.round(fileInfo.birthtimeMs),
-        updatedAt: Math.round(fileInfo.mtimeMs),
+        startedAt: cached.startedAt,
+        updatedAt: cached.updatedAt,
       });
     }
   }
@@ -1016,65 +1066,84 @@ function scanCodexLocalSessions(
   const candidates = rolloutFiles.slice(0, maxFiles);
 
   for (const fileInfo of candidates) {
-    const head = readFileHeadUtf8(fileInfo.fullPath, 32768);
-    if (!head) continue;
+    let cached = transcriptDiscoveryCache.get(fileInfo.fullPath);
+    if (!cached || cached.mtimeMs !== fileInfo.mtimeMs) {
+      const head = readFileHeadUtf8(fileInfo.fullPath, 32768);
+      if (!head) continue;
 
-    let threadId = "";
-    let sessionCwd = "";
-    let detectedModel: string | null = null;
-    const lines = head.headText.split(/\r?\n/);
-    for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line.startsWith("{")) continue;
-      try {
-        const obj = JSON.parse(line) as Record<string, unknown>;
-        const payload =
-          obj.payload && typeof obj.payload === "object"
-            ? (obj.payload as Record<string, unknown>)
-            : undefined;
-        if (obj.type === "session_meta" && payload) {
-          if (typeof payload.id === "string" && payload.id.trim()) {
-            threadId = payload.id.trim();
+      let threadId = "";
+      let sessionCwd = "";
+      let detectedModel: string | null = null;
+      const lines = head.headText.split(/\r?\n/);
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line.startsWith("{")) continue;
+        try {
+          const obj = JSON.parse(line) as Record<string, unknown>;
+          const payload =
+            obj.payload && typeof obj.payload === "object"
+              ? (obj.payload as Record<string, unknown>)
+              : undefined;
+          if (obj.type === "session_meta" && payload) {
+            if (typeof payload.id === "string" && payload.id.trim()) {
+              threadId = payload.id.trim();
+            }
+            if (typeof payload.cwd === "string" && payload.cwd.trim()) {
+              sessionCwd = payload.cwd.trim();
+            }
+            if (typeof payload.model === "string" && payload.model.trim()) {
+              detectedModel = payload.model.trim();
+            }
+          } else if (obj.type === "turn_context" && payload) {
+            if (!sessionCwd && typeof payload.cwd === "string" && payload.cwd.trim()) {
+              sessionCwd = payload.cwd.trim();
+            }
+            if (!detectedModel && typeof payload.model === "string" && payload.model.trim()) {
+              detectedModel = payload.model.trim();
+            }
           }
-          if (typeof payload.cwd === "string" && payload.cwd.trim()) {
-            sessionCwd = payload.cwd.trim();
-          }
-          if (typeof payload.model === "string" && payload.model.trim()) {
-            detectedModel = payload.model.trim();
-          }
-        } else if (obj.type === "turn_context" && payload) {
-          if (!sessionCwd && typeof payload.cwd === "string" && payload.cwd.trim()) {
-            sessionCwd = payload.cwd.trim();
-          }
-          if (!detectedModel && typeof payload.model === "string" && payload.model.trim()) {
-            detectedModel = payload.model.trim();
-          }
+          if (threadId && sessionCwd) break;
+        } catch {
+          // ignore
         }
-        if (threadId && sessionCwd) break;
-      } catch {
-        // ignore
       }
+
+      if (!threadId) {
+        const base = path.basename(fileInfo.fullPath, ".jsonl");
+        const m = base.match(/rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)$/);
+        threadId = m?.[1] || base;
+      }
+
+      const normCwd = sessionCwd ? normalizePathForCompare(sessionCwd) : "";
+      const summary = normCwd
+        ? extractSummaryFromTranscriptFile(fileInfo.fullPath) ||
+          `Codex session (${threadId.slice(0, 8)})`
+        : "";
+
+      cached = {
+        mtimeMs: fileInfo.mtimeMs,
+        normCwd,
+        harnessSessionId: threadId,
+        model: detectedModel,
+        summary,
+        startedAt: Math.round(fileInfo.birthtimeMs),
+        updatedAt: Math.round(fileInfo.mtimeMs),
+      };
+      transcriptDiscoveryCache.set(fileInfo.fullPath, cached);
     }
 
-    if (!sessionCwd || normalizePathForCompare(sessionCwd) !== targetNorm) {
+    if (!cached.normCwd || cached.normCwd !== targetNorm) {
       continue;
     }
 
-    if (!threadId) {
-      const base = path.basename(fileInfo.fullPath, ".jsonl");
-      const m = base.match(/rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)$/);
-      threadId = m?.[1] || base;
-    }
-
-    const summary = extractSummaryFromTranscriptFile(fileInfo.fullPath);
     discovered.push({
-      harnessSessionId: threadId,
+      harnessSessionId: cached.harnessSessionId || path.basename(fileInfo.fullPath, ".jsonl"),
       harness: "codex",
-      model: detectedModel,
-      summary: summary || `Codex session (${threadId.slice(0, 8)})`,
+      model: cached.model,
+      summary: cached.summary,
       transcriptPath: fileInfo.fullPath,
-      startedAt: Math.round(fileInfo.birthtimeMs),
-      updatedAt: Math.round(fileInfo.mtimeMs),
+      startedAt: cached.startedAt,
+      updatedAt: cached.updatedAt,
     });
   }
 }
@@ -1593,6 +1662,136 @@ export function linkHarnessSessionToAsdSession(options: {
   return {
     harnessSessionId: effectiveHarnessSessionId,
     mainModel: effectiveModel,
+  };
+}
+
+/**
+ * Unlinks a harness CLI session from its ASD session (the inverse of `promoteCliSessionToAsd` /
+ * `linkHarnessSessionToAsdSession`):
+ * 1. Detaches any active driver on the ASD session (and clears `sessions.harness_session_id`
+ *    or deletes the ASD session when `deleteAsdSession: true`).
+ * 2. Resets `asdSessionId: null` for the matching CLI session entry in `cli-recent.json`
+ *    so the session returns to a plain CLI session state.
+ */
+export function unlinkHarnessSessionFromAsdSession(options: {
+  projectRoot: string;
+  homeDir?: string;
+  asdSessionId?: string;
+  harnessSessionId?: string;
+  harness?: HarnessId;
+  deleteAsdSession?: boolean;
+  db?: SqliteDriver;
+}): {
+  unlinked: boolean;
+  asdSessionId: string | null;
+  harnessSessionId: string | null;
+} {
+  const projectRoot = path.resolve(options.projectRoot);
+  let targetAsdSessionId = options.asdSessionId?.trim() || null;
+  let targetHarnessSessionId = options.harnessSessionId?.trim() || null;
+  let unlinked = false;
+
+  let db = options.db;
+  let ownsDb = false;
+  try {
+    if (!db) {
+      const paths = resolveAsdPaths(projectRoot, options.homeDir);
+      if (fs.existsSync(paths.dbPath)) {
+        db = openProjectDb(projectRoot, options.homeDir);
+        ownsDb = true;
+      }
+    }
+
+    if (db) {
+      if (!targetAsdSessionId && targetHarnessSessionId) {
+        const found = db.findSessionByHarnessSessionId(
+          targetHarnessSessionId,
+          options.harness
+        );
+        if (found) {
+          targetAsdSessionId = found.session_id;
+        }
+      }
+
+      if (targetAsdSessionId) {
+        const sess = db.getSession(targetAsdSessionId);
+        if (sess) {
+          if (!targetHarnessSessionId && sess.harness_session_id) {
+            targetHarnessSessionId = sess.harness_session_id;
+          }
+          const activeDrv = db.getActiveDriver(targetAsdSessionId);
+          if (!targetHarnessSessionId && activeDrv?.harness_session_id) {
+            targetHarnessSessionId = activeDrv.harness_session_id;
+          }
+
+          if (options.deleteAsdSession) {
+            db.deleteSession(targetAsdSessionId);
+          } else {
+            detachDriver(db, {
+              projectRoot,
+              sessionId: targetAsdSessionId,
+              reason: "manual",
+            });
+            db.updateSessionHarnessInfo(targetAsdSessionId, {
+              harnessSessionId: null,
+            });
+          }
+          unlinked = true;
+        }
+      }
+    }
+  } catch {
+    // Ignore DB errors
+  } finally {
+    if (ownsDb && db) {
+      try {
+        db.close();
+      } catch {}
+    }
+  }
+
+  // Clear asdSessionId in <projectRoot>/.asd/sessions/cli-recent.json
+  try {
+    const filePath = getCliRecentSessionsPath(projectRoot);
+    if (fs.existsSync(filePath)) {
+      const recentList = readCliRecentSessionsRaw(projectRoot);
+      let fileChanged = false;
+      for (const entry of recentList) {
+        const matchesAsd =
+          targetAsdSessionId && entry.asdSessionId === targetAsdSessionId;
+        const matchesHarness =
+          targetHarnessSessionId &&
+          entry.harnessSessionId === targetHarnessSessionId &&
+          (!options.harness || entry.harness === options.harness);
+        if (matchesAsd || matchesHarness) {
+          if (!targetHarnessSessionId) {
+            targetHarnessSessionId = entry.harnessSessionId;
+          }
+          if (!targetAsdSessionId && entry.asdSessionId) {
+            targetAsdSessionId = entry.asdSessionId;
+          }
+          if (entry.asdSessionId !== null) {
+            entry.asdSessionId = null;
+            fileChanged = true;
+          }
+          unlinked = true;
+        }
+      }
+      if (fileChanged) {
+        atomicWriteFileSync(
+          filePath,
+          JSON.stringify({ sessions: recentList }, null, 2) + "\n"
+        );
+      }
+    }
+  } catch {
+    // Ignore cli-recent update errors
+  }
+
+  return {
+    unlinked,
+    asdSessionId: targetAsdSessionId,
+    harnessSessionId: targetHarnessSessionId,
   };
 }
 

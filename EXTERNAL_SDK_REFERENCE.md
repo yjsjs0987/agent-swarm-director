@@ -5,7 +5,7 @@
 > **런타임 의존성**: `0개` (`dependencies: {}`, 순수 Node.js `>=22.13.0` 내장 모듈만 사용)  
 > **메인 엔트리포인트**: [`src/index.ts`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/index.ts) (`import { ... } from "agent-swarm-director"`)
 
-[📖 README (한국어)](./README_ko.md) | [📖 README (EN)](./README.md) | [🏛️ 프로젝트 아키텍처 및 파일·함수 상세](./PROJECT_STATUS.md) | [📋 패치 노트 (KR)](./PATCH_NOTES_ko.md)
+[📖 README (한국어)](./README_ko.md) | [📖 README (EN)](./README.md) | [🏛️ 프로젝트 아키텍처 및 파일·함수 상세](./PROJECT_STATUS.md) | [🤖 AI 작업 지침 프롬프트](./AI_WORKFLOW_PROMPT.md) | [📋 패치 노트 (KR)](./PATCH_NOTES_ko.md)
 
 ---
 
@@ -200,24 +200,27 @@ const promoted: PromoteCliSessionResult = promoteCliSessionToAsd({
 // promoted.driver         -> 부착된 DriverRow | null
 ```
 
-#### ② ASD 세션을 다시 하네스의 네이티브 CLI 세션으로 하강 (Demote)
+#### ② ASD 세션을 다시 하네스의 네이티브 CLI 세션으로 하강 및 연결 해제 (`buildSessionDemotion`, `unlinkHarnessSessionFromAsdSession`)
 ```ts
 import {
-  demoteAsdSession,
-  type DemoteAsdSessionResult,
+  buildSessionDemotion,
+  unlinkHarnessSessionFromAsdSession,
+  type SessionDemotionResult,
 } from "agent-swarm-director";
 
-const demoted: DemoteAsdSessionResult = demoteAsdSession(
-  "/path/to/project",
-  "asd-20261103-182153-i9ti",
-  { pauseSession: true },
-);
-// demoted.ok               -> true
-// demoted.harness          -> "claude-code"
-// demoted.harnessSessionId -> "eb7de063-fd75-4fa7-8312-9efcf3fd77e5"
-// demoted.commandString    -> 'claude --resume "eb7de063-fd75-4fa7-8312-9efcf3fd77e5"'
-// demoted.command          -> "claude"
-// demoted.args             -> ["--resume", "eb7de063-fd75-4fa7-8312-9efcf3fd77e5"]
+// 1. 터미널 대화형 Resume 명령어 생성 (asd resume 과 동일)
+const demoted: SessionDemotionResult = buildSessionDemotion({
+  projectRoot: "/path/to/project",
+  sessionId: "asd-20261103-182153-i9ti",
+});
+// demoted.cliString -> 'claude --resume "eb7de063-fd75-4fa7-8312-9efcf3fd77e5"'
+
+// 2. ASD 세션에서 드라이버 연결을 끊고 cli-recent.json 의 asdSessionId 를 null 로 초기화하여 일반 CLI 세션으로 복원
+const unlinked = unlinkHarnessSessionFromAsdSession({
+  projectRoot: "/path/to/project",
+  asdSessionId: "asd-20261103-182153-i9ti",
+  deleteAsdSession: false, // true 전달 시 core.db 에서 해당 ASD 세션과 하위 태스크/드라이버를 연쇄 삭제
+});
 ```
 
 ---
@@ -259,8 +262,8 @@ import * as dashboard from "agent-swarm-director/cli/dashboard";
 | :--- | :--- |
 | **`core/types`** | `ASD_VERSION` (`"2.4.0"`), `HARNESS_IDS`, `AGENT_ROLES`, `TASK_CATEGORIES`, `DIFFICULTY_TIERS`, `TASK_TRACKS`, `TASK_STATUSES`, `SESSION_PHASES`, `DRIVER_SOURCES` 및 전체 타입 |
 | **`core/config`** | `resolveAsdPaths(root, home?)`, `resolveHomeDir(explicit?)`, `ensureProjectInitialized`, `loadRoutingConfig`, `loadMcpCatalog`, `checkForRemoteUpdate`, `computeProjectHash` |
-| **`core/db`** | `openProjectDb(root, home?)`, `SqliteDriver(dbPath, projectRoot?)`, `generateAsdSessionId`, `isValidAsdSessionId` — `sessions` / `tasks` / `debates` / `session_drivers` 전체 CRUD |
-| **`core/session-tracker`** | `discoverProjectCliSessions` *(v2.4.0)*, `promoteCliSessionToAsd` *(v2.4.0)*, `demoteAsdSession`, `buildSessionDemotion`, `listKnownProjects` *(v2.4.0 캐시 최적화)*, `syncLocalHarnessTranscripts` *(v2.4.0 4하네스 확장)*, `linkHarnessSessionToAsdSession`, `readCliRecentSessions`, `recordCliRecentSession`, `buildResumeHarnessCommand`, `buildInteractiveResumeHarnessCommand`, `extractHookSessionInfo` |
+| **`core/db`** | `openProjectDb(root, home?)`, `SqliteDriver(dbPath, projectRoot?)`, `generateAsdSessionId`, `isValidAsdSessionId` — `findSessionByHarnessSessionId(sid, harness?)` *(v2.4.0)*, `deleteSession(sessionId)` *(v2.4.0)* 및 `sessions` / `tasks` / `debates` / `session_drivers` 전체 CRUD |
+| **`core/session-tracker`** | `discoverProjectCliSessions` *(v2.4.0)*, `promoteCliSessionToAsd` *(v2.4.0)*, `unlinkHarnessSessionFromAsdSession` *(v2.4.0)*, `buildSessionDemotion`, `listKnownProjects` *(v2.4.0 캐시 최적화)*, `syncLocalHarnessTranscripts` *(v2.4.0 4하네스 확장 + `mtimeMs` 캐시)*, `linkHarnessSessionToAsdSession`, `readCliRecentSessions`, `recordCliRecentSession`, `buildResumeHarnessCommand`, `buildInteractiveResumeHarnessCommand`, `extractHookSessionInfo` |
 | **`core/drivers`** | `runDriverTurn` *(v2.4.0 `onEvent` 스트리밍)*, `parseDriverStreamLine` *(v2.4.0)*, `attachDriver`, `detachDriver`, `getActiveDriver`, `listDrivers`, `buildDriverBriefing`, `syncSessionDriversToMainJson` |
 | **`core/transcripts`** | `readHarnessTranscript` *(v2.4.0 4분류 고도화)*, `locateHarnessTranscript` |
 | **`core/spawner`** | `spawnSubagent`, `executeHarnessProcess`, `killProcessTree`, `resolveSpawnCommand`, `finalizeSubagentArtifacts` |

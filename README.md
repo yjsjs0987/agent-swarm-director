@@ -138,7 +138,8 @@ Once `asd sync` has been run, you can invoke these slash skills directly inside 
 ## Documentation & Reference Guides
 
 - 🏛️ **[Architecture & Per-File/Function Code Reference (`PROJECT_STATUS.md`)](./PROJECT_STATUS.md)** — Detailed architecture overview, 2-path storage & single DB layout, and per-file/per-function documentation across the entire codebase.
-- 🔌 **[External SDK & Single DB Migration Reference (`EXTERNAL_SDK_REFERENCE.md`)](./EXTERNAL_SDK_REFERENCE.md)** — Complete SDK reference for `asd-gui` and external integrations (`discoverProjectCliSessions`, `readHarnessTranscript`, `runDriverTurn`, `promoteCliSessionToAsd`, `demoteAsdSession`, `listKnownProjects`).
+- 🔌 **[External SDK & Single DB Migration Reference (`EXTERNAL_SDK_REFERENCE.md`)](./EXTERNAL_SDK_REFERENCE.md)** — Complete SDK reference for `asd-gui` and external integrations (`discoverProjectCliSessions`, `readHarnessTranscript`, `runDriverTurn`, `promoteCliSessionToAsd`, `unlinkHarnessSessionFromAsdSession`, `buildSessionDemotion`, `listKnownProjects`).
+- 🤖 **[AI Agent Workflow Prompt (`AI_WORKFLOW_PROMPT.md`)](./AI_WORKFLOW_PROMPT.md)** — Copy-and-paste onboarding & rules prompt for delegating tasks to AI coding agents.
 - 📋 **[Patch Notes (English)](./PATCH_NOTES.md)** | **[패치 노트 (한국어)](./PATCH_NOTES_ko.md)** — Chronological changelog from initial foundation to v2.4.0.
 
 ---
