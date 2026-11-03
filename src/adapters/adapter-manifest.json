@@ -1,9 +1,0 @@
-{
-  "harnesses": {
-    "claude-code": { "NativeCapabilities": ["websearch"] },
-    "opencode": { "NativeCapabilities": ["lsp"] },
-    "codex": { "NativeCapabilities": ["websearch"] },
-    "antigravity": { "NativeCapabilities": ["websearch"] },
-    "cursor": { "NativeCapabilities": ["websearch"] }
-  }
-}

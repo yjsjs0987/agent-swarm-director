@@ -421,7 +421,6 @@ function bootstrapGlobalPresets(homeDir: string): { routingPath: string; mcpPath
   const mcpPath = path.join(asdHome, "mcp.jsonc");
 
   const asdRoot = getAsdRoot();
-  syncRepoVersionStrings(asdRoot);
   const presetRouting = path.join(asdRoot, "presets", "default-routing.jsonc");
   const presetMcp = path.join(asdRoot, "presets", "default-mcp.jsonc");
 
@@ -498,34 +497,13 @@ export interface CatalogMcpEntry {
 }
 
 export function loadHarnessNativeCapabilities(): Record<HarnessId, Set<string>> {
-  const fallback: Record<HarnessId, Set<string>> = {
+  return {
     "claude-code": new Set(["websearch"]),
     opencode: new Set(["lsp"]),
     codex: new Set(["websearch"]),
     antigravity: new Set(["websearch"]),
     cursor: new Set(["websearch"]),
   };
-
-  const manifestPath = path.join(getAsdRoot(), "src", "adapters", "adapter-manifest.json");
-  try {
-    if (fs.existsSync(manifestPath)) {
-      const parsed = parseJsonc<{
-        harnesses?: Partial<Record<HarnessId, { NativeCapabilities?: string[] }>>;
-      }>(fs.readFileSync(manifestPath, "utf8"));
-      if (parsed?.harnesses) {
-        for (const h of DEFAULT_HARNESS_IDS) {
-          const caps = parsed.harnesses[h]?.NativeCapabilities;
-          if (Array.isArray(caps)) {
-            fallback[h] = new Set(caps.map((c) => c.toLowerCase()));
-          }
-        }
-      }
-    }
-  } catch {
-    // Use fallback capabilities if manifest cannot be read
-  }
-
-  return fallback;
 }
 
 export function loadCatalogMcpServers(
@@ -842,61 +820,11 @@ function removeCliPathShims(homeDir: string, removedFiles: string[]): void {
 // Core Synchronizer: Strictly Global-Only
 // ============================================================================
 
-export function syncRepoVersionStrings(asdRoot = getAsdRoot()): void {
-  const relFiles = [
-    "README.md",
-    "README_ko.md",
-    "PROJECT_STATUS.md",
-    "ISSUES.md",
-    "ASD_UI_SPEC.md",
-    "package.json",
-    "presets/default-mcp.jsonc",
-    "presets/default-routing.jsonc",
-    "src/skills/asd/SKILL.md",
-    "src/skills/asd-plan/SKILL.md",
-    "src/skills/asd-run/SKILL.md",
-    "src/skills/asd-debate/SKILL.md",
-    "src/skills/asd-debug/SKILL.md",
-    "src/skills/asd-handoff/SKILL.md",
-    "src/skills/handoff/SKILL.md",
-  ];
-
-  for (const rel of relFiles) {
-    const filePath = path.join(asdRoot, rel);
-    if (!fs.existsSync(filePath)) continue;
-    try {
-      const orig = fs.readFileSync(filePath, "utf8");
-      let updated = orig;
-      if (rel === "package.json") {
-        updated = updated.replace(
-          /("description":\s*"[^"]*?\bASD v)\d+\.\d+(?:\.\d+)?/g,
-          `$1${ASD_VERSION}`
-        );
-      } else if (rel.endsWith(".jsonc")) {
-        updated = updated
-          .replace(/\bASD v\d+\.\d+(?:\.\d+)?\b/g, `ASD v${ASD_VERSION}`)
-          .replace(/("_asdVersion":\s*")[^"]*(")/g, `$1${ASD_VERSION}$2`);
-      } else {
-        updated = updated
-          .replace(/\bASD v\d+\.\d+(?:\.\d+)?\b/g, `ASD v${ASD_VERSION}`)
-          .replace(/(> \*\*버전\*\*: `)[^`]+(`)/g, `$1${ASD_VERSION}$2`)
-          .replace(/(\(v)\d+\.\d+\.\d+(\))/g, `$1${ASD_VERSION}$2`);
-      }
-      if (updated !== orig) {
-        fs.writeFileSync(filePath, updated, "utf8");
-      }
-    } catch {
-      // Ignore write errors on read-only environments
-    }
-  }
-}
-
 export async function syncHarnessConfigs(
   options?: SyncHarnessOptions
 ): Promise<SyncHarnessConfigsResult> {
   const homeDir = resolveHome(options?.homeDir);
   const asdRoot = getAsdRoot();
-  syncRepoVersionStrings(asdRoot);
   const asdCliPath = options?.asdCliPath || path.join(asdRoot, "src", "cli", "index.ts");
 
   // 1. Bootstrap presets, load catalog & native capabilities, and compute config hash

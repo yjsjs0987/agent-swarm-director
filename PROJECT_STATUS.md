@@ -37,8 +37,7 @@ asd-multiagent/
 │   ├── default-routing.jsonc    # 5대 전문 역할 및 카테고리/난이도별 기본 모델 라우팅 + 다중 폴백 체인
 │   └── default-mcp.jsonc        # Gap-filling MCP 서버 카탈로그 (context7, grep_app, websearch)
 ├── scripts/
-│   ├── run-tests.mjs            # 임시 ASD_HOME_DIR 격리 기반 전체/개별 테스트 실행기
-│   └── migrate-single-db.ts     # 구버전 해시별 DB(~/.asd/state/<hash>/core.db) → 단일 DB(~/.asd/state/core.db) 이관 스크립트
+│   └── run-tests.mjs            # 임시 ASD_HOME_DIR 격리 기반 전체/개별 테스트 실행기
 ├── src/
 │   ├── index.ts                 # 외부 라이브러리(asd-gui 등) 연동을 위한 통합 Public SDK 엔트리포인트
 │   ├── core/                    # 코어 오케스트레이션 엔진 (어댑터 의존성 0)
