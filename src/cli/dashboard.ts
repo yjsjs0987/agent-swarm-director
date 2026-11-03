@@ -131,25 +131,138 @@ function readMainJsonMeta(projectRoot: string, sessionId: string): Record<string
   }
 }
 
+const DEFAULT_MODELS_CACHE_TTL_MS = 10 * 60 * 1000;
+
+export function getModelsDiskCachePath(homeDir: string): string {
+  return path.join(path.resolve(homeDir), ".asd", "state", "models-cache.json");
+}
+
+function readModelsDiskCache(
+  homeDir: string,
+  ttlMs = DEFAULT_MODELS_CACHE_TTL_MS
+): HarnessModelCatalog | null {
+  try {
+    const cachePath = getModelsDiskCachePath(homeDir);
+    if (!fs.existsSync(cachePath)) return null;
+    const raw = JSON.parse(fs.readFileSync(cachePath, "utf8")) as {
+      updatedAt?: number;
+      catalog?: HarnessModelCatalog;
+    };
+    if (
+      !raw ||
+      typeof raw.updatedAt !== "number" ||
+      Date.now() - raw.updatedAt > ttlMs ||
+      !raw.catalog ||
+      typeof raw.catalog !== "object"
+    ) {
+      return null;
+    }
+    return raw.catalog;
+  } catch {
+    return null;
+  }
+}
+
+function writeModelsDiskCache(
+  homeDir: string,
+  catalog: HarnessModelCatalog,
+  forceCreateDir = false
+): void {
+  try {
+    const resolvedHome = path.resolve(homeDir);
+    const asdDir = path.join(resolvedHome, ".asd");
+    if (!forceCreateDir && !fs.existsSync(asdDir)) return;
+    const cachePath = getModelsDiskCachePath(resolvedHome);
+    fs.mkdirSync(path.dirname(cachePath), { recursive: true });
+    atomicWriteFileSync(
+      cachePath,
+      JSON.stringify({ updatedAt: Date.now(), catalog }, null, 2) + "\n"
+    );
+  } catch {
+    // Ignore disk cache write errors
+  }
+}
+
+function execCliOutputAsync(
+  command: string,
+  args: string[],
+  timeoutMs = 3500
+): Promise<{ status: number | null; stdout: string }> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let stdout = "";
+    const finish = (status: number | null) => {
+      if (settled) return;
+      settled = true;
+      resolve({ status, stdout });
+    };
+
+    try {
+      const resolved = resolveSpawnCommand(command, args);
+      const child = child_process.spawn(resolved.command, resolved.args, {
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+        shell: resolved.shell,
+      });
+
+      const timer = setTimeout(() => {
+        try {
+          child.kill();
+        } catch {}
+        finish(null);
+      }, timeoutMs);
+
+      child.stdout?.on("data", (chunk: Buffer | string) => {
+        if (stdout.length < 256 * 1024) {
+          stdout += chunk.toString();
+        }
+      });
+
+      child.on("error", () => {
+        clearTimeout(timer);
+        finish(null);
+      });
+
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        finish(code);
+      });
+    } catch {
+      finish(null);
+    }
+  });
+}
+
 /**
  * Dynamically discovers ALL real available models for Antigravity, Claude Code, Codex, and OpenCode
  * by querying each harness's live CLI (`agy models`, `opencode models`), local model caches
  * (`~/.codex/models_cache.json`, `~/.claude/settings.json`, `~/.claude/litellm_config.yaml`),
  * and any configured remote OpenAI-compatible gateway (`integrate.api.nvidia.com/v1/models`, etc.).
- * Does NOT inject hardcoded fake/default models.
+ * Uses an in-memory + disk cache (`~/.asd/state/models-cache.json`) and parallel async probes
+ * so `asd ui` startup never blocks on synchronous CLI spawns.
  */
 export async function discoverHarnessModels(options?: {
   projectRoot?: string;
   homeDir?: string;
   forceRefresh?: boolean;
   skipCliSpawn?: boolean;
+  cacheTtlMs?: number;
+  persistCache?: boolean;
 }): Promise<HarnessModelCatalog> {
   const projectRoot = path.resolve(options?.projectRoot || process.cwd());
-  const homeDir = options?.homeDir || os.homedir();
+  const homeDir = path.resolve(options?.homeDir || os.homedir());
   const cacheKey = `${projectRoot}::${homeDir}`;
+  const ttlMs = options?.cacheTtlMs ?? DEFAULT_MODELS_CACHE_TTL_MS;
 
-  if (!options?.forceRefresh && modelCatalogCache.has(cacheKey)) {
-    return modelCatalogCache.get(cacheKey)!;
+  if (!options?.forceRefresh) {
+    if (modelCatalogCache.has(cacheKey)) {
+      return modelCatalogCache.get(cacheKey)!;
+    }
+    const diskCached = readModelsDiskCache(homeDir, ttlMs);
+    if (diskCached) {
+      modelCatalogCache.set(cacheKey, diskCached);
+      return diskCached;
+    }
   }
 
   const sets: Record<HarnessId, Set<string>> = {
@@ -160,7 +273,7 @@ export async function discoverHarnessModels(options?: {
     cursor: new Set<string>(["auto", "composer-2", "claude-sonnet-4.6", "claude-opus-4.6", "gpt-5.4"]),
   };
 
-  // 1. Antigravity: query `agy models` CLI and `~/.gemini/antigravity-cli/settings.json`
+  // 1. Antigravity: local `~/.gemini/antigravity-cli/settings.json`
   try {
     const agySettingsPath = path.join(homeDir, ".gemini", "antigravity-cli", "settings.json");
     if (fs.existsSync(agySettingsPath)) {
@@ -171,29 +284,8 @@ export async function discoverHarnessModels(options?: {
         sets.antigravity.add(agySettings.model.trim());
       }
     }
-    if (!options?.skipCliSpawn) {
-      const resolved = resolveSpawnCommand("agy", ["models"]);
-      const res = child_process.spawnSync(resolved.command, resolved.args, {
-        encoding: "utf8",
-        timeout: 4000,
-        windowsHide: true,
-        shell: resolved.shell,
-      });
-      if (res.stdout) {
-        const lines = res.stdout.split(/\r?\n/);
-        for (const rawLine of lines) {
-          const line = rawLine.trim();
-          if (!line || line.startsWith("Fetching")) continue;
-          // `agy models` outputs `<model-id>\t<Display Name>`
-          const firstCol = line.split("\t")[0]?.trim();
-          if (firstCol && !firstCol.includes(" ")) {
-            sets.antigravity.add(firstCol);
-          }
-        }
-      }
-    }
   } catch {
-    // Ignore antigravity scan errors
+    // Ignore antigravity settings scan errors
   }
 
   // 2. Codex: scan `~/.codex/models_cache.json` and `~/.codex/config.toml`
@@ -223,7 +315,9 @@ export async function discoverHarnessModels(options?: {
     // Ignore codex scan errors
   }
 
-  // 3. Claude Code: scan `~/.claude/settings.json`, `~/.claude/litellm_config.yaml`, and remote NIM/gateway `/v1/models`
+  // 3. Claude Code: scan `~/.claude/settings.json` and `~/.claude/litellm_config.yaml`
+  let gatewayToken = process.env.ANTHROPIC_AUTH_TOKEN || process.env.NVIDIA_NIM_API_KEY || "";
+  let gatewayBase = "https://integrate.api.nvidia.com/v1";
   try {
     const addClaudeModel = (raw: string | undefined) => {
       if (!raw || typeof raw !== "string") return;
@@ -239,9 +333,6 @@ export async function discoverHarnessModels(options?: {
     addClaudeModel(process.env.ANTHROPIC_DEFAULT_SONNET_MODEL);
     addClaudeModel(process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL);
     addClaudeModel(process.env.ANTHROPIC_DEFAULT_OPUS_MODEL);
-
-    let gatewayToken = process.env.ANTHROPIC_AUTH_TOKEN || process.env.NVIDIA_NIM_API_KEY || "";
-    let gatewayBase = "https://integrate.api.nvidia.com/v1";
 
     const claudeSettingsPath = path.join(homeDir, ".claude", "settings.json");
     if (fs.existsSync(claudeSettingsPath)) {
@@ -277,38 +368,11 @@ export async function discoverHarnessModels(options?: {
         if (m[1]) addClaudeModel(m[1].trim().replace(/^nvidia_nim\//, ""));
       }
     }
-
-    // If an API token is configured (e.g. nvapi-... for NVIDIA NIM), fetch `/v1/models`
-    if (
-      !options?.skipCliSpawn &&
-      gatewayToken &&
-      !gatewayToken.includes("dummy") &&
-      !gatewayToken.includes("여기에_")
-    ) {
-      try {
-        const res = await fetch(`${gatewayBase}/models`, {
-          headers: { Authorization: `Bearer ${gatewayToken}` },
-          signal: AbortSignal.timeout(3000),
-        });
-        if (res.ok) {
-          const data = (await res.json()) as { data?: Array<{ id?: string }> };
-          if (Array.isArray(data.data)) {
-            for (const item of data.data) {
-              if (item?.id && typeof item.id === "string" && item.id.trim()) {
-                sets["claude-code"].add(item.id.trim());
-              }
-            }
-          }
-        }
-      } catch {
-        // Ignore remote gateway timeout/network error
-      }
-    }
   } catch {
-    // Ignore claude scan errors
+    // Ignore claude local scan errors
   }
 
-  // 4. OpenCode: scan `~/.config/opencode/opencode.json` and `opencode models` CLI
+  // 4. OpenCode: scan `~/.config/opencode/opencode.json`
   try {
     const opencodeJsonPath = path.join(homeDir, ".config", "opencode", "opencode.json");
     if (fs.existsSync(opencodeJsonPath)) {
@@ -333,27 +397,8 @@ export async function discoverHarnessModels(options?: {
         }
       }
     }
-
-    if (!options?.skipCliSpawn) {
-      const resolved = resolveSpawnCommand("opencode", ["models"]);
-      const res = child_process.spawnSync(resolved.command, resolved.args, {
-        encoding: "utf8",
-        timeout: 4000,
-        windowsHide: true,
-        shell: resolved.shell,
-      });
-      if (res.status === 0 && res.stdout) {
-        const lines = res.stdout
-          .split(/\r?\n/)
-          .map((l) => l.trim())
-          .filter((l) => l.length > 0 && !l.startsWith("[") && !l.includes(" "));
-        for (const line of lines) {
-          sets.opencode.add(line);
-        }
-      }
-    }
   } catch {
-    // Ignore opencode CLI errors
+    // Ignore opencode JSON scan errors
   }
 
   // 5. Cursor: scan ~/.cursor/cli-config.json
@@ -371,6 +416,62 @@ export async function discoverHarnessModels(options?: {
     // Ignore cursor scan errors
   }
 
+  // 6. Parallel non-blocking CLI & remote gateway probes (skipped when skipCliSpawn is true)
+  if (!options?.skipCliSpawn) {
+    const agyProbe = execCliOutputAsync("agy", ["models"], 3500).then((res) => {
+      if (!res.stdout) return;
+      for (const rawLine of res.stdout.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("Fetching")) continue;
+        const firstCol = line.split("\t")[0]?.trim();
+        if (firstCol && !firstCol.includes(" ")) {
+          sets.antigravity.add(firstCol);
+        }
+      }
+    });
+
+    const opencodeProbe = execCliOutputAsync("opencode", ["models"], 3500).then((res) => {
+      if (res.status !== 0 || !res.stdout) return;
+      const lines = res.stdout
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0 && !l.startsWith("[") && !l.includes(" "));
+      for (const line of lines) {
+        sets.opencode.add(line);
+      }
+    });
+
+    const gatewayProbe = (async () => {
+      if (
+        !gatewayToken ||
+        gatewayToken.includes("dummy") ||
+        gatewayToken.includes("여기에_")
+      ) {
+        return;
+      }
+      try {
+        const res = await fetch(`${gatewayBase}/models`, {
+          headers: { Authorization: `Bearer ${gatewayToken}` },
+          signal: AbortSignal.timeout(2500),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { data?: Array<{ id?: string }> };
+          if (Array.isArray(data.data)) {
+            for (const item of data.data) {
+              if (item?.id && typeof item.id === "string" && item.id.trim()) {
+                sets["claude-code"].add(item.id.trim());
+              }
+            }
+          }
+        }
+      } catch {
+        // Ignore remote gateway timeout/network error
+      }
+    })();
+
+    await Promise.all([agyProbe, opencodeProbe, gatewayProbe]);
+  }
+
   const catalog: HarnessModelCatalog = {
     antigravity: [...sets.antigravity],
     "claude-code": [...sets["claude-code"]],
@@ -380,6 +481,7 @@ export async function discoverHarnessModels(options?: {
   };
 
   modelCatalogCache.set(cacheKey, catalog);
+  writeModelsDiskCache(homeDir, catalog, Boolean(options?.persistCache));
   return catalog;
 }
 
