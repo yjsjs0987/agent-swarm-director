@@ -270,7 +270,7 @@ export async function discoverHarnessModels(options?: {
     "claude-code": new Set<string>(),
     codex: new Set<string>(),
     opencode: new Set<string>(),
-    cursor: new Set<string>(["auto", "composer-2", "claude-sonnet-4.6", "claude-opus-4.6", "gpt-5.4"]),
+    cursor: new Set<string>(["auto"]),
   };
 
   // 1. Antigravity: local `~/.gemini/antigravity-cli/settings.json`
@@ -449,7 +449,7 @@ export async function discoverHarnessModels(options?: {
     // Ignore opencode scan errors
   }
 
-  // 5. Cursor: scan ~/.cursor/cli-config.json
+  // 5. Cursor: scan ~/.cursor/cli-config.json, ~/.cursor/agents/*.md, and ~/.asd/routing.jsonc
   try {
     const cursorCfgPath = path.join(homeDir, ".cursor", "cli-config.json");
     if (fs.existsSync(cursorCfgPath)) {
@@ -458,6 +458,38 @@ export async function discoverHarnessModels(options?: {
         sets.cursor.add(cObj.model.trim());
       } else if (cObj.model && typeof cObj.model === "object" && typeof cObj.model.modelId === "string" && cObj.model.modelId.trim()) {
         sets.cursor.add(cObj.model.modelId.trim());
+      }
+    }
+
+    const cursorAgentDir = path.join(homeDir, ".cursor", "agents");
+    if (fs.existsSync(cursorAgentDir)) {
+      for (const entry of fs.readdirSync(cursorAgentDir, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.endsWith(".md")) {
+          try {
+            const text = fs.readFileSync(path.join(cursorAgentDir, entry.name), "utf8");
+            const m = /^model:\s*["']?([^"'\r\n#]+)["']?/m.exec(text);
+            if (m?.[1]?.trim()) {
+              sets.cursor.add(m[1].trim());
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+
+    const globalRoutingPath = path.join(homeDir, ".asd", "routing.jsonc");
+    if (fs.existsSync(globalRoutingPath)) {
+      try {
+        const text = fs.readFileSync(globalRoutingPath, "utf8");
+        const matches = text.matchAll(/"harness"\s*:\s*"cursor"\s*,\s*"model"\s*:\s*"([^"]+)"/g);
+        for (const match of matches) {
+          if (match[1]?.trim()) {
+            sets.cursor.add(match[1].trim());
+          }
+        }
+      } catch {
+        // ignore
       }
     }
   } catch {
@@ -489,6 +521,27 @@ export async function discoverHarnessModels(options?: {
       }
     });
 
+    const parseCursorModelsOutput = (stdout: string) => {
+      for (const rawLine of stdout.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith("Available models") || line.startsWith("Tip:")) continue;
+        const modelId = line.split(" - ")[0]?.trim();
+        if (modelId && !modelId.includes(" ")) {
+          sets.cursor.add(modelId);
+        }
+      }
+    };
+
+    const cursorProbe = execCliOutputAsync("cursor-agent", ["models"], 3500).then((res) => {
+      if (res.stdout) {
+        parseCursorModelsOutput(res.stdout);
+      } else {
+        return execCliOutputAsync("agent", ["models"], 3500).then((agentRes) => {
+          if (agentRes.stdout) parseCursorModelsOutput(agentRes.stdout);
+        });
+      }
+    });
+
     const gatewayProbe = (async () => {
       if (
         !gatewayToken ||
@@ -517,7 +570,7 @@ export async function discoverHarnessModels(options?: {
       }
     })();
 
-    await Promise.all([agyProbe, opencodeProbe, gatewayProbe]);
+    await Promise.all([agyProbe, opencodeProbe, cursorProbe, gatewayProbe]);
   }
 
   const catalog: HarnessModelCatalog = {
