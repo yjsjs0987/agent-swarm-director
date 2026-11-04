@@ -606,6 +606,69 @@ describe("HEAVY Track Worktree Lifecycle", () => {
     assert.equal(currentHead, baseSha, "Main branch must be reset to pre_merge_sha");
     assert.ok(!fs.existsSync(path.join(root, "good.txt")));
   });
+
+  test("HEAVY track smoke check failure rolls back merge commit while preserving pre-existing uncommitted changes in projectRoot (F11)", async () => {
+    const root = makeTmpDir("asd-smoke-preserve-");
+    initGitRepo(root);
+    prepareBaseline(root);
+
+    // Commit a tracked file in base
+    const trackedPath = path.join(root, "dirty-tracked.txt");
+    fs.writeFileSync(trackedPath, "base content\n", "utf8");
+    runGit(["add", "dirty-tracked.txt"], { cwd: root });
+    runGit(["commit", "-m", "add dirty-tracked.txt", "--no-verify"], { cwd: root });
+
+    const baseSha = runGit(["rev-parse", "HEAD"], { cwd: root }).stdout.trim();
+
+    // Create worktree for HEAVY task
+    const wt = createTaskWorktree(root, 1, "T1.2");
+    fs.writeFileSync(path.join(wt.wtPath, "good.txt"), "merged feature", "utf8");
+
+    // Leave uncommitted modifications to the tracked file and an untracked file in projectRoot
+    fs.writeFileSync(trackedPath, "modified uncommitted content\n", "utf8");
+    const untrackedPath = path.join(root, "untracked-wip.txt");
+    fs.writeFileSync(untrackedPath, "untracked user work\n", "utf8");
+
+    // Smoke check fails
+    const smokeCmd = `node -e "process.exit(1)"`;
+
+    const res = await verifyAndMergeHeavyTask({
+      projectRoot: root,
+      turn: 1,
+      taskId: "T1.2",
+      title: "heavy merge with dirty projectRoot and failing smoke",
+      wtPath: wt.wtPath,
+      branchName: wt.branchName,
+      allowedFiles: ["good.txt"],
+      smokeCmd,
+    });
+
+    assert.equal(res.verified, false);
+    assert.equal(res.status, "failed");
+    assert.equal(res.rolledBackTo, baseSha);
+
+    // HEAD is rolled back to baseSha
+    const currentHead = runGit(["rev-parse", "HEAD"], { cwd: root }).stdout.trim();
+    assert.equal(currentHead, baseSha, "Main branch HEAD must be reset to baseSha");
+
+    // Merged file from worktree is removed from projectRoot
+    assert.ok(!fs.existsSync(path.join(root, "good.txt")), "good.txt from failed merge must be removed");
+
+    // Pre-existing uncommitted tracked modifications and untracked file in projectRoot are 100% preserved
+    assert.equal(
+      fs.readFileSync(trackedPath, "utf8"),
+      "modified uncommitted content\n",
+      "Dirty tracked file modifications must be preserved"
+    );
+    assert.equal(
+      fs.readFileSync(untrackedPath, "utf8"),
+      "untracked user work\n",
+      "Untracked file must be preserved"
+    );
+
+    // Clean up preserved worktree
+    cleanupWorktree(root, wt.wtPath, wt.branchName, { forceBranchDelete: true });
+  });
 });
 
 

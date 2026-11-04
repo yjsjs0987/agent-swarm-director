@@ -1289,8 +1289,23 @@ export async function verifyAndMergeHeavyTask(
     if (smokeCmd && smokeCmd.trim()) {
       const smokeRes = runVerifyCmd(smokeCmd.trim(), projectRoot);
       if (!smokeRes.success) {
-        // Smoke check failed: rollback main branch to pre_merge_sha
-        runGit(["reset", "--hard", preMergeSha], { cwd: projectRoot });
+        // Smoke check failed: rollback main branch to pre_merge_sha while preserving pre-existing uncommitted changes
+        const keepRes = runGit(["reset", "--keep", preMergeSha], {
+          cwd: projectRoot,
+        });
+        if (keepRes.exitCode !== 0) {
+          const mergeDiff = runGit(
+            ["diff", "--name-only", preMergeSha, "HEAD"],
+            { cwd: projectRoot }
+          )
+            .stdout.split(/\r?\n/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+          if (mergeDiff.length > 0) {
+            runGit(["checkout", "--", ...mergeDiff], { cwd: projectRoot });
+          }
+          runGit(["reset", "--keep", preMergeSha], { cwd: projectRoot });
+        }
         if (db && sessionId) {
           db.updateTaskStatus(sessionId, taskId, "failed");
         }
