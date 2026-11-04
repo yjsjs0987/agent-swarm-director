@@ -421,13 +421,15 @@ function bootstrapGlobalPresets(homeDir: string): { routingPath: string; mcpPath
   const mcpPath = path.join(asdHome, "mcp.jsonc");
 
   const asdRoot = getAsdRoot();
-  syncRepoVersionStrings(asdRoot);
   const presetRouting = path.join(asdRoot, "presets", "default-routing.jsonc");
   const presetMcp = path.join(asdRoot, "presets", "default-mcp.jsonc");
 
   if (!fs.existsSync(routingPath)) {
     if (fs.existsSync(presetRouting)) {
-      const content = fs.readFileSync(presetRouting, "utf8").replace(/"_asdVersion":\s*"[^"]*"/, `"_asdVersion": "${ASD_VERSION}"`);
+      const content = fs
+        .readFileSync(presetRouting, "utf8")
+        .replace(/\bASD v\d+\.\d+(?:\.\d+)?\b/g, `ASD v${ASD_VERSION}`)
+        .replace(/"_asdVersion":\s*"[^"]*"/g, `"_asdVersion": "${ASD_VERSION}"`);
       safeWriteText(routingPath, content);
     } else {
       safeWriteText(routingPath, `// ASD Default Routing\n{\n  "_asdVersion": "${ASD_VERSION}"\n}\n`);
@@ -436,7 +438,10 @@ function bootstrapGlobalPresets(homeDir: string): { routingPath: string; mcpPath
 
   if (!fs.existsSync(mcpPath)) {
     if (fs.existsSync(presetMcp)) {
-      const content = fs.readFileSync(presetMcp, "utf8").replace(/"_asdVersion":\s*"[^"]*"/, `"_asdVersion": "${ASD_VERSION}"`);
+      const content = fs
+        .readFileSync(presetMcp, "utf8")
+        .replace(/\bASD v\d+\.\d+(?:\.\d+)?\b/g, `ASD v${ASD_VERSION}`)
+        .replace(/"_asdVersion":\s*"[^"]*"/g, `"_asdVersion": "${ASD_VERSION}"`);
       safeWriteText(mcpPath, content);
     } else {
       safeWriteText(mcpPath, `// ASD Default MCP\n{\n  "_asdVersion": "${ASD_VERSION}"\n}\n`);
@@ -821,51 +826,8 @@ function removeCliPathShims(homeDir: string, removedFiles: string[]): void {
 // Core Synchronizer: Strictly Global-Only
 // ============================================================================
 
-export function syncRepoVersionStrings(asdRoot = getAsdRoot()): void {
-  const relFiles = [
-    "README.md",
-    "README_ko.md",
-    "PROJECT_STATUS.md",
-    "package.json",
-    "presets/default-mcp.jsonc",
-    "presets/default-routing.jsonc",
-    "src/skills/asd/SKILL.md",
-    "src/skills/asd-plan/SKILL.md",
-    "src/skills/asd-run/SKILL.md",
-    "src/skills/asd-debate/SKILL.md",
-    "src/skills/asd-debug/SKILL.md",
-    "src/skills/asd-handoff/SKILL.md",
-    "src/skills/handoff/SKILL.md",
-  ];
-
-  for (const rel of relFiles) {
-    const filePath = path.join(asdRoot, rel);
-    if (!fs.existsSync(filePath)) continue;
-    try {
-      const orig = fs.readFileSync(filePath, "utf8");
-      let updated = orig;
-      if (rel === "package.json") {
-        updated = updated.replace(
-          /("description":\s*"[^"]*?\bASD v)\d+\.\d+(?:\.\d+)?/g,
-          `$1${ASD_VERSION}`
-        );
-      } else if (rel.endsWith(".jsonc")) {
-        updated = updated
-          .replace(/\bASD v\d+\.\d+(?:\.\d+)?\b/g, `ASD v${ASD_VERSION}`)
-          .replace(/("_asdVersion":\s*")[^"]*(")/g, `$1${ASD_VERSION}$2`);
-      } else {
-        updated = updated
-          .replace(/\bASD v\d+\.\d+(?:\.\d+)?\b/g, `ASD v${ASD_VERSION}`)
-          .replace(/(> \*\*버전\*\*: `)[^`]+(`)/g, `$1${ASD_VERSION}$2`)
-          .replace(/(\(v)\d+\.\d+\.\d+(\))/g, `$1${ASD_VERSION}$2`);
-      }
-      if (updated !== orig) {
-        fs.writeFileSync(filePath, updated, "utf8");
-      }
-    } catch {
-      // Ignore write errors on read-only environments
-    }
-  }
+export function syncRepoVersionStrings(_asdRoot = getAsdRoot()): void {
+  // No-op by design: sync must never mutate tracked repository source files or historical docs in-place.
 }
 
 export async function syncHarnessConfigs(
@@ -873,7 +835,6 @@ export async function syncHarnessConfigs(
 ): Promise<SyncHarnessConfigsResult> {
   const homeDir = resolveHome(options?.homeDir);
   const asdRoot = getAsdRoot();
-  syncRepoVersionStrings(asdRoot);
   const asdCliPath = options?.asdCliPath || path.join(asdRoot, "src", "cli", "index.ts");
 
   // 1. Bootstrap presets, load catalog & native capabilities, and compute config hash

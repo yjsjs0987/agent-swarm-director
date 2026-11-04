@@ -24,6 +24,7 @@ import {
   runAsdSync,
   runAsdUninstall,
   syncHarnessConfigs,
+  syncRepoVersionStrings,
   uninstallHarnessConfigs,
 } from "../src/adapters/installer.ts";
 import { AGENT_ROLES, ASD_VERSION, type HarnessId } from "../src/core/types.ts";
@@ -450,6 +451,62 @@ describe("Installer & Sync Engine", () => {
       });
       assert.equal(withCustomNotify.includes("notify ="), false);
       assert.ok(withCustomNotify.includes("[mcp_servers.context7]"));
+    });
+
+    test("syncRepoVersionStrings and syncHarnessConfigs never mutate repo README.md, README_ko.md, or historical version strings", async () => {
+      const fixtureRepo = createTempDir("asd-test-repo-fixture-");
+      const fixtureHome = createTempDir("asd-test-repo-home-");
+      try {
+        const readmeContent = "# ASD\nHistorical note: ASD v2.1.0 and (v2.2.0) release.\n";
+        const readmeKoContent = "# ASD 한국어\n> **버전**: `2.1.0`\n이전 버전 ASD v2.1.0 (v2.2.0) 기록\n";
+        fs.writeFileSync(path.join(fixtureRepo, "README.md"), readmeContent, "utf8");
+        fs.writeFileSync(path.join(fixtureRepo, "README_ko.md"), readmeKoContent, "utf8");
+
+        syncRepoVersionStrings(fixtureRepo);
+
+        assert.equal(fs.readFileSync(path.join(fixtureRepo, "README.md"), "utf8"), readmeContent);
+        assert.equal(fs.readFileSync(path.join(fixtureRepo, "README_ko.md"), "utf8"), readmeKoContent);
+
+        const realReadmePath = path.resolve(process.cwd(), "README.md");
+        const realReadmeKoPath = path.resolve(process.cwd(), "README_ko.md");
+        const realReadmeBefore = fs.existsSync(realReadmePath)
+          ? fs.readFileSync(realReadmePath, "utf8")
+          : null;
+        const realReadmeKoBefore = fs.existsSync(realReadmeKoPath)
+          ? fs.readFileSync(realReadmeKoPath, "utf8")
+          : null;
+
+        await syncHarnessConfigs({ homeDir: fixtureHome, projectRoot: fixtureRepo, noPath: true });
+
+        if (realReadmeBefore !== null) {
+          assert.equal(fs.readFileSync(realReadmePath, "utf8"), realReadmeBefore);
+        }
+        if (realReadmeKoBefore !== null) {
+          assert.equal(fs.readFileSync(realReadmeKoPath, "utf8"), realReadmeKoBefore);
+        }
+        assert.equal(fs.readFileSync(path.join(fixtureRepo, "README.md"), "utf8"), readmeContent);
+        assert.equal(fs.readFileSync(path.join(fixtureRepo, "README_ko.md"), "utf8"), readmeKoContent);
+
+        // Installed copies in homeDir receive the current ASD_VERSION
+        const installedRouting = fs.readFileSync(
+          path.join(fixtureHome, ".asd", "routing.jsonc"),
+          "utf8"
+        );
+        const installedMcp = fs.readFileSync(
+          path.join(fixtureHome, ".asd", "mcp.jsonc"),
+          "utf8"
+        );
+        const installedSkill = fs.readFileSync(
+          path.join(fixtureHome, ".claude", "skills", "asd", "SKILL.md"),
+          "utf8"
+        );
+        assert.ok(installedRouting.includes(`"_asdVersion": "${ASD_VERSION}"`));
+        assert.ok(installedMcp.includes(`"_asdVersion": "${ASD_VERSION}"`));
+        assert.ok(installedSkill.includes(`ASD v${ASD_VERSION}`));
+      } finally {
+        removeTempDir(fixtureRepo);
+        removeTempDir(fixtureHome);
+      }
     });
   });
 });
