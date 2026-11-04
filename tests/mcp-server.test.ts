@@ -31,7 +31,8 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { AsdMcpServer, ASD_MCP_TOOLS } from "../src/mcp/server.ts";
+import { AsdMcpServer, ASD_MCP_TOOLS, handlePlan, handleDispatch, handleDebate, handleVerify } from "../src/mcp/server.ts";
+import { main as cliMain } from "../src/cli/index.ts";
 import { openProjectDb, type SqliteDriver } from "../src/core/db.ts";
 import { ensureGitUserIdentity, prepareBaseline, runGit } from "../src/core/workspace.ts";
 import type { CommandRunner } from "../src/core/spawner.ts";
@@ -48,6 +49,14 @@ function makeProjectRoot(): string {
   prepareBaseline(dir);
   return dir;
 }
+
+const origHomeDir = process.env.ASD_HOME_DIR;
+
+beforeEach(() => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "asd-mcp-home-"));
+  tmpDirs.push(home);
+  process.env.ASD_HOME_DIR = home;
+});
 
 afterEach(() => {
   for (const srv of openServers) {
@@ -68,6 +77,11 @@ afterEach(() => {
   }
   tmpDirs.length = 0;
   delete process.env.ASD_SESSION_ROLE;
+  if (origHomeDir === undefined) {
+    delete process.env.ASD_HOME_DIR;
+  } else {
+    process.env.ASD_HOME_DIR = origHomeDir;
+  }
 });
 
 describe("ASD MCP Server (src/mcp/server.ts)", () => {
@@ -267,6 +281,165 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
       });
       openServers.push(mainServer);
       assert.equal(mainStarted, true, "Main session must trigger onMainServerStart");
+    });
+
+    test("rejects direct handler calls, SDK exports, and CLI orchestration commands for subagents before any DB/disk mutation", async () => {
+      const projectRoot = makeProjectRoot();
+      const server = new AsdMcpServer({
+        projectRoot,
+        sessionRole: "subagent",
+        autoSync: false,
+      });
+      openServers.push(server);
+
+      // 1. Direct server.handlePlan / handleDispatch / handleDebate calls with sessionRole: "subagent"
+      await assert.rejects(
+        async () => {
+          await server.handlePlan({
+            action: "create",
+            sessionId: "subagent-direct-plan",
+            tasks: [{ taskId: "T1.1", turn: 1, title: "Should not be created", targetFiles: ["a.ts"] }],
+          });
+        },
+        { name: "Error", message: "Subagents cannot invoke orchestration tools" }
+      );
+      await assert.rejects(
+        async () => {
+          await server.handleDispatch({ sessionId: "subagent-direct-plan" });
+        },
+        { name: "Error", message: "Subagents cannot invoke orchestration tools" }
+      );
+      await assert.rejects(
+        async () => {
+          await server.handleDebate({ sessionId: "subagent-direct-plan", topic: "t", proposal: "p" });
+        },
+        { name: "Error", message: "Subagents cannot invoke orchestration tools" }
+      );
+
+      // 2. Top-level SDK exports with sessionRole: "subagent"
+      await assert.rejects(
+        async () => {
+          await handlePlan(
+            {
+              action: "create",
+              sessionId: "subagent-sdk-plan",
+              tasks: [{ taskId: "T1.1", turn: 1, title: "SDK blocked", targetFiles: ["a.ts"] }],
+            },
+            { projectRoot, sessionRole: "subagent" }
+          );
+        },
+        { name: "Error", message: "Subagents cannot invoke orchestration tools" }
+      );
+      await assert.rejects(
+        async () => {
+          await handleDispatch({ sessionId: "subagent-sdk-plan" }, { projectRoot, sessionRole: "subagent" });
+        },
+        { name: "Error", message: "Subagents cannot invoke orchestration tools" }
+      );
+      await assert.rejects(
+        async () => {
+          await handleDebate(
+            { sessionId: "subagent-sdk-plan", topic: "t", proposal: "p" },
+            { projectRoot, sessionRole: "subagent" }
+          );
+        },
+        { name: "Error", message: "Subagents cannot invoke orchestration tools" }
+      );
+
+      // 3. process.env.ASD_SESSION_ROLE = "subagent" via SDK exports and CLI (src/cli/index.ts plan create)
+      process.env.ASD_SESSION_ROLE = "subagent";
+      await assert.rejects(
+        async () => {
+          await handlePlan(
+            {
+              action: "create",
+              sessionId: "subagent-env-plan",
+              tasks: [{ taskId: "T1.1", turn: 1, title: "Env blocked", targetFiles: ["a.ts"] }],
+            },
+            { projectRoot }
+          );
+        },
+        { name: "Error", message: "Subagents cannot invoke orchestration tools" }
+      );
+      await assert.rejects(
+        async () => {
+          await handleDispatch({ sessionId: "subagent-env-plan" }, { projectRoot });
+        },
+        { name: "Error", message: "Subagents cannot invoke orchestration tools" }
+      );
+      await assert.rejects(
+        async () => {
+          await handleDebate({ sessionId: "subagent-env-plan", topic: "t", proposal: "p" }, { projectRoot });
+        },
+        { name: "Error", message: "Subagents cannot invoke orchestration tools" }
+      );
+
+      const capturedErr: string[] = [];
+      const origConsoleError = console.error;
+      console.error = (...args: unknown[]) => {
+        capturedErr.push(args.map(String).join(" "));
+      };
+      let cliCode = 0;
+      try {
+        cliCode = await cliMain([
+          "plan",
+          "create",
+          "--project-root",
+          projectRoot,
+          "--session",
+          "subagent-cli-plan",
+          "--tasks",
+          JSON.stringify([{ taskId: "T1.1", turn: 1, title: "CLI blocked", targetFiles: ["a.ts"] }]),
+        ]);
+      } finally {
+        console.error = origConsoleError;
+      }
+      assert.equal(cliCode, 1);
+      assert.ok(capturedErr.join("\n").includes("Subagents cannot invoke orchestration tools"));
+
+      // Verify NO session or task state was created or mutated in DB or disk
+      const dbCheck = openProjectDb(projectRoot);
+      assert.equal(dbCheck.getLatestSession(), undefined);
+      assert.equal(dbCheck.getSession("subagent-direct-plan"), undefined);
+      assert.equal(dbCheck.getSession("subagent-sdk-plan"), undefined);
+      assert.equal(dbCheck.getSession("subagent-env-plan"), undefined);
+      assert.equal(dbCheck.getSession("subagent-cli-plan"), undefined);
+      dbCheck.close();
+      assert.equal(fs.existsSync(path.join(projectRoot, ".asd", "PLAN.md")), false);
+      assert.deepEqual(fs.readdirSync(path.join(projectRoot, ".asd", "sessions")), []);
+
+      // 4. Verify handleVerify (and server.handleVerify) remains allowed for subagents
+      await assert.rejects(
+        async () => {
+          await server.handleVerify({
+            sessionId: "missing-session",
+            taskId: "T1.1",
+            doneClaim: { summary: "ok", changed_files: [], key_decisions: [], risks: [] },
+          });
+        },
+        (err: Error) => {
+          assert.notEqual(err.message, "Subagents cannot invoke orchestration tools");
+          assert.ok(err.message.includes("Session not found"));
+          return true;
+        }
+      );
+      await assert.rejects(
+        async () => {
+          await handleVerify(
+            {
+              sessionId: "missing-session",
+              taskId: "T1.1",
+              doneClaim: { summary: "ok", changed_files: [], key_decisions: [], risks: [] },
+            },
+            { projectRoot, sessionRole: "subagent" }
+          );
+        },
+        (err: Error) => {
+          assert.notEqual(err.message, "Subagents cannot invoke orchestration tools");
+          assert.ok(err.message.includes("Session not found"));
+          return true;
+        }
+      );
     });
   });
 

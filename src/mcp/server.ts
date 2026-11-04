@@ -663,6 +663,9 @@ export class AsdMcpServer {
   // ==========================================================================
 
   async handlePlan(input: AsdPlanInput): Promise<AsdPlanOutput> {
+    if (this.isSubagent()) {
+      throw new Error("Subagents cannot invoke orchestration tools");
+    }
     const action = input.action;
     let sessionId = input.sessionId;
 
@@ -837,6 +840,9 @@ export class AsdMcpServer {
     input: AsdDispatchInput,
     signal?: AbortSignal
   ): Promise<AsdDispatchOutput & { dispatchedTasks: AsdDispatchOutput["results"] }> {
+    if (this.isSubagent()) {
+      throw new Error("Subagents cannot invoke orchestration tools");
+    }
     const sessionId =
       input.sessionId?.trim() ||
       this.db.getLatestSession()?.session_id ||
@@ -1926,6 +1932,9 @@ export class AsdMcpServer {
     signal?: AbortSignal,
     onProgress?: (msg: string) => void
   ): Promise<AsdDebateOutput> {
+    if (this.isSubagent()) {
+      throw new Error("Subagents cannot invoke orchestration tools");
+    }
     let sessionId = input.sessionId?.trim() || "";
     if (!sessionId) {
       if (input.taskId) {
