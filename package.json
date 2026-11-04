@@ -9,10 +9,14 @@
     ".": "./src/index.ts",
     "./core/plan": "./src/core/render.ts",
     "./core/plan.ts": "./src/core/render.ts",
-    "./core/*": "./src/core/*",
-    "./adapters/*": "./src/adapters/*",
-    "./cli/*": "./src/cli/*",
-    "./mcp/*": "./src/mcp/*",
+    "./core/*.ts": "./src/core/*.ts",
+    "./core/*": "./src/core/*.ts",
+    "./adapters/*.ts": "./src/adapters/*.ts",
+    "./adapters/*": "./src/adapters/*.ts",
+    "./cli/*.ts": "./src/cli/*.ts",
+    "./cli/*": "./src/cli/*.ts",
+    "./mcp/*.ts": "./src/mcp/*.ts",
+    "./mcp/*": "./src/mcp/*.ts",
     "./package.json": "./package.json"
   },
   "engines": {

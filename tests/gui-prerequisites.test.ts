@@ -74,6 +74,24 @@ describe("GUI Prerequisites & Session Architecture", () => {
     assert.equal(typeof asdPublicApi.handleDebate, "function");
   });
 
+  test("1b. Package subpath exports resolve both extensionless and explicit .ts imports", async () => {
+    const coreDb = await import("agent-swarm-director/core/db");
+    const coreDbTs = await import("agent-swarm-director/core/db.ts");
+    const corePlan = await import("agent-swarm-director/core/plan");
+    const corePlanTs = await import("agent-swarm-director/core/plan.ts");
+    const adaptersInstaller = await import("agent-swarm-director/adapters/installer");
+    const cliDashboard = await import("agent-swarm-director/cli/dashboard");
+    const mcpServer = await import("agent-swarm-director/mcp/server");
+
+    assert.equal(typeof coreDb.openProjectDb, "function");
+    assert.equal(coreDb.openProjectDb, coreDbTs.openProjectDb);
+    assert.equal(typeof corePlan.renderPlanMd, "function");
+    assert.equal(corePlan.renderPlanMd, corePlanTs.renderPlanMd);
+    assert.equal(typeof adaptersInstaller.syncHarnessConfigs, "function");
+    assert.equal(typeof cliDashboard.collectDashboardSnapshot, "function");
+    assert.equal(typeof mcpServer.AsdMcpServer, "function");
+  });
+
   test("2. All 5 adapters implement buildResumeCommand and buildInteractiveResumeCommand", () => {
     const ccResume = claudeCodeAdapter.buildResumeCommand!(
       "cc-uuid-123",
