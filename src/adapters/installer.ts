@@ -346,9 +346,19 @@ export function generateAgentContent(
     frontmatterLines.push(`model: ${opts.model}`);
   }
   frontmatterLines.push(`---`);
+  const protectedAsdRuleBlock = [
+    `## Protected \`.asd/\` Directory & Official CLI-Only Rule`,
+    `- **NEVER** directly create, edit, or overwrite any file inside \`.asd/\` (such as \`.asd/PLAN.md\`, \`.asd/core.db\`, \`.asd/sessions/**\`, \`.asd/handoff.md\`) using file-editing tools (\`edit_file\`, \`write_file\`, \`Edit\`, \`Write\`, or shell redirection \`>\` / \`>>\`). The \`.asd/\` directory is strictly protected by the \`PreToolUse\` security hook.`,
+    `- For ANY ASD state or \`.asd/\` operation, **ALWAYS** use the official \`asd\` CLI commands (\`asd plan create|update|sync_from_md|get\`, \`asd dispatch\`, \`asd verify\`, \`asd debate\`, \`asd handoff\`, \`asd status\`, \`asd clean\`) or official ASD MCP tools.`,
+    `- If an operation on \`.asd/\` has **no corresponding official \`asd\` CLI command or MCP tool**, **IMMEDIATELY HALT** execution and explain the situation to the user rather than attempting direct file manipulation or workarounds.`,
+  ].join("\n");
+
   const presetBody = getAgentTemplate(role, opts?.model);
   if (presetBody) {
-    return `${frontmatterLines.join("\n")}\n\n${presetBody}`;
+    const bodyWithRule = presetBody.includes("Protected `.asd/` Directory")
+      ? presetBody
+      : `${presetBody.trimEnd()}\n\n${protectedAsdRuleBlock}\n`;
+    return `${frontmatterLines.join("\n")}\n\n${bodyWithRule}`;
   }
 
   return `${frontmatterLines.join("\n")}
@@ -369,6 +379,8 @@ ${meta.focus}
 1. Adhere strictly to assigned role boundaries and specified allowedFiles.
 2. Maintain high code quality, idiomatic patterns, and zero unverified assumptions.
 3. Ensure all changes are verified with automated tests before completing.
+
+${protectedAsdRuleBlock}
 `;
 }
 
@@ -392,6 +404,11 @@ This document defines the 10 standard specialist agent roles in ASD v${ASD_VERSI
 
 2. **\`HEAVY\` Mode (Multi-Harness External CLI & Worktree Execution)**:
    - Used only after explicit user confirmation when true cross-harness CLI diversity (\`asd debate\`) or parallel Git worktree isolation (\`asd dispatch --turn <N> --mode parallel_spawn\`) is required.
+
+3. **Protected \`.asd/\` Directory & Official CLI-Only Rule**:
+   - **NEVER** directly create, edit, or overwrite any file inside \`.asd/\` (such as \`.asd/PLAN.md\`, \`.asd/core.db\`, \`.asd/sessions/**\`, \`.asd/handoff.md\`) using file-editing tools (\`edit_file\`, \`write_file\`, \`Edit\`, \`Write\`, or shell redirection \`>\` / \`>>\`). The \`.asd/\` directory is strictly protected by the \`PreToolUse\` security hook.
+   - For ANY ASD state or \`.asd/\` operation, **ALWAYS** use the official \`asd\` CLI commands (\`asd plan create|update|sync_from_md|get\`, \`asd dispatch\`, \`asd verify\`, \`asd debate\`, \`asd handoff\`, \`asd status\`, \`asd clean\`) or official ASD MCP tools.
+   - If an operation on \`.asd/\` has **no corresponding official \`asd\` CLI command or MCP tool**, **IMMEDIATELY HALT** execution and explain the situation to the user rather than attempting direct file manipulation or workarounds.
 
 ---
 

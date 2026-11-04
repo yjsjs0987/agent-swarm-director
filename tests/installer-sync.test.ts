@@ -20,6 +20,9 @@ import {
   autoSyncIfNeeded,
   buildCodexManagedTomlBlock,
   doctorProbe,
+  generateAgentContent,
+  generateAllAgentsMarkdown,
+  getSkillTemplate,
   runAsdDoctor,
   runAsdSync,
   runAsdUninstall,
@@ -507,6 +510,37 @@ describe("Installer & Sync Engine", () => {
         removeTempDir(fixtureRepo);
         removeTempDir(fixtureHome);
       }
+    });
+
+    test("getSkillTemplate, generateAgentContent, and generateAllAgentsMarkdown enforce Protected .asd/ Directory & Official CLI-Only Rule", () => {
+      const skillsToCheck = ["asd", "asd-plan", "asd-run", "asd-debate", "asd-debug", "handoff", "asd-handoff"];
+      for (const skill of skillsToCheck) {
+        const content = getSkillTemplate(skill);
+        assert.ok(
+          content.includes("Protected `.asd/` Directory & Official CLI-Only Rule"),
+          `Skill '${skill}' must include Protected .asd/ Directory & Official CLI-Only Rule`
+        );
+        assert.ok(
+          content.includes("IMMEDIATELY HALT"),
+          `Skill '${skill}' must instruct agent to IMMEDIATELY HALT when no official CLI/MCP command exists`
+        );
+      }
+
+      for (const role of AGENT_ROLES) {
+        const agentMd = generateAgentContent(role);
+        assert.ok(
+          agentMd.includes("Protected `.asd/` Directory & Official CLI-Only Rule"),
+          `Agent '${role}' must include Protected .asd/ Directory & Official CLI-Only Rule`
+        );
+        assert.ok(
+          agentMd.includes("IMMEDIATELY HALT"),
+          `Agent '${role}' must instruct agent to IMMEDIATELY HALT when no official CLI/MCP command exists`
+        );
+      }
+
+      const allAgentsMd = generateAllAgentsMarkdown();
+      assert.ok(allAgentsMd.includes("Protected `.asd/` Directory & Official CLI-Only Rule"));
+      assert.ok(allAgentsMd.includes("IMMEDIATELY HALT"));
     });
   });
 });

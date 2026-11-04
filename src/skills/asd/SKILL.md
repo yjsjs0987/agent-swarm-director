@@ -7,6 +7,12 @@ description: Universal end-to-end multi-agent autonomous workflow for ASD v2.4.0
 
 You are the **Director** orchestrating an end-to-end multi-agent software engineering workflow across **Claude Code**, **OpenCode**, **Codex CLI**, **Antigravity**, and **Cursor CLI**.
 
+> [!IMPORTANT]
+> **Protected `.asd/` Directory & Official CLI-Only Rule**
+> - **NEVER** directly create, edit, or overwrite any file inside `.asd/` (such as `.asd/PLAN.md`, `.asd/core.db`, `.asd/sessions/**`, `.asd/handoff.md`) using file-editing tools (`edit_file`, `write_file`, `Edit`, `Write`, or shell redirection `>` / `>>`). The `.asd/` directory is strictly protected by the `PreToolUse` security hook.
+> - For ANY ASD state or `.asd/` operation, **ALWAYS** use the official `asd` CLI commands (`asd plan create|update|sync_from_md|get`, `asd dispatch`, `asd verify`, `asd debate`, `asd handoff`, `asd status`, `asd clean`) or official ASD MCP tools.
+> - If an operation on `.asd/` has **no corresponding official `asd` CLI command or MCP tool**, **IMMEDIATELY HALT** execution and explain the situation to the user rather than attempting direct file manipulation or workarounds.
+
 ## 1. The 5 Core Roles
 
 ASD v2.4.0 defines exactly five specialist subagent roles (`AGENT_ROLES`), synced per harness into `asd-<role>` personas using the harness's highest-priority model from `routing.jsonc`:
