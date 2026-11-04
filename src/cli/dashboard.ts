@@ -186,7 +186,8 @@ function writeModelsDiskCache(
 function execCliOutputAsync(
   command: string,
   args: string[],
-  timeoutMs = 3500
+  timeoutMs = 3500,
+  cwd?: string
 ): Promise<{ status: number | null; stdout: string }> {
   return new Promise((resolve) => {
     let settled = false;
@@ -203,6 +204,7 @@ function execCliOutputAsync(
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
         shell: resolved.shell,
+        ...(cwd ? { cwd } : {}),
       });
 
       const timer = setTimeout(() => {
@@ -510,7 +512,7 @@ export async function discoverHarnessModels(options?: {
       }
     });
 
-    const opencodeProbe = execCliOutputAsync("opencode", ["models"], 3500).then((res) => {
+    const opencodeProbe = execCliOutputAsync("opencode", ["models"], 3500, homeDir).then((res) => {
       if (res.status !== 0 || !res.stdout) return;
       const lines = res.stdout
         .split(/\r?\n/)
