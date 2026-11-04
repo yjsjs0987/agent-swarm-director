@@ -270,7 +270,7 @@ export async function discoverHarnessModels(options?: {
     "claude-code": new Set<string>(),
     codex: new Set<string>(),
     opencode: new Set<string>(),
-    cursor: new Set<string>(["auto"]),
+    cursor: new Set<string>(),
   };
 
   // 1. Antigravity: local `~/.gemini/antigravity-cli/settings.json`
