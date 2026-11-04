@@ -372,33 +372,81 @@ export async function discoverHarnessModels(options?: {
     // Ignore claude local scan errors
   }
 
-  // 4. OpenCode: scan `~/.config/opencode/opencode.json`
+  // 4. OpenCode: scan opencode.json, opencode.jsonc, agent/*.md, and ~/.asd/routing.jsonc
   try {
-    const opencodeJsonPath = path.join(homeDir, ".config", "opencode", "opencode.json");
-    if (fs.existsSync(opencodeJsonPath)) {
-      const ocObj = JSON.parse(fs.readFileSync(opencodeJsonPath, "utf8")) as {
-        model?: string;
-        small_model?: string;
-        provider?: Record<string, { models?: Record<string, unknown> }>;
-      };
-      if (typeof ocObj.model === "string" && ocObj.model.trim()) {
-        sets.opencode.add(ocObj.model.trim());
-      }
-      if (typeof ocObj.small_model === "string" && ocObj.small_model.trim()) {
-        sets.opencode.add(ocObj.small_model.trim());
-      }
-      if (ocObj.provider && typeof ocObj.provider === "object") {
-        for (const [provKey, provVal] of Object.entries(ocObj.provider)) {
-          if (provVal?.models && typeof provVal.models === "object") {
-            for (const mKey of Object.keys(provVal.models)) {
-              sets.opencode.add(`${provKey}/${mKey}`);
+    const parseOpencodeConfig = (cfgText: string) => {
+      try {
+        const cleaned = cfgText.replace(/\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g, "");
+        const ocObj = JSON.parse(cleaned) as {
+          model?: string;
+          small_model?: string;
+          provider?: Record<string, { models?: Record<string, unknown> }>;
+        };
+        if (typeof ocObj.model === "string" && ocObj.model.trim()) {
+          sets.opencode.add(ocObj.model.trim());
+        }
+        if (typeof ocObj.small_model === "string" && ocObj.small_model.trim()) {
+          sets.opencode.add(ocObj.small_model.trim());
+        }
+        if (ocObj.provider && typeof ocObj.provider === "object") {
+          for (const [provKey, provVal] of Object.entries(ocObj.provider)) {
+            if (provVal?.models && typeof provVal.models === "object") {
+              for (const mKey of Object.keys(provVal.models)) {
+                sets.opencode.add(`${provKey}/${mKey}`);
+              }
             }
+          }
+        }
+      } catch {
+        // ignore parse error
+      }
+    };
+
+    const ocJsonPath = path.join(homeDir, ".config", "opencode", "opencode.json");
+    if (fs.existsSync(ocJsonPath)) {
+      parseOpencodeConfig(fs.readFileSync(ocJsonPath, "utf8"));
+    }
+
+    const ocJsoncPath = path.join(homeDir, ".config", "opencode", "opencode.jsonc");
+    if (fs.existsSync(ocJsoncPath)) {
+      parseOpencodeConfig(fs.readFileSync(ocJsoncPath, "utf8"));
+    }
+
+    // Scan ~/.config/opencode/agent/*.md frontmatter for configured models
+    const agentDir = path.join(homeDir, ".config", "opencode", "agent");
+    if (fs.existsSync(agentDir)) {
+      for (const entry of fs.readdirSync(agentDir, { withFileTypes: true })) {
+        if (entry.isFile() && entry.name.endsWith(".md")) {
+          try {
+            const text = fs.readFileSync(path.join(agentDir, entry.name), "utf8");
+            const m = /^model:\s*["']?([^"'\r\n#]+)["']?/m.exec(text);
+            if (m?.[1]?.trim()) {
+              sets.opencode.add(m[1].trim());
+            }
+          } catch {
+            // ignore agent read error
           }
         }
       }
     }
+
+    // Scan global ~/.asd/routing.jsonc for opencode models
+    const globalRoutingPath = path.join(homeDir, ".asd", "routing.jsonc");
+    if (fs.existsSync(globalRoutingPath)) {
+      try {
+        const text = fs.readFileSync(globalRoutingPath, "utf8");
+        const matches = text.matchAll(/"harness"\s*:\s*"opencode"\s*,\s*"model"\s*:\s*"([^"]+)"/g);
+        for (const match of matches) {
+          if (match[1]?.trim()) {
+            sets.opencode.add(match[1].trim());
+          }
+        }
+      } catch {
+        // ignore routing read error
+      }
+    }
   } catch {
-    // Ignore opencode JSON scan errors
+    // Ignore opencode scan errors
   }
 
   // 5. Cursor: scan ~/.cursor/cli-config.json
