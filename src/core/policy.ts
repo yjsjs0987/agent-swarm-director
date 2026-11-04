@@ -520,7 +520,7 @@ export function evaluatePreToolUse(
             "Bash command blocked for subagent: targets protected .asd directory",
         };
       }
-      if (cmdLower.includes(".env")) {
+      if (/(?:^|[\s"'`=:/\\])\.env(?:\.[a-z0-9._-]+)?(?:[\s"'`;|&><)]|$)/i.test(cmdLower)) {
         return {
           allowed: false,
           reason: "Bash command blocked for subagent: targets protected .env file",

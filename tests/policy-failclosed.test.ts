@@ -683,4 +683,59 @@ describe("Bash .git and .asd boundary regex (P0 Issue 6b)", () => {
     );
     assert.equal(gitCloneUrl.allowed, true);
   });
+
+  test("blocks .env / .env.* file accesses while allowing process.env and import.meta.env (F12)", () => {
+    const rootDir = makeTmpDir();
+    const metaPath = path.join(rootDir, "meta.json");
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({
+        roleType: "subagent",
+        allowedFiles: ["src/"],
+        worktreePath: rootDir,
+      })
+    );
+    const env = {
+      ASD_SESSION_ROLE: "subagent",
+      ASD_SUBAGENT_META: metaPath,
+      ASD_PROJECT_ROOT: rootDir,
+    };
+
+    const blockedCommands = [
+      "cat .env",
+      "cat .ENV",
+      "cat .env.local",
+      "cat config/.env.production",
+      "cat .\\config\\.env",
+      "node --env-file=.env app.js",
+      'source ".env"',
+      "head '.env.test'",
+    ];
+
+    for (const command of blockedCommands) {
+      const res = evaluatePreToolUse(
+        { tool: "bash", command },
+        DEFAULT_HARNESS_TOOL_MANIFEST,
+        env
+      );
+      assert.equal(res.allowed, false, `Expected blocked command: ${command}`);
+      assert.match(res.reason ?? "", /protected \.env/i);
+    }
+
+    const allowedCommands = [
+      "grep process.env src/",
+      'rg "import.meta.env"',
+      'node -e "console.log(process.env.HOME)"',
+      "cat src/environment.ts",
+    ];
+
+    for (const command of allowedCommands) {
+      const res = evaluatePreToolUse(
+        { tool: "bash", command },
+        DEFAULT_HARNESS_TOOL_MANIFEST,
+        env
+      );
+      assert.equal(res.allowed, true, `Expected allowed command: ${command}`);
+    }
+  });
 });
