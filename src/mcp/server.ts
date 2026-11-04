@@ -43,7 +43,7 @@ import {
   linkHarnessSessionToAsdSession,
 } from "../core/session-tracker.ts";
 import { buildDefaultHarnessCommand, runDebateBroker } from "../core/debate.ts";
-import { checkProtectedPath, isPathAllowed } from "../core/policy.ts";
+import { checkProtectedPath, isPathAllowed, verifyChangedFilesBoundary } from "../core/policy.ts";
 import {
   atomicWriteFileSync,
   getForegroundSessionId,
@@ -93,9 +93,11 @@ import type {
   TaskTrack,
 } from "../core/types.ts";
 import {
+  cleanupWorktree,
   createTaskWorktree,
   getChangedFiles,
   prepareBaseline,
+  rollbackLightChanges,
   type TaskWorktreeInfo,
   verifyAndCommitLightTask,
   verifyAndMergeHeavyTask,
@@ -1301,8 +1303,12 @@ export class AsdMcpServer {
               dispatchMode: "parallel_spawn",
               ownerPid: process.pid,
               commandRunner: this.commandRunner,
-              timeoutMs: DEFAULT_DISPATCH_TIMEOUT_MS,
-              idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS,
+              timeoutMs:
+                Number.parseInt(process.env.ASD_SPAWN_TIMEOUT_MS || "", 10) ||
+                DEFAULT_DISPATCH_TIMEOUT_MS,
+              idleTimeoutMs:
+                Number.parseInt(process.env.ASD_SPAWN_IDLE_TIMEOUT_MS || "", 10) ||
+                DEFAULT_IDLE_TIMEOUT_MS,
               signal,
             });
           },
@@ -1314,6 +1320,61 @@ export class AsdMcpServer {
           model: run.model,
           modelFamily: run.modelFamily,
         };
+
+        const runnerFailed =
+          spawnResult.exitCode !== 0 ||
+          Boolean(spawnResult.timedOut) ||
+          Boolean(signal?.aborted);
+        if (runnerFailed) {
+          if (t.track === "LIGHT") {
+            const changed = getChangedFiles(this.projectRoot);
+            const scopedFiles =
+              allowedFiles.length === 0
+                ? [...changed]
+                : changed.filter(
+                    (file) =>
+                      verifyChangedFilesBoundary([file], allowedFiles, this.projectRoot).valid
+                  );
+            if (scopedFiles.length > 0) {
+              rollbackLightChanges(this.projectRoot, { files: scopedFiles });
+            }
+          } else if (t.track === "HEAVY" && wtInfo) {
+            cleanupWorktree(this.projectRoot, wtInfo.wtPath, wtInfo.branchName, {
+              forceBranchDelete: true,
+            });
+          }
+
+          const updated = this.db.recordTaskAttemptFailure(sessionId, t.task_id);
+          currentAttempts = updated.attempts;
+          const runnerErr = signal?.aborted
+            ? "Task execution aborted"
+            : spawnResult.timedOut
+              ? "Subagent execution timed out"
+              : `Subagent exited with code ${spawnResult.exitCode}`;
+
+          if (signal?.aborted || currentAttempts >= 3) {
+            if (signal?.aborted && updated.status !== "failed") {
+              this.db.updateTaskStatus(sessionId, t.task_id, "failed");
+            }
+            for (const sid of attemptedSubIds) {
+              finalizeSubagentArtifacts({
+                projectRoot: this.projectRoot,
+                sessionId,
+                subSessionId: sid,
+              });
+            }
+            finalResult = {
+              taskId: t.task_id,
+              status: "failed",
+              harness: activeRoute.harness,
+              model: activeRoute.model,
+              durationMs: spawnResult.durationMs,
+              error: runnerErr,
+            };
+            break;
+          }
+          continue;
+        }
 
         // Verification
         const effectiveAutoApprove =

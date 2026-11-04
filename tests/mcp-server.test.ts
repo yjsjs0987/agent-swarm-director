@@ -998,6 +998,242 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
       assert.equal(dispatchResp.results[0]?.harness, "opencode");
       assert.equal(dispatchResp.results[0]?.model, "qwen-2.5-coder");
     });
+
+    test("parallel_spawn never marks task or session done when runner fails on all attempts (F01)", async () => {
+      const projectRoot = makeProjectRoot();
+      // Write routing config with no extra fallbacks so each escalation attempt is 1 spawn
+      const asdDir = path.join(projectRoot, ".asd");
+      fs.mkdirSync(asdDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(asdDir, "routing.jsonc"),
+        JSON.stringify(
+          {
+            version: "2.2.0",
+            agents: {
+              worker: { harness: "opencode", model: "glm-5", modelFamily: "glm", fallbacks: [] },
+              architect: { harness: "claude-code", model: "claude-opus-4-6", modelFamily: "claude", fallbacks: [] },
+            },
+            categories: {
+              medium: { harness: "opencode", model: "glm-5", modelFamily: "glm", fallbacks: [] },
+              critical: { harness: "claude-code", model: "claude-opus-4-6", modelFamily: "claude", fallbacks: [] },
+            },
+          },
+          null,
+          2
+        ),
+        "utf8"
+      );
+
+      let spawnCalls = 0;
+      const mockRunner: CommandRunner = {
+        async run(_cmd, _args, opts) {
+          spawnCalls++;
+          opts.onSpawn?.(4444 + spawnCalls);
+          // Simulate partial broken write in LIGHT task before crashing with exitCode 1
+          if (opts.cwd) {
+            fs.writeFileSync(path.join(opts.cwd, "broken.ts"), `partial attempt ${spawnCalls}\n`, "utf8");
+          }
+          opts.onStderr("Fatal error: runner crashed\n");
+          return { exitCode: 1, pid: 4444 + spawnCalls };
+        },
+      };
+
+      const server = new AsdMcpServer({
+        projectRoot,
+        commandRunner: mockRunner,
+        autoSync: false,
+      });
+      openServers.push(server);
+
+      await server.handleRequest("asd_plan", {
+        action: "create",
+        sessionId: "dispatch-fail-f01",
+        mainHarness: "opencode",
+        tasks: [
+          {
+            taskId: "T1.1",
+            turn: 1,
+            title: "Task with crashing runner and no verifyCmd",
+            track: "LIGHT",
+            role: "worker",
+            category: "general",
+            difficulty: "medium",
+            targetFiles: ["broken.ts"],
+          },
+        ],
+      });
+
+      const dispatchResp = (await server.handleRequest("asd_dispatch", {
+        sessionId: "dispatch-fail-f01",
+        turn: 1,
+        mode: "parallel_spawn",
+      })) as AsdDispatchOutput;
+
+      // Must escalate across 3 attempts and end in status: "failed"
+      assert.equal(spawnCalls, 3);
+      assert.equal(dispatchResp.results.length, 1);
+      assert.equal(dispatchResp.results[0]?.taskId, "T1.1");
+      assert.equal(dispatchResp.results[0]?.status, "failed");
+      assert.ok(dispatchResp.results[0]?.error?.includes("Subagent exited with code 1"));
+
+      // Partial broken writes in LIGHT scope must be rolled back
+      assert.equal(fs.existsSync(path.join(projectRoot, "broken.ts")), false);
+
+      // DB task status must be "failed" with 3 attempts, and session phase must NOT be "done"
+      const db = openProjectDb(projectRoot);
+      const taskRow = db.getTask("dispatch-fail-f01", "T1.1");
+      const sessionRow = db.getSession("dispatch-fail-f01");
+      assert.equal(taskRow?.status, "failed");
+      assert.equal(taskRow?.attempts, 3);
+      assert.notEqual(sessionRow?.phase, "done");
+      db.close();
+    });
+
+    test("parallel_spawn marks task failed and does not complete session on timeout or AbortController cancellation (F01)", async () => {
+      const projectRoot = makeProjectRoot();
+      const asdDir = path.join(projectRoot, ".asd");
+      fs.mkdirSync(asdDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(asdDir, "routing.jsonc"),
+        JSON.stringify(
+          {
+            version: "2.2.0",
+            agents: {
+              worker: { harness: "opencode", model: "glm-5", modelFamily: "glm", fallbacks: [] },
+              architect: { harness: "claude-code", model: "claude-opus-4-6", modelFamily: "claude", fallbacks: [] },
+            },
+            categories: {
+              medium: { harness: "opencode", model: "glm-5", modelFamily: "glm", fallbacks: [] },
+              critical: { harness: "claude-code", model: "claude-opus-4-6", modelFamily: "claude", fallbacks: [] },
+            },
+          },
+          null,
+          2
+        ),
+        "utf8"
+      );
+
+      // Part A: AbortSignal cancellation stops immediately without marking done
+      const abortController = new AbortController();
+      let abortSpawnCalls = 0;
+      const abortRunner: CommandRunner = {
+        async run(_cmd, _args, opts) {
+          abortSpawnCalls++;
+          opts.onSpawn?.(5555);
+          abortController.abort();
+          return { exitCode: -1, pid: 5555 };
+        },
+      };
+
+      const abortServer = new AsdMcpServer({
+        projectRoot,
+        commandRunner: abortRunner,
+        autoSync: false,
+      });
+      openServers.push(abortServer);
+
+      await abortServer.handleRequest("asd_plan", {
+        action: "create",
+        sessionId: "dispatch-abort-f01",
+        mainHarness: "opencode",
+        tasks: [
+          {
+            taskId: "T1.1",
+            turn: 1,
+            title: "Task cancelled via AbortController",
+            track: "HEAVY",
+            role: "worker",
+            category: "general",
+            difficulty: "medium",
+            targetFiles: ["aborted.ts"],
+          },
+        ],
+      });
+
+      const abortResp = await abortServer.handleDispatch(
+        {
+          sessionId: "dispatch-abort-f01",
+          turn: 1,
+          mode: "parallel_spawn",
+        },
+        abortController.signal
+      );
+
+      assert.equal(abortSpawnCalls, 1, "Aborted task must not continue escalating");
+      assert.equal(abortResp.results[0]?.status, "failed");
+      assert.ok(abortResp.results[0]?.error?.includes("aborted"));
+
+      // Worktree must be cleaned up on HEAVY abort
+      assert.equal(fs.existsSync(path.join(projectRoot, ".asd", "wt", "1-T1.1")), false);
+
+      const db1 = openProjectDb(projectRoot);
+      assert.equal(db1.getTask("dispatch-abort-f01", "T1.1")?.status, "failed");
+      assert.notEqual(db1.getSession("dispatch-abort-f01")?.phase, "done");
+      db1.close();
+
+      // Part B: Timeout (via ASD_SPAWN_TIMEOUT_MS) marks task failed and never done
+      const prevTimeout = process.env.ASD_SPAWN_TIMEOUT_MS;
+      process.env.ASD_SPAWN_TIMEOUT_MS = "30";
+      try {
+        const timeoutRunner: CommandRunner = {
+          async run(_cmd, _args, opts) {
+            opts.onSpawn?.(6666);
+            return await new Promise<{ exitCode: number; pid: number }>((resolve) => {
+              const t = setTimeout(() => resolve({ exitCode: 0, pid: 6666 }), 5000);
+              t.unref?.();
+              opts.signal?.addEventListener("abort", () => {
+                clearTimeout(t);
+                resolve({ exitCode: 1, pid: 6666 });
+              });
+            });
+          },
+        };
+
+        const timeoutServer = new AsdMcpServer({
+          projectRoot,
+          commandRunner: timeoutRunner,
+          autoSync: false,
+        });
+        openServers.push(timeoutServer);
+
+        await timeoutServer.handleRequest("asd_plan", {
+          action: "create",
+          sessionId: "dispatch-timeout-f01",
+          mainHarness: "opencode",
+          tasks: [
+            {
+              taskId: "T1.1",
+              turn: 1,
+              title: "Task timing out",
+              track: "LIGHT",
+              role: "worker",
+              category: "general",
+              difficulty: "medium",
+              targetFiles: ["timeout.ts"],
+            },
+          ],
+        });
+
+        const timeoutResp = (await timeoutServer.handleRequest("asd_dispatch", {
+          sessionId: "dispatch-timeout-f01",
+          turn: 1,
+          mode: "parallel_spawn",
+        })) as AsdDispatchOutput;
+
+        assert.equal(timeoutResp.results[0]?.status, "failed");
+        assert.ok(timeoutResp.results[0]?.error?.includes("timed out"));
+        const db2 = openProjectDb(projectRoot);
+        assert.equal(db2.getTask("dispatch-timeout-f01", "T1.1")?.status, "failed");
+        assert.notEqual(db2.getSession("dispatch-timeout-f01")?.phase, "done");
+        db2.close();
+      } finally {
+        if (prevTimeout === undefined) {
+          delete process.env.ASD_SPAWN_TIMEOUT_MS;
+        } else {
+          process.env.ASD_SPAWN_TIMEOUT_MS = prevTimeout;
+        }
+      }
+    });
   });
 
   describe("5. asd_verify Tool", () => {
