@@ -61,7 +61,7 @@ import {
   type PreToolUsePayload,
   type StopHookPayload,
 } from "../core/policy.ts";
-import { renderProgressBoard } from "../core/render.ts";
+import { getForegroundSessionId, renderProgressBoard } from "../core/render.ts";
 import {
   ASD_VERSION,
   type HarnessId,
@@ -285,6 +285,24 @@ export { getAdapter };
 
 export function getLatestSession(db: SqliteDriver): SessionRow | undefined {
   return db.getLatestSession();
+}
+
+export function resolveDefaultSession(
+  db: SqliteDriver,
+  projectRoot: string,
+  homeDir?: string
+): SessionRow | undefined {
+  const paths = resolveAsdPaths(projectRoot, homeDir);
+  const fgId = getForegroundSessionId(projectRoot, paths.planMdPath);
+  const fgSession = fgId ? db.getSession(fgId) : undefined;
+  if (fgSession && fgSession.phase !== "done") {
+    return fgSession;
+  }
+  const latest = db.getLatestSession();
+  if (fgSession && (!latest || latest.phase === "done")) {
+    return fgSession;
+  }
+  return latest ?? fgSession;
 }
 
 // ============================================================================
@@ -534,7 +552,7 @@ export function runAsdClean(options?: {
       const paths = resolveAsdPaths(projectRoot, homeDir);
       if (fs.existsSync(paths.dbPath)) {
         db = openProjectDb(projectRoot, homeDir);
-        const session = getLatestSession(db);
+        const session = resolveDefaultSession(db, projectRoot, homeDir);
         if (session && session.stashed_work_sha) {
           stashSha = session.stashed_work_sha;
 
@@ -770,7 +788,7 @@ export async function main(
           let db: SqliteDriver | undefined;
           try {
             db = openProjectDb(projectRoot, homeDir);
-            session = getLatestSession(db);
+            session = resolveDefaultSession(db, projectRoot, homeDir);
             if (session) {
               tasks = db.getSessionTasks(session.session_id);
             }

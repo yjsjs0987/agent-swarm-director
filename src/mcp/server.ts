@@ -659,6 +659,38 @@ export class AsdMcpServer {
   }
 
   // ==========================================================================
+  // Default Session Resolver (Foreground-first)
+  // ==========================================================================
+
+  private resolveImplicitSessionId(options?: {
+    mutating?: boolean;
+    action?: string;
+  }): string | undefined {
+    const paths = resolveAsdPaths(this.projectRoot, this.homeDir);
+    const fgId = getForegroundSessionId(this.projectRoot, paths.planMdPath);
+    const fgSession = fgId ? this.db.getSession(fgId) : undefined;
+    const latest = this.db.getLatestSession();
+    const mutating = options?.mutating ?? false;
+
+    if (fgSession && fgSession.phase !== "done") {
+      return fgSession.session_id;
+    }
+
+    if (mutating) {
+      if (latest && latest.phase !== "done") {
+        return latest.session_id;
+      }
+      return generateAsdSessionId();
+    }
+
+    if (fgSession) {
+      return fgSession.session_id;
+    }
+
+    return latest?.session_id;
+  }
+
+  // ==========================================================================
   // Tool 1: asd_plan
   // ==========================================================================
 
@@ -667,22 +699,44 @@ export class AsdMcpServer {
       throw new Error("Subagents cannot invoke orchestration tools");
     }
     const action = input.action;
-    let sessionId = input.sessionId;
+    const paths = resolveAsdPaths(this.projectRoot, this.homeDir);
+    let sessionId = input.sessionId?.trim() || "";
 
-    if (!sessionId || sessionId.trim() === "") {
-      // Implicit session selection: mutating actions must never touch a
-      // completed session — start a fresh one instead (read-only 'get' may
-      // still reuse the latest session for status display).
-      const latest = this.db.getLatestSession();
+    if (!sessionId) {
       const mutating =
         action === "create" || action === "update" || action === "sync_from_md";
-      if (latest && mutating && latest.phase === "done") {
-        sessionId = generateAsdSessionId();
-      } else {
-        sessionId = latest?.session_id || generateAsdSessionId();
-      }
+      sessionId =
+        this.resolveImplicitSessionId({ mutating, action }) ?? "";
     } else if (!isValidAsdSessionId(sessionId)) {
       throw new Error("INVALID_SESSION_ID");
+    }
+
+    if (action === "get") {
+      const sessionRow = sessionId ? this.db.getSession(sessionId) : undefined;
+      if (!sessionRow) {
+        return {
+          sessionId,
+          stateVersion: 0,
+          phase: "planning",
+          tasks: [],
+          planMdPath: paths.planMdPath,
+          foreground: false,
+          progressBoard: renderProgressBoard(null, []),
+        };
+      }
+      const taskRows = this.db.getSessionTasks(sessionRow.session_id);
+      const currentFgId = getForegroundSessionId(this.projectRoot, paths.planMdPath);
+      const foreground = !currentFgId || currentFgId === sessionRow.session_id;
+      const progressBoard = renderProgressBoard(sessionRow, taskRows);
+      return {
+        sessionId: sessionRow.session_id,
+        stateVersion: sessionRow.state_version,
+        phase: sessionRow.phase as SessionPhase,
+        tasks: taskRows.map(formatTaskForOutput),
+        planMdPath: paths.planMdPath,
+        foreground,
+        progressBoard,
+      };
     }
 
     // Ensure session exists
@@ -698,8 +752,6 @@ export class AsdMcpServer {
         autoApprove: input.autoApprove,
       });
     }
-
-    const paths = resolveAsdPaths(this.projectRoot, this.homeDir);
 
     if (action === "create" || action === "update") {
       if (input.tasks && input.tasks.length > 0) {
@@ -845,7 +897,7 @@ export class AsdMcpServer {
     }
     const sessionId =
       input.sessionId?.trim() ||
-      this.db.getLatestSession()?.session_id ||
+      this.resolveImplicitSessionId({ mutating: false, action: "dispatch" }) ||
       input.sessionId;
     let sessionRow = this.db.getSession(sessionId);
     if (!sessionRow) {
@@ -1769,7 +1821,7 @@ export class AsdMcpServer {
     const { taskId, doneClaim, verifyCmd } = input;
     const sessionId =
       input.sessionId?.trim() ||
-      this.db.getLatestSession()?.session_id ||
+      this.resolveImplicitSessionId({ mutating: false, action: "verify" }) ||
       input.sessionId;
     let sessionRow = this.db.getSession(sessionId);
     if (!sessionRow) {
@@ -1938,10 +1990,19 @@ export class AsdMcpServer {
     let sessionId = input.sessionId?.trim() || "";
     if (!sessionId) {
       if (input.taskId) {
-        const latest = this.db.getLatestSession();
-        sessionId = latest?.session_id || `${Date.now()}-debate`;
+        sessionId =
+          this.resolveImplicitSessionId({ mutating: false, action: "debate" }) ||
+          `${Date.now()}-debate`;
       } else {
-        sessionId = `${Date.now()}-debate`;
+        const fgId = getForegroundSessionId(
+          this.projectRoot,
+          resolveAsdPaths(this.projectRoot, this.homeDir).planMdPath
+        );
+        const fgSession = fgId ? this.db.getSession(fgId) : undefined;
+        sessionId =
+          fgSession && fgSession.phase !== "done"
+            ? fgSession.session_id
+            : `${Date.now()}-debate`;
       }
     }
     let progressStep = 0;

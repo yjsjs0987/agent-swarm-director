@@ -657,6 +657,50 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
       assert.notEqual(newSession.phase, "done");
       dbAfter.close();
     });
+
+    test("action: 'get' does not overwrite manual edits in .asd/PLAN.md or mutate DB/main.json (F04)", async () => {
+      const projectRoot = makeProjectRoot();
+      const server = new AsdMcpServer({ projectRoot, autoSync: false });
+      openServers.push(server);
+
+      await server.handleRequest("asd_plan", {
+        action: "create",
+        sessionId: "sess-readonly-get",
+        tasks: [
+          { taskId: "T1.1", turn: 1, title: "Original Task Title", track: "LIGHT", targetFiles: ["src/a.ts"] },
+        ],
+      });
+
+      const planMdPath = path.join(projectRoot, ".asd", "PLAN.md");
+      const mainJsonPath = path.join(projectRoot, ".asd", "sessions", "sess-readonly-get", "main.json");
+      const originalMainJson = fs.readFileSync(mainJsonPath, "utf8");
+      fs.writeFileSync(mainJsonPath, '{"sentinel":true}\n', "utf8");
+
+      const manualEditContent = fs
+        .readFileSync(planMdPath, "utf8")
+        .replace("Original Task Title", "Manually Edited Title In Markdown");
+      fs.writeFileSync(planMdPath, manualEditContent, "utf8");
+
+      const getResp = (await server.handleRequest("asd_plan", {
+        action: "get",
+      })) as AsdPlanOutput;
+
+      assert.equal(getResp.sessionId, "sess-readonly-get");
+      assert.equal(getResp.stateVersion, 1);
+      assert.equal(getResp.tasks[0]?.title, "Original Task Title");
+      // Manual edit in PLAN.md must still be intact before sync_from_md!
+      assert.equal(fs.readFileSync(planMdPath, "utf8"), manualEditContent);
+      // main.json was not overwritten by get
+      assert.equal(fs.readFileSync(mainJsonPath, "utf8"), '{"sentinel":true}\n');
+      fs.writeFileSync(mainJsonPath, originalMainJson, "utf8");
+
+      // Now sync_from_md picks up the preserved manual edit
+      const syncResp = (await server.handleRequest("asd_plan", {
+        action: "sync_from_md",
+      })) as AsdPlanOutput;
+      assert.equal(syncResp.tasks[0]?.title, "Manually Edited Title In Markdown");
+      assert.equal(syncResp.stateVersion, 2);
+    });
   });
 
   describe("4. asd_dispatch Tool", () => {
