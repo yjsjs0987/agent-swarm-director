@@ -8,6 +8,7 @@ import { openProjectDb } from "../src/core/db.ts";
 import {
   buildSessionDemotion,
   discoverProjectCliSessions,
+  getCliRecentSessionsPath,
   linkHarnessSessionToAsdSession,
   listKnownProjects,
   promoteCliSessionToAsd,
@@ -362,6 +363,80 @@ test("T2.3: discoverProjectCliSessions finds CLI sessions even without .asd dir 
       assert.equal(deleted, true);
       assert.equal(db.getSession(promo.asdSessionId), undefined);
       assert.equal(db.listDrivers(promo.asdSessionId).length, 0);
+    } finally {
+      db.close();
+    }
+  } finally {
+    fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("T5.1: discoverProjectCliSessions enriches from core.db harness_session_id when cli-recent.json is absent", () => {
+  const homeDir = makeTempDir("asd-t51-home-");
+  const projectRoot = makeTempDir("asd-t51-proj-");
+  try {
+    // 1. Create a local Claude Code transcript for projectRoot
+    const encodedDir = projectRoot.replace(/[:\\/]/g, "-");
+    const claudeDir = path.join(homeDir, ".claude", "projects", encodedDir);
+    fs.mkdirSync(claudeDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(claudeDir, "cc-db-enrich-601.jsonl"),
+      JSON.stringify({
+        type: "user",
+        cwd: projectRoot,
+        message: { role: "user", content: "Transcript session to enrich from DB" },
+      }) + "\n",
+      "utf8"
+    );
+
+    const db = openProjectDb(projectRoot, homeDir);
+    try {
+      // Link existing transcript session in core.db
+      db.createOrGetSession({
+        sessionId: "asd-20261104-170000-db01",
+        projectRoot,
+        mainHarness: "claude-code",
+        mainModel: "claude-sonnet-4-6",
+        harnessSessionId: "cc-db-enrich-601",
+        memo: "DB memo for cc-db-enrich-601",
+      });
+
+      // Also create a DB-only linked session (no local transcript file and no cli-recent.json)
+      db.createOrGetSession({
+        sessionId: "asd-20261104-170100-db02",
+        projectRoot,
+        mainHarness: "codex",
+        mainModel: "gpt-5.4",
+        harnessSessionId: "codex-db-only-602",
+        memo: "DB-only linked Codex session",
+      });
+
+      // Ensure cli-recent.json does not exist
+      const recentPath = getCliRecentSessionsPath(projectRoot);
+      if (fs.existsSync(recentPath)) {
+        fs.unlinkSync(recentPath);
+      }
+
+      const discovered = discoverProjectCliSessions(projectRoot, {
+        homeDir,
+        db,
+        persist: false,
+      });
+
+      const byHarnessId = new Map(discovered.map((s) => [s.harnessSessionId, s]));
+
+      const enrichedTranscript = byHarnessId.get("cc-db-enrich-601");
+      assert.ok(enrichedTranscript, "Expected transcript session cc-db-enrich-601 to be discovered");
+      assert.equal(enrichedTranscript.asdSessionId, "asd-20261104-170000-db01");
+      assert.equal(enrichedTranscript.model, "claude-sonnet-4-6");
+
+      const dbOnly = byHarnessId.get("codex-db-only-602");
+      assert.ok(dbOnly, "Expected DB-only session codex-db-only-602 to be returned from core.db");
+      assert.equal(dbOnly.harness, "codex");
+      assert.equal(dbOnly.asdSessionId, "asd-20261104-170100-db02");
+      assert.equal(dbOnly.model, "gpt-5.4");
+      assert.equal(dbOnly.summary, "DB-only linked Codex session");
     } finally {
       db.close();
     }

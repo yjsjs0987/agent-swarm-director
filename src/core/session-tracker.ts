@@ -2133,8 +2133,9 @@ export function discoverProjectCliSessions(
     if (db) {
       const sessions = db.listSessions();
       for (const s of sessions) {
-        if (s.main_harness_session_id && (!harnessFilter || harnessFilter.has(s.main_harness))) {
-          const key = `${s.main_harness}::${s.main_harness_session_id}`;
+        const mainHarness = s.main_harness as HarnessId;
+        if (s.harness_session_id && (!harnessFilter || harnessFilter.has(mainHarness))) {
+          const key = `${mainHarness}::${s.harness_session_id}`;
           const existing = byKey.get(key);
           if (existing) {
             if (!existing.asdSessionId) existing.asdSessionId = s.session_id;
@@ -2142,10 +2143,10 @@ export function discoverProjectCliSessions(
             if (!existing.summary && s.memo) existing.summary = s.memo;
           } else {
             byKey.set(key, {
-              harnessSessionId: s.main_harness_session_id,
-              harness: s.main_harness,
+              harnessSessionId: s.harness_session_id,
+              harness: mainHarness,
               model: s.main_model ?? null,
-              summary: s.memo || `${s.main_harness} session (${s.main_harness_session_id.slice(0, 8)})`,
+              summary: s.memo || `${mainHarness} session (${s.harness_session_id.slice(0, 8)})`,
               transcriptPath: null,
               asdSessionId: s.session_id,
               projectRoot: resolvedRoot,
