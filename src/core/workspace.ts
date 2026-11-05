@@ -1825,10 +1825,10 @@ export function recoverOrphanedTasks(input: {
         shouldFail = true;
       }
     } else {
-      // Legacy or missing meta / dispatchMode: fail only if pid is dead and startedAt > 24h ago
-      const startedAt = typeof meta?.startedAt === "number" ? meta.startedAt : 0;
+      // Legacy or missing meta / dispatchMode: fail only if meta has a recorded startedAt > 24h ago and pid is dead
+      const startedAt = typeof meta?.startedAt === "number" ? meta.startedAt : undefined;
       const twentyFourHoursMs = 24 * 60 * 60 * 1000;
-      if (!subAlive && now - startedAt > twentyFourHoursMs) {
+      if (!subAlive && startedAt !== undefined && startedAt > 0 && now - startedAt > twentyFourHoursMs) {
         shouldFail = true;
       }
     }

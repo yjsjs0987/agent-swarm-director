@@ -97,6 +97,7 @@ import {
   createTaskWorktree,
   getChangedFiles,
   prepareBaseline,
+  recoverOrphanedTasks,
   rollbackLightChanges,
   type TaskWorktreeInfo,
   verifyAndCommitLightTask,
@@ -926,6 +927,7 @@ export class AsdMcpServer {
     const session = sessionRow;
     // Baseline prep: ensure git baseline exists
     prepareBaseline(this.projectRoot, { sessionId, db: this.db });
+    recoverOrphanedTasks({ db: this.db, projectRoot: this.projectRoot, sessionId });
 
     const allTasks = this.db.getSessionTasks(sessionId);
 

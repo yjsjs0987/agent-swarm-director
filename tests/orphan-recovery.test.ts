@@ -293,3 +293,89 @@ test("CR-12: concurrent handleDispatch calls claim and execute each task at most
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("F07: handleDispatch automatically recovers dead parallel_spawn tasks and re-dispatches them without manual recoverOrphanedTasks call", async () => {
+  const root = makeTempGitRepo("asd-orphan-f07-");
+  try {
+    const db = openProjectDb(root);
+    const sessionId = "asd-20261105-095000-f07a";
+    let spawnCount = 0;
+
+    const server = new AsdMcpServer({
+      db,
+      projectRoot: root,
+      autoSync: false,
+      commandRunner: {
+        async run(_cmd, _args, opts) {
+          spawnCount++;
+          fs.writeFileSync(path.join(opts.cwd, "recovered.txt"), "recovered work\n", "utf8");
+          opts.onStdout?.("ok\n");
+          return { exitCode: 0, pid: 77777 };
+        },
+      },
+    });
+
+    await server.handlePlan({
+      action: "create",
+      sessionId,
+      projectRoot: root,
+      mainHarness: "claude-code",
+      tasks: [
+        {
+          taskId: "T1.1",
+          turn: 1,
+          title: "Crashed parallel task to recover on next dispatch",
+          role: "worker",
+          track: "HEAVY",
+          targetFiles: ["recovered.txt"],
+          verifyCmd: "",
+        },
+      ],
+    });
+
+    // Simulate a previous crash: task is stuck in 'running' with dead pid and dead ownerPid
+    const wt = createTaskWorktree(root, 1, "T1.1");
+    const deadSubId = "sub-1-T1.1-worker-codex";
+    db.updateTaskStatus(sessionId, "T1.1", "running", {
+      worktreePath: wt.wtPath,
+      subSessionId: deadSubId,
+    });
+    const subDir = path.join(root, ".asd", "sessions", sessionId, "subagents", deadSubId);
+    fs.mkdirSync(subDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(subDir, "meta.json"),
+      JSON.stringify({
+        subSessionId: deadSubId,
+        parentSessionId: sessionId,
+        taskId: "T1.1",
+        turn: 1,
+        role: "worker",
+        harness: "codex",
+        model: "gpt-5.4",
+        pid: 999981,
+        ownerPid: 999982,
+        dispatchMode: "parallel_spawn",
+        startedAt: Date.now() - 10_000,
+        status: "running",
+      }),
+      "utf8"
+    );
+
+    // Calling handleDispatch directly (without manual recoverOrphanedTasks) must recover T1.1 -> failed -> re-claim -> done
+    const dispRes = await server.handleDispatch({
+      sessionId,
+      turn: 1,
+      mode: "parallel_spawn",
+    });
+
+    assert.equal(spawnCount, 1);
+    assert.equal(dispRes.results.length, 1);
+    assert.equal(dispRes.results[0]?.taskId, "T1.1");
+    assert.equal(dispRes.results[0]?.status, "done");
+    assert.equal(db.getTask(sessionId, "T1.1")?.status, "done");
+
+    db.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
