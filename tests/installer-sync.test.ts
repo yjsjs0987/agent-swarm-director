@@ -26,6 +26,7 @@ import {
   runAsdDoctor,
   runAsdSync,
   runAsdUninstall,
+  syncAgentModelsIfNeeded,
   syncHarnessConfigs,
   syncRepoVersionStrings,
   uninstallHarnessConfigs,
@@ -726,6 +727,34 @@ test("v2.4.2 Auto-Migration: syncHarnessConfigs upgrades legacy (< 2.4.2) ~/.asd
       migrated.categories.general.model,
       "nvidia/z-ai/glm-5.3-flash",
       "User custom categories.general must be preserved intact"
+    );
+
+    // Verify syncAgentModelsIfNeeded updates Claude Code & OpenCode agent .md model: immediately when routing.jsonc is edited
+    migrated.lightSubagents["claude-code"] = {
+      worker: { model: "haiku", fallbacks: ["sonnet"] },
+      defaultModel: "haiku",
+    };
+    migrated.lightSubagents.opencode = {
+      worker: { model: "nvidia/deepseek-ai/deepseek-v4.1-flash", fallbacks: ["nvidia/z-ai/glm-5.3-flash"] },
+      defaultModel: "nvidia/deepseek-ai/deepseek-v4.1-flash",
+    };
+    fs.writeFileSync(routingPath, JSON.stringify(migrated, null, 2), "utf8");
+
+    const refreshRes = syncAgentModelsIfNeeded({ homeDir: migHome });
+    assert.equal(refreshRes.updated, true);
+
+    const claudeWorkerMd = fs.readFileSync(
+      path.join(migHome, ".claude", "agents", "asd-worker.md"),
+      "utf8"
+    );
+    const opencodeWorkerMd = fs.readFileSync(
+      path.join(migHome, ".config", "opencode", "agent", "asd-worker.md"),
+      "utf8"
+    );
+    assert.ok(claudeWorkerMd.includes("model: haiku"), "Claude Code asd-worker.md must immediately reflect model: haiku");
+    assert.ok(
+      opencodeWorkerMd.includes("model: nvidia/deepseek-ai/deepseek-v4.1-flash"),
+      "OpenCode asd-worker.md must immediately reflect model: nvidia/deepseek-ai/deepseek-v4.1-flash"
     );
   } finally {
     removeTempDir(migHome);

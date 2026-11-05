@@ -1587,6 +1587,129 @@ export async function autoSyncIfNeeded(options?: AutoSyncOptions): Promise<AutoS
   };
 }
 
+/**
+ * Lightweight, sub-5ms synchronizer that refreshes `model:` and `**Fallbacks**`
+ * in global agent markdown files (`~/.claude/agents/asd-<role>.md`,
+ * `~/.config/opencode/agent/asd-<role>.md`, `~/.gemini/config/agents/asd-<role>.md`,
+ * `~/.cursor/agents/asd-<role>.md`, and `AGENTS.md`) whenever `routing.jsonc`
+ * (global or project-local) has changed.
+ *
+ * Called automatically during `asd plan`, `asd dispatch`, and `saveProjectRoutingConfig`
+ * so edits to `routing.jsonc` take effect immediately in LIGHT mode without requiring
+ * a manual `asd sync`.
+ */
+export function syncAgentModelsIfNeeded(options?: {
+  homeDir?: string;
+  projectRoot?: string;
+  force?: boolean;
+}): { updated: boolean; filesWritten: string[] } {
+  if (process.env.ASD_SESSION_ROLE === "subagent") {
+    return { updated: false, filesWritten: [] };
+  }
+
+  const homeDir = resolveHome(options?.homeDir);
+  const localRoutingPath = options?.projectRoot
+    ? path.join(options.projectRoot, ".asd", "routing.jsonc")
+    : null;
+  const globalRoutingPath = path.join(homeDir, ".asd", "routing.jsonc");
+
+  const hasLocal = Boolean(localRoutingPath && fs.existsSync(localRoutingPath));
+  const hasGlobal = fs.existsSync(globalRoutingPath);
+  if (!hasLocal && !hasGlobal && !options?.force) {
+    return { updated: false, filesWritten: [] };
+  }
+
+  const activeRoutingPath = hasLocal ? localRoutingPath! : globalRoutingPath;
+  let rawRouting = "";
+  let routingConfig: RoutingConfig | null = null;
+  try {
+    if (fs.existsSync(activeRoutingPath)) {
+      rawRouting = fs.readFileSync(activeRoutingPath, "utf8");
+      routingConfig = parseJsonc<RoutingConfig>(rawRouting);
+    }
+  } catch {
+    routingConfig = null;
+  }
+
+  const hash = crypto
+    .createHash("sha256")
+    .update(ASD_VERSION)
+    .update(activeRoutingPath)
+    .update(rawRouting)
+    .digest("hex");
+
+  const hashFile = path.join(homeDir, ".asd", "state", "last-routing-hash.txt");
+  if (!options?.force && fs.existsSync(hashFile)) {
+    try {
+      if (fs.readFileSync(hashFile, "utf8").trim() === hash) {
+        return { updated: false, filesWritten: [] };
+      }
+    } catch {
+      // ignore read error
+    }
+  }
+
+  const filesWritten: string[] = [];
+  const writeIfChanged = (filePath: string, nextContent: string) => {
+    try {
+      if (fs.existsSync(filePath)) {
+        const cur = fs.readFileSync(filePath, "utf8");
+        if (cur === nextContent) return;
+      }
+      safeWriteText(filePath, nextContent);
+      filesWritten.push(filePath);
+    } catch {
+      // ignore write error
+    }
+  };
+
+  const harnessAgentTargets: Array<{ harnessId: HarnessId; dirPath: string }> = [
+    { harnessId: "claude-code", dirPath: path.join(homeDir, ".claude", "agents") },
+    { harnessId: "opencode", dirPath: path.join(homeDir, ".config", "opencode", "agent") },
+    { harnessId: "antigravity", dirPath: path.join(homeDir, ".gemini", "config", "agents") },
+    { harnessId: "cursor", dirPath: path.join(homeDir, ".cursor", "agents") },
+  ];
+
+  const hasSyncedOnce = fs.existsSync(path.join(homeDir, ".asd", "state", "last-sync.json"));
+
+  for (const { harnessId, dirPath } of harnessAgentTargets) {
+    if (!options?.force && !hasSyncedOnce && !fs.existsSync(dirPath)) continue;
+    for (const role of AGENT_ROLES) {
+      const route = resolveLightSubagentRoute(harnessId, role, routingConfig);
+      const content = generateAgentContent(role, {
+        harnessId,
+        model: route?.model,
+        fallbacks: route?.fallbacks.map((f) => f.model),
+      });
+      writeIfChanged(path.join(dirPath, `asd-${role}.md`), content);
+    }
+  }
+
+  const opencodeDir = path.join(homeDir, ".config", "opencode");
+  if (options?.force || hasSyncedOnce || fs.existsSync(path.join(opencodeDir, "AGENTS.md"))) {
+    writeIfChanged(
+      path.join(opencodeDir, "AGENTS.md"),
+      generateAllAgentsMarkdown(routingConfig, "opencode")
+    );
+  }
+
+  const codexDir = path.join(homeDir, ".codex");
+  if (options?.force || hasSyncedOnce || fs.existsSync(path.join(codexDir, "AGENTS.md"))) {
+    writeIfChanged(
+      path.join(codexDir, "AGENTS.md"),
+      generateAllAgentsMarkdown(routingConfig, "codex")
+    );
+  }
+
+  try {
+    safeWriteText(hashFile, `${hash}\n`);
+  } catch {
+    // ignore
+  }
+
+  return { updated: filesWritten.length > 0, filesWritten };
+}
+
 // ============================================================================
 // Surgical Rollback: uninstallHarnessConfigs / runAsdUninstall
 // ============================================================================

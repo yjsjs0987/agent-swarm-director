@@ -34,7 +34,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { autoSyncIfNeeded } from "../adapters/installer.ts";
+import { autoSyncIfNeeded, syncAgentModelsIfNeeded } from "../adapters/installer.ts";
 import { loadRoutingConfig, resolveAsdPaths } from "../core/config.ts";
 import { openProjectDb, type SessionRow, type SqliteDriver, type TaskRow } from "../core/db.ts";
 import {
@@ -767,6 +767,8 @@ export class AsdMcpServer {
       };
     }
 
+    // Refresh agent markdown model definitions if routing.jsonc changed
+    syncAgentModelsIfNeeded({ homeDir: this.homeDir, projectRoot: this.projectRoot });
     // Ensure session exists
     let sessionRow = this.db.getSession(sessionId);
     if (!sessionRow) {
@@ -950,6 +952,8 @@ export class AsdMcpServer {
     }
 
     const session = sessionRow;
+    // Refresh agent markdown model definitions if routing.jsonc changed
+    syncAgentModelsIfNeeded({ homeDir: this.homeDir, projectRoot: this.projectRoot });
     // Baseline prep: ensure git baseline exists
     prepareBaseline(this.projectRoot, { sessionId, db: this.db });
     recoverOrphanedTasks({ db: this.db, projectRoot: this.projectRoot, sessionId });

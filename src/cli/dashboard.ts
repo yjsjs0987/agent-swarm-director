@@ -26,7 +26,7 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { runAsdDoctor } from "../adapters/installer.ts";
+import { runAsdDoctor, syncAgentModelsIfNeeded } from "../adapters/installer.ts";
 import { loadRoutingConfig, resolveAsdPaths } from "../core/config.ts";
 import {
   type DebateRow,
@@ -702,6 +702,7 @@ export function saveProjectRoutingConfig(options: {
     if (fs.existsSync(paths.localRoutingPath)) {
       fs.unlinkSync(paths.localRoutingPath);
     }
+    syncAgentModelsIfNeeded({ homeDir: options.homeDir, projectRoot, force: true });
     const effective = loadRoutingConfig(projectRoot, options.homeDir);
     return {
       ok: true,
@@ -717,6 +718,9 @@ export function saveProjectRoutingConfig(options: {
 
   const normalizedConfig: RoutingConfig = {
     _asdVersion: options.routingConfig._asdVersion || ASD_VERSION,
+    ...(options.routingConfig.lightSubagents
+      ? { lightSubagents: options.routingConfig.lightSubagents }
+      : {}),
     agents: { ...(options.routingConfig.agents ?? {}) } as RoutingConfig["agents"],
     categories: { ...(options.routingConfig.categories ?? {}) },
   };
@@ -744,6 +748,7 @@ export function saveProjectRoutingConfig(options: {
     JSON.stringify(normalizedConfig, null, 2) +
     "\n";
   atomicWriteFileSync(paths.localRoutingPath, content);
+  syncAgentModelsIfNeeded({ homeDir: options.homeDir, projectRoot, force: true });
 
   return {
     ok: true,
