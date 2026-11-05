@@ -921,6 +921,34 @@ export function verifyAndCommitLightTask(
     }
   }
 
+  // Re-evaluate changed files after verifyCmd (which might have generated/mutated files)
+  let postChangedFiles = getChangedFiles(projectRoot);
+  const postPartition = partitionFilesByScope(
+    postChangedFiles,
+    allowedFiles,
+    projectRoot
+  );
+  const postCheck = checkChangedFilesAndSecrets(
+    postChangedFiles,
+    allowedFiles,
+    projectRoot
+  );
+  if (!postCheck.valid) {
+    rollbackLightChanges(projectRoot, { files: postPartition.scopedFiles });
+    if (db && sessionId) {
+      db.updateTaskStatus(sessionId, taskId, "failed");
+    }
+    return {
+      verified: false,
+      status: "failed",
+      rollbackPerformed: true,
+      violations: postCheck.violations,
+      error: "Post-verification boundary or secret check failed",
+      changedFiles: postChangedFiles,
+      untouchedFiles: postPartition.untouchedFiles,
+    };
+  }
+
   // 2b. Manual Approval Gate: if autoApprove is false, pause at 'verifying' before committing
   if (autoApprove === false) {
     if (db && sessionId) {
@@ -931,7 +959,7 @@ export function verifyAndCommitLightTask(
       status: "verifying",
       pendingApproval: true,
       rollbackPerformed: false,
-      changedFiles,
+      changedFiles: postChangedFiles,
     };
   }
 
@@ -940,20 +968,65 @@ export function verifyAndCommitLightTask(
     projectRoot,
     `verifyAndCommitLightTask:${taskId}`,
     (): VerifyTaskResult | null => {
-      if (changedFiles.length > 0) {
-        runGit(["add", "--", ...changedFiles], { cwd: projectRoot });
+      postChangedFiles = getChangedFiles(projectRoot);
+      const lockedPartition = partitionFilesByScope(
+        postChangedFiles,
+        allowedFiles,
+        projectRoot
+      );
+      const lockedCheck = checkChangedFilesAndSecrets(
+        postChangedFiles,
+        allowedFiles,
+        projectRoot
+      );
+      if (!lockedCheck.valid) {
+        rollbackLightChanges(projectRoot, { files: lockedPartition.scopedFiles });
+        if (db && sessionId) {
+          db.updateTaskStatus(sessionId, taskId, "failed");
+        }
+        return {
+          verified: false,
+          status: "failed",
+          rollbackPerformed: true,
+          violations: lockedCheck.violations,
+          error: "Boundary or secret check failed before commit",
+          changedFiles: postChangedFiles,
+          untouchedFiles: lockedPartition.untouchedFiles,
+        };
+      }
+
+      if (postChangedFiles.length > 0) {
+        const addRes = runGit(["add", "--", ...postChangedFiles], { cwd: projectRoot });
+        if (addRes.exitCode !== 0) {
+          const addErr = addRes.stderr || addRes.stdout;
+          rollbackLightChanges(projectRoot, { files: lockedPartition.scopedFiles });
+          if (db && sessionId) {
+            db.updateTaskStatus(sessionId, taskId, "failed");
+          }
+          return {
+            verified: false,
+            status: "failed",
+            rollbackPerformed: true,
+            error: `git add failed: ${addErr}`,
+            changedFiles: postChangedFiles,
+            untouchedFiles: lockedPartition.untouchedFiles,
+          };
+        }
         const commitRes = runGit(
           ["commit", "-m", `asd(${taskId}): ${title}`, "--no-verify"],
           { cwd: projectRoot }
         );
         if (commitRes.exitCode !== 0) {
           const commitErr = commitRes.stderr || commitRes.stdout;
+          if (db && sessionId) {
+            db.updateTaskStatus(sessionId, taskId, "failed");
+          }
           return {
             verified: false,
             status: "failed",
             rollbackPerformed: false,
             error: `Checkpoint commit failed: ${commitErr}`,
-            changedFiles,
+            changedFiles: postChangedFiles,
           };
         }
       }
@@ -977,7 +1050,7 @@ export function verifyAndCommitLightTask(
     status: "done",
     commitSha,
     rollbackPerformed: false,
-    changedFiles,
+    changedFiles: postChangedFiles,
   };
 }
 
