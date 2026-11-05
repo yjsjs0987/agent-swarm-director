@@ -1,4 +1,4 @@
-// ASD v2.4.1 default model routing preset.
+// ASD v2.4.2 default model routing preset.
 // Bootstrapped to ~/.asd/routing.jsonc on first use; per-project
 // overrides live in <project>/.asd/routing.jsonc (1st priority).
 //
@@ -8,23 +8,25 @@
 // 2. "agents" & "categories" (or "heavyRouting"): Used in HEAVY mode
 //    (external CLI parallel_spawn & cross-harness blind debate).
 {
-  "_asdVersion": "2.4.1",
+  "_asdVersion": "2.4.2",
   "lightSubagents": {
     "antigravity": {
-      "scout": "flash_lite",
-      "worker": "flash",
-      "planner": "flash",
-      "architect": "pro",
-      "critic": "pro",
-      "defaultModel": "flash"
+      "scout": { "model": "flash_lite", "fallbacks": ["flash"] },
+      "worker": { "model": "flash", "fallbacks": ["flash_lite", "pro"] },
+      "planner": { "model": "flash", "fallbacks": ["pro"] },
+      "architect": { "model": "pro", "fallbacks": ["flash"] },
+      "critic": { "model": "pro", "fallbacks": ["flash"] },
+      "defaultModel": "flash",
+      "fallbacks": ["flash_lite"]
     },
     "claude-code": {
-      "scout": "haiku",
-      "worker": "sonnet",
-      "planner": "sonnet",
-      "architect": "opus",
-      "critic": "opus",
-      "defaultModel": "sonnet"
+      "scout": { "model": "haiku", "fallbacks": ["sonnet"] },
+      "worker": { "model": "sonnet", "fallbacks": ["haiku", "opus"] },
+      "planner": { "model": "sonnet", "fallbacks": ["opus"] },
+      "architect": { "model": "opus", "fallbacks": ["sonnet"] },
+      "critic": { "model": "opus", "fallbacks": ["sonnet"] },
+      "defaultModel": "sonnet",
+      "fallbacks": ["haiku"]
     },
     "opencode": {
       "scout": "glm-5",
@@ -32,13 +34,16 @@
       "planner": "glm-5",
       "architect": "glm-5",
       "critic": "glm-5",
-      "defaultModel": "glm-5"
+      "defaultModel": "glm-5",
+      "fallbacks": []
     },
     "codex": {
-      "defaultModel": "gpt-5-codex"
+      "defaultModel": "gpt-5-codex",
+      "fallbacks": []
     },
     "cursor": {
-      "defaultModel": "claude-sonnet-4-6"
+      "defaultModel": "claude-sonnet-4-6",
+      "fallbacks": []
     }
   },
   "agents": {

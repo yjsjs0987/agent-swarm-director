@@ -40,6 +40,8 @@ import {
   normalizeAntigravityModel,
   resolveFallback,
   resolveLightSubagentModel,
+  resolveLightSubagentRoute,
+  resolveNextLightSubagentFallback,
   resolveRoute,
   selectDiverseReviewer,
 } from "../src/core/router.ts";
@@ -583,4 +585,85 @@ test("resolveLightSubagentModel: resolves per-harness LIGHT subagent tiers from 
   assert.equal(resolveLightSubagentModel("antigravity", "planner", legacyCfg), "flash");
   assert.equal(resolveLightSubagentModel("antigravity", "architect", legacyCfg), "pro");
 });
+
+test("resolveLightSubagentRoute & resolveNextLightSubagentFallback: supports string, array, and object fallback notations", () => {
+  const customCfg: RoutingConfig = {
+    _asdVersion: "2.4.1",
+    lightSubagents: {
+      antigravity: {
+        // Object notation with fallbacks
+        worker: { model: "flash", fallbacks: ["flash_lite", "pro"] },
+        // Array notation [primary, ...fallbacks]
+        scout: ["flash_lite", "flash"],
+        // String notation + harness-level fallbacks
+        planner: "flash",
+        fallbacks: ["pro"],
+      },
+      "claude-code": {
+        worker: ["sonnet", "haiku", "opus"],
+        defaultModel: { model: "sonnet", fallbacks: ["haiku"] },
+      },
+      opencode: {
+        defaultModel: "nvidia/z-ai/glm-5.3-flash",
+        fallbacks: ["nvidia/deepseek-ai/deepseek-v4.1-flash", "glm-5"],
+      },
+    },
+    agents: defaultRouting.agents,
+    categories: defaultRouting.categories,
+  };
+
+  // 1. Object notation + harness-level fallback deduplication
+  const agWorker = resolveLightSubagentRoute("antigravity", "worker", customCfg);
+  assert.ok(agWorker);
+  assert.equal(agWorker.model, "flash");
+  assert.deepEqual(
+    agWorker.fallbacks.map((f) => f.model),
+    ["flash_lite", "pro"]
+  );
+  assert.equal(
+    resolveNextLightSubagentFallback("antigravity", "worker", "flash", customCfg),
+    "flash_lite"
+  );
+  assert.equal(
+    resolveNextLightSubagentFallback("antigravity", "worker", "flash_lite", customCfg),
+    "pro"
+  );
+
+  // 2. Array notation + harness-level fallback appended
+  const agScout = resolveLightSubagentRoute("antigravity", "scout", customCfg);
+  assert.ok(agScout);
+  assert.equal(agScout.model, "flash_lite");
+  assert.deepEqual(
+    agScout.fallbacks.map((f) => f.model),
+    ["flash", "pro"]
+  );
+
+  // 3. String notation inherits harness-level fallbacks
+  const agPlanner = resolveLightSubagentRoute("antigravity", "planner", customCfg);
+  assert.ok(agPlanner);
+  assert.equal(agPlanner.model, "flash");
+  assert.deepEqual(
+    agPlanner.fallbacks.map((f) => f.model),
+    ["pro"]
+  );
+
+  // 4. Claude Code array & defaultModel object notation
+  const ccWorker = resolveLightSubagentRoute("claude-code", "worker", customCfg);
+  assert.ok(ccWorker);
+  assert.equal(ccWorker.model, "sonnet");
+  assert.deepEqual(
+    ccWorker.fallbacks.map((f) => f.model),
+    ["haiku", "opus"]
+  );
+
+  // 5. OpenCode defaultModel + harness-level fallbacks
+  const ocWorker = resolveLightSubagentRoute("opencode", "worker", customCfg);
+  assert.ok(ocWorker);
+  assert.equal(ocWorker.model, "nvidia/z-ai/glm-5.3-flash");
+  assert.deepEqual(
+    ocWorker.fallbacks.map((f) => f.model),
+    ["nvidia/deepseek-ai/deepseek-v4.1-flash", "glm-5"]
+  );
+});
+
 

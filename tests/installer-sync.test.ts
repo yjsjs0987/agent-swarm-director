@@ -678,3 +678,56 @@ test("Runtime Isolation: syncHarnessConfigs stages isolated runtime copy and wir
     removeTempDir(customRuntimeDir);
   }
 });
+
+test("v2.4.2 Auto-Migration: syncHarnessConfigs upgrades legacy (< 2.4.2) ~/.asd/routing.jsonc with lightSubagents while preserving user agents & categories", async () => {
+  const migHome = createTempDir("asd-mig-home-");
+  try {
+    const asdDir = path.join(migHome, ".asd");
+    fs.mkdirSync(asdDir, { recursive: true });
+    const legacyRouting = {
+      _asdVersion: "2.2.0",
+      agents: {
+        worker: {
+          harness: "opencode",
+          model: "nvidia/z-ai/glm-5.3-flash",
+          modelFamily: "glm",
+          fallbacks: [{ harness: "antigravity", model: "gemini-3.8-flash", modelFamily: "gemini" }],
+        },
+      },
+      categories: {
+        general: {
+          harness: "opencode",
+          model: "nvidia/z-ai/glm-5.3-flash",
+          modelFamily: "glm",
+        },
+      },
+    };
+    const routingPath = path.join(asdDir, "routing.jsonc");
+    fs.writeFileSync(routingPath, JSON.stringify(legacyRouting, null, 2), "utf8");
+
+    await syncHarnessConfigs({ homeDir: migHome, noPath: true });
+
+    const migratedRaw = fs.readFileSync(routingPath, "utf8");
+    const migrated = JSON.parse(
+      migratedRaw
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("//"))
+        .join("\n")
+    );
+    assert.equal(migrated._asdVersion, "2.4.2");
+    assert.ok(migrated.lightSubagents, "Migrated routing.jsonc must include lightSubagents block");
+    assert.ok(migrated.lightSubagents.antigravity, "Migrated lightSubagents must include antigravity");
+    assert.equal(
+      migrated.agents.worker.model,
+      "nvidia/z-ai/glm-5.3-flash",
+      "User custom agents.worker must be preserved intact"
+    );
+    assert.equal(
+      migrated.categories.general.model,
+      "nvidia/z-ai/glm-5.3-flash",
+      "User custom categories.general must be preserved intact"
+    );
+  } finally {
+    removeTempDir(migHome);
+  }
+});

@@ -24,7 +24,7 @@ function readPackageVersion(): string {
   } catch {
     // Fallback if package.json is unreadable
   }
-  return "2.4.1";
+  return "2.4.2";
 }
 
 export const ASD_VERSION: string = readPackageVersion();
@@ -205,14 +205,25 @@ export interface RouteEntry {
   }>;
 }
 
+export interface LightSubagentRoleEntry {
+  model: string;
+  fallbacks?: string[];
+}
+
+export type LightSubagentRoleValue =
+  | string
+  | string[]
+  | LightSubagentRoleEntry;
+
 export interface LightSubagentHarnessConfig {
-  planner?: string;
-  architect?: string;
-  worker?: string;
-  scout?: string;
-  critic?: string;
-  defaultModel?: string;
-  [roleOrType: string]: string | undefined;
+  planner?: LightSubagentRoleValue;
+  architect?: LightSubagentRoleValue;
+  worker?: LightSubagentRoleValue;
+  scout?: LightSubagentRoleValue;
+  critic?: LightSubagentRoleValue;
+  defaultModel?: LightSubagentRoleValue;
+  fallbacks?: string[];
+  [roleOrType: string]: LightSubagentRoleValue | string[] | undefined;
 }
 
 export type LightSubagentsConfig = Partial<

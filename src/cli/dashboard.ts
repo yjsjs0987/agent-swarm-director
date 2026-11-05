@@ -53,6 +53,7 @@ import {
   inferModelFamily,
   normalizeAgentRole,
   resolveFallback,
+  resolveNextLightSubagentFallback,
 } from "../core/router.ts";
 import {
   type CommandRunner,
@@ -933,44 +934,79 @@ export async function runSubagentControlAction(options: {
     suffix = `retry-${Date.now().toString(36).slice(-4)}`;
   } else if (options.action === "fallback") {
     suffix = `fb-${Date.now().toString(36).slice(-4)}`;
-    const candidates = roleRoute
-      ? [
-          {
-            harness: roleRoute.harness,
-            model: roleRoute.model,
-            modelFamily: roleRoute.modelFamily,
-          },
-          ...(roleRoute.fallbacks ?? []),
-        ]
-      : [];
+    let isClaimOnlySub = false;
+    try {
+      if (fs.existsSync(metaPath)) {
+        const m = JSON.parse(fs.readFileSync(metaPath, "utf8")) as {
+          dispatchMode?: string;
+        };
+        isClaimOnlySub = m.dispatchMode === "claim_only";
+      }
+    } catch {
+      // ignore
+    }
 
-    const curIdx = candidates.findIndex(
-      (c) => c.harness === target.harness && c.model === target.model
-    );
-    const fbCandidate =
-      curIdx >= 0 && curIdx + 1 < candidates.length
-        ? candidates[curIdx + 1]
-        : candidates.find(
-            (c) => c.harness !== target.harness || c.model !== target.model
-          );
+    const lightFbModel = isClaimOnlySub
+      ? resolveNextLightSubagentFallback(
+          nextHarness,
+          normRole,
+          nextModel,
+          routingCfg
+        )
+      : undefined;
 
-    if (fbCandidate) {
-      nextHarness = fbCandidate.harness;
-      nextModel = fbCandidate.model;
+    if (lightFbModel) {
+      nextModel = lightFbModel;
     } else {
-      const resolvedFb = resolveFallback(
-        {
-          harness: nextHarness,
-          model: nextModel,
-          modelFamily: inferModelFamily(nextModel, nextHarness),
-          fallbacks: roleRoute?.fallbacks ?? [],
-          tier: 2,
-        },
-        routingCfg
+      const candidates = roleRoute
+        ? [
+            {
+              harness: roleRoute.harness,
+              model: roleRoute.model,
+              modelFamily: roleRoute.modelFamily,
+            },
+            ...(roleRoute.fallbacks ?? []),
+          ]
+        : [];
+
+      const curIdx = candidates.findIndex(
+        (c) => c.harness === target.harness && c.model === target.model
       );
-      if (resolvedFb) {
-        nextHarness = resolvedFb.harness;
-        nextModel = resolvedFb.model;
+      const fbCandidate =
+        curIdx >= 0 && curIdx + 1 < candidates.length
+          ? candidates[curIdx + 1]
+          : candidates.find(
+              (c) => c.harness !== target.harness || c.model !== target.model
+            );
+
+      if (fbCandidate) {
+        nextHarness = fbCandidate.harness;
+        nextModel = fbCandidate.model;
+      } else {
+        const resolvedFb = resolveFallback(
+          {
+            harness: nextHarness,
+            model: nextModel,
+            modelFamily: inferModelFamily(nextModel, nextHarness),
+            fallbacks: roleRoute?.fallbacks ?? [],
+            tier: 2,
+          },
+          routingCfg
+        );
+        if (resolvedFb) {
+          nextHarness = resolvedFb.harness;
+          nextModel = resolvedFb.model;
+        } else {
+          const fallbackLight = resolveNextLightSubagentFallback(
+            nextHarness,
+            normRole,
+            nextModel,
+            routingCfg
+          );
+          if (fallbackLight) {
+            nextModel = fallbackLight;
+          }
+        }
       }
     }
   } else if (options.action === "custom") {

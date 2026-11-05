@@ -196,20 +196,22 @@ export function normalizeAntigravityModel(
 
 export const DEFAULT_LIGHT_SUBAGENTS: LightSubagentsConfig = {
   antigravity: {
-    scout: "flash_lite",
-    worker: "flash",
-    planner: "flash",
-    architect: "pro",
-    critic: "pro",
+    scout: { model: "flash_lite", fallbacks: ["flash"] },
+    worker: { model: "flash", fallbacks: ["flash_lite", "pro"] },
+    planner: { model: "flash", fallbacks: ["pro"] },
+    architect: { model: "pro", fallbacks: ["flash"] },
+    critic: { model: "pro", fallbacks: ["flash"] },
     defaultModel: "flash",
+    fallbacks: ["flash_lite"],
   },
   "claude-code": {
-    scout: "haiku",
-    worker: "sonnet",
-    planner: "sonnet",
-    architect: "opus",
-    critic: "opus",
+    scout: { model: "haiku", fallbacks: ["sonnet"] },
+    worker: { model: "sonnet", fallbacks: ["haiku", "opus"] },
+    planner: { model: "sonnet", fallbacks: ["opus"] },
+    architect: { model: "opus", fallbacks: ["sonnet"] },
+    critic: { model: "opus", fallbacks: ["sonnet"] },
     defaultModel: "sonnet",
+    fallbacks: ["haiku"],
   },
   opencode: {
     scout: "glm-5",
@@ -227,23 +229,90 @@ export const DEFAULT_LIGHT_SUBAGENTS: LightSubagentsConfig = {
   },
 };
 
+export interface LightSubagentRoute {
+  harness: HarnessId;
+  model: string;
+  modelFamily: string;
+  fallbacks: Array<{
+    harness: HarnessId;
+    model: string;
+    modelFamily: string;
+  }>;
+}
+
+function parseLightSubagentRoleValue(val: unknown): {
+  model?: string;
+  fallbacks: string[];
+} {
+  if (typeof val === "string") {
+    const trimmed = val.trim();
+    return { model: trimmed || undefined, fallbacks: [] };
+  }
+  if (Array.isArray(val)) {
+    const list = val
+      .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
+      .map((x) => x.trim());
+    return {
+      model: list[0],
+      fallbacks: list.slice(1),
+    };
+  }
+  if (val && typeof val === "object") {
+    const obj = val as { model?: unknown; fallbacks?: unknown };
+    const model =
+      typeof obj.model === "string" && obj.model.trim().length > 0
+        ? obj.model.trim()
+        : undefined;
+    const fallbacks = Array.isArray(obj.fallbacks)
+      ? obj.fallbacks
+          .filter(
+            (x): x is string => typeof x === "string" && x.trim().length > 0
+          )
+          .map((x) => x.trim())
+      : [];
+    return { model, fallbacks };
+  }
+  return { fallbacks: [] };
+}
+
+function normalizeLightModelForHarness(
+  harnessId: HarnessId,
+  model: string | undefined,
+  canonicalRole?: AgentRole | null,
+  isFallback = false
+): string | undefined {
+  if (!model || !model.trim()) return undefined;
+  const trimmed = model.trim();
+  if (harnessId === "antigravity") {
+    const normalized = normalizeAntigravityModel(trimmed);
+    if (normalized === "inherit") {
+      if (isFallback) return undefined;
+      if (canonicalRole === "scout") return "flash_lite";
+      if (canonicalRole === "architect" || canonicalRole === "critic") {
+        return "pro";
+      }
+      return "flash";
+    }
+    return normalized;
+  }
+  return trimmed;
+}
+
 /**
- * Resolves the native subagent model tier for LIGHT mode (internal subagent delegation)
- * on a specific harness.
- * Priority:
- * 1. `routingConfig.lightSubagents[harnessId]` (role match -> defaultModel)
- * 2. Legacy fallback: `routingConfig.agents[role]` (primary + fallbacks matching `harnessId`)
- * 3. `DEFAULT_LIGHT_SUBAGENTS[harnessId]`
+ * Resolves both the primary model and same-harness fallback chain for LIGHT mode
+ * (internal subagent delegation) on a specific harness.
  *
- * For `antigravity`, the returned string is guaranteed to be normalized via
- * `normalizeAntigravityModel` into `"flash_lite" | "flash" | "pro"` (never raw `"gemini-3-..."`
- * and never `"inherit"`, falling back to role default tier so weekly quotas are protected).
+ * Supports 3 role value notations in `lightSubagents.<harness>`:
+ * - String: `"worker": "flash"`
+ * - Array: `"worker": ["flash", "flash_lite", "pro"]`
+ * - Object: `"worker": { "model": "flash", "fallbacks": ["flash_lite", "pro"] }`
+ * plus harness-level `"fallbacks": [...]`.
  */
-export function resolveLightSubagentModel(
+export function resolveLightSubagentRoute(
   harnessId: HarnessId,
   roleOrTypeName?: string | null,
   routingConfig?: RoutingConfig | null
-): string | undefined {
+): LightSubagentRoute | undefined {
   const rawType = (roleOrTypeName ?? "").trim().toLowerCase();
   const strippedRole = rawType.startsWith("asd-") ? rawType.slice(4) : rawType;
   let canonicalRole = normalizeAgentRole(strippedRole);
@@ -269,27 +338,39 @@ export function resolveLightSubagentModel(
 
   const lightHarnessCfg = routingConfig?.lightSubagents?.[harnessId];
   let resolvedModel: string | undefined;
+  const rawFallbacks: string[] = [];
 
   if (lightHarnessCfg) {
-    if (rawType && typeof lightHarnessCfg[rawType] === "string" && lightHarnessCfg[rawType]!.trim()) {
-      resolvedModel = lightHarnessCfg[rawType]!.trim();
-    } else if (
-       strippedRole &&
-      typeof lightHarnessCfg[strippedRole] === "string" &&
-      lightHarnessCfg[strippedRole]!.trim()
-    ) {
-      resolvedModel = lightHarnessCfg[strippedRole]!.trim();
-    } else if (
-      canonicalRole &&
-      typeof lightHarnessCfg[canonicalRole] === "string" &&
-      lightHarnessCfg[canonicalRole]!.trim()
-    ) {
-      resolvedModel = lightHarnessCfg[canonicalRole]!.trim();
-    } else if (
-      typeof lightHarnessCfg.defaultModel === "string" &&
-      lightHarnessCfg.defaultModel.trim()
-    ) {
-      resolvedModel = lightHarnessCfg.defaultModel.trim();
+    const candidateKeys: string[] = [];
+    if (rawType && rawType !== "fallbacks") candidateKeys.push(rawType);
+    if (strippedRole && strippedRole !== "fallbacks" && !candidateKeys.includes(strippedRole)) {
+      candidateKeys.push(strippedRole);
+    }
+    if (canonicalRole && !candidateKeys.includes(canonicalRole)) {
+      candidateKeys.push(canonicalRole);
+    }
+
+    for (const key of candidateKeys) {
+      const parsed = parseLightSubagentRoleValue(lightHarnessCfg[key]);
+      if (parsed.model) {
+        resolvedModel = parsed.model;
+        rawFallbacks.push(...parsed.fallbacks);
+        break;
+      }
+    }
+
+    const defParsed = parseLightSubagentRoleValue(lightHarnessCfg.defaultModel);
+    if (!resolvedModel && defParsed.model) {
+      resolvedModel = defParsed.model;
+    }
+    rawFallbacks.push(...defParsed.fallbacks);
+
+    if (Array.isArray(lightHarnessCfg.fallbacks)) {
+      for (const fb of lightHarnessCfg.fallbacks) {
+        if (typeof fb === "string" && fb.trim()) {
+          rawFallbacks.push(fb.trim());
+        }
+      }
     }
   }
 
@@ -299,11 +380,17 @@ export function resolveLightSubagentModel(
     const entry = agentsMap?.[canonicalRole];
     if (entry) {
       const candidates = [entry, ...(entry.fallbacks ?? [])];
-      const match = candidates.find(
-        (c) => c.harness === harnessId && typeof c.model === "string" && c.model.trim().length > 0
+      const sameHarnessMatches = candidates.filter(
+        (c) =>
+          c.harness === harnessId &&
+          typeof c.model === "string" &&
+          c.model.trim().length > 0
       );
-      if (match) {
-        resolvedModel = match.model.trim();
+      if (sameHarnessMatches.length > 0) {
+        resolvedModel = sameHarnessMatches[0]!.model.trim();
+        for (const m of sameHarnessMatches.slice(1)) {
+          rawFallbacks.push(m.model.trim());
+        }
       }
     }
   }
@@ -311,23 +398,88 @@ export function resolveLightSubagentModel(
   // Fallback to built-in default light subagent tiers for Antigravity
   if (!resolvedModel && harnessId === "antigravity") {
     const defAg = DEFAULT_LIGHT_SUBAGENTS.antigravity!;
-    resolvedModel =
-      (canonicalRole ? defAg[canonicalRole] : undefined) ??
-      defAg.defaultModel ??
-      "flash";
-  }
-
-  if (harnessId === "antigravity") {
-    const normalized = normalizeAntigravityModel(resolvedModel);
-    if (normalized === "inherit") {
-      if (canonicalRole === "scout") return "flash_lite";
-      if (canonicalRole === "architect" || canonicalRole === "critic") return "pro";
-      return "flash";
+    const roleDef = canonicalRole ? parseLightSubagentRoleValue(defAg[canonicalRole]) : { fallbacks: [] };
+    const defModelParsed = parseLightSubagentRoleValue(defAg.defaultModel);
+    resolvedModel = roleDef.model ?? defModelParsed.model ?? "flash";
+    rawFallbacks.push(...roleDef.fallbacks, ...defModelParsed.fallbacks);
+    if (Array.isArray(defAg.fallbacks)) {
+      rawFallbacks.push(...defAg.fallbacks);
     }
-    return normalized;
+  } else if (resolvedModel && rawFallbacks.length === 0) {
+    // Populate default fallbacks from DEFAULT_LIGHT_SUBAGENTS if none were explicitly specified
+    const defHarness = DEFAULT_LIGHT_SUBAGENTS[harnessId];
+    if (defHarness && canonicalRole) {
+      const roleDef = parseLightSubagentRoleValue(defHarness[canonicalRole]);
+      rawFallbacks.push(...roleDef.fallbacks);
+    }
   }
 
-  return resolvedModel;
+  const finalModel = normalizeLightModelForHarness(
+    harnessId,
+    resolvedModel,
+    canonicalRole,
+    false
+  );
+  if (!finalModel) return undefined;
+
+  const uniqueFallbacks: string[] = [];
+  for (const rawFb of rawFallbacks) {
+    const normFb = normalizeLightModelForHarness(
+      harnessId,
+      rawFb,
+      canonicalRole,
+      true
+    );
+    if (normFb && normFb !== finalModel && !uniqueFallbacks.includes(normFb)) {
+      uniqueFallbacks.push(normFb);
+    }
+  }
+
+  return {
+    harness: harnessId,
+    model: finalModel,
+    modelFamily: inferModelFamily(finalModel, harnessId),
+    fallbacks: uniqueFallbacks.map((fbModel) => ({
+      harness: harnessId,
+      model: fbModel,
+      modelFamily: inferModelFamily(fbModel, harnessId),
+    })),
+  };
+}
+
+/**
+ * Resolves the native subagent model tier for LIGHT mode (internal subagent delegation)
+ * on a specific harness.
+ */
+export function resolveLightSubagentModel(
+  harnessId: HarnessId,
+  roleOrTypeName?: string | null,
+  routingConfig?: RoutingConfig | null
+): string | undefined {
+  return resolveLightSubagentRoute(harnessId, roleOrTypeName, routingConfig)?.model;
+}
+
+/**
+ * Resolves the next fallback model in `lightSubagents.<harness>` given the currently
+ * attempted model. Returns `undefined` if no further fallback model exists.
+ */
+export function resolveNextLightSubagentFallback(
+  harnessId: HarnessId,
+  roleOrTypeName?: string | null,
+  currentModel?: string | null,
+  routingConfig?: RoutingConfig | null
+): string | undefined {
+  const route = resolveLightSubagentRoute(harnessId, roleOrTypeName, routingConfig);
+  if (!route || route.fallbacks.length === 0) return undefined;
+  const chain = [route.model, ...route.fallbacks.map((f) => f.model)];
+  const normCurrent = currentModel
+    ? normalizeLightModelForHarness(harnessId, currentModel, normalizeAgentRole(roleOrTypeName ?? ""), true) ?? currentModel.trim()
+    : route.model;
+  const idx = chain.indexOf(normCurrent);
+  if (idx >= 0 && idx + 1 < chain.length) {
+    return chain[idx + 1];
+  }
+  return route.fallbacks[0]?.model;
 }
 
 /**
@@ -517,7 +669,23 @@ export function resolveRoute(
         cfg
       );
 
-      if (base.harness === h) {
+      const lightRoute =
+        request.mode === "claim_only" && cfg.lightSubagents?.[h]
+          ? resolveLightSubagentRoute(h, request.role, cfg)
+          : undefined;
+
+      if (lightRoute) {
+        resolved = {
+          harness: h,
+          model: lightRoute.model,
+          modelFamily: lightRoute.modelFamily,
+          fallbacks: [
+            ...lightRoute.fallbacks,
+            ...base.fallbacks.filter((fb) => fb.harness !== h),
+          ],
+          tier: 1,
+        };
+      } else if (base.harness === h) {
         resolved = { ...base, tier: 1 };
       } else {
         const matchingFallback = base.fallbacks.find((fb) => fb.harness === h);

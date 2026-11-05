@@ -33,6 +33,7 @@ import {
   normalizeAntigravityModel,
   resolveBinaryOnPath,
   resolveLightSubagentModel,
+  resolveLightSubagentRoute,
 } from "../core/router.ts";
 import {
   AGENT_ROLES,
@@ -271,7 +272,11 @@ function cleanupLegacyAgentFiles(agentDir: string): void {
   }
 }
 
-export function getAgentTemplate(role: AgentRole, model?: string): string | null {
+export function getAgentTemplate(
+  role: AgentRole,
+  model?: string,
+  fallbacks?: string[]
+): string | null {
   const presetPath = path.join(getAsdRoot(), "presets", "agents", `${role}.md`);
   try {
     if (fs.existsSync(presetPath)) {
@@ -279,7 +284,11 @@ export function getAgentTemplate(role: AgentRole, model?: string): string | null
       if (raw.length > 0) {
         let body = raw.replace(/^---\n[\s\S]*?\n---\n+/, "").trim() + "\n";
         if (model) {
-          const modelLine = `**Configured Model**: \`${model}\` (synced from \`routing.jsonc\`)`;
+          const fbSuffix =
+            fallbacks && fallbacks.length > 0
+              ? ` | **Fallbacks**: \`${fallbacks.join("` → `")}\``
+              : "";
+          const modelLine = `**Configured Model**: \`${model}\`${fbSuffix} (synced from \`routing.jsonc\`)`;
           if (body.includes("multi-agent system.")) {
             body = body.replace("multi-agent system.", `multi-agent system.\n${modelLine}`);
           } else {
@@ -297,7 +306,7 @@ export function getAgentTemplate(role: AgentRole, model?: string): string | null
 
 export function generateAgentContent(
   role: AgentRole,
-  opts?: { harnessId?: HarnessId; model?: string }
+  opts?: { harnessId?: HarnessId; model?: string; fallbacks?: string[] }
 ): string {
   const roleDescriptions: Record<AgentRole, { title: string; desc: string; focus: string }> = {
     planner: {
@@ -371,7 +380,7 @@ export function generateAgentContent(
     `- If an operation on \`.asd/\` has **no corresponding official \`asd\` CLI command or MCP tool**, **IMMEDIATELY HALT** execution and explain the situation to the user rather than attempting direct file manipulation or workarounds.`,
   ].join("\n");
 
-  const presetBody = getAgentTemplate(role, effectiveModel);
+  const presetBody = getAgentTemplate(role, effectiveModel, opts?.fallbacks);
   if (presetBody) {
     const bodyWithRule = presetBody.includes("Protected `.asd/` Directory")
       ? presetBody
@@ -379,12 +388,17 @@ export function generateAgentContent(
     return `${frontmatterLines.join("\n")}\n\n${bodyWithRule}`;
   }
 
+  const fbSuffix =
+    opts?.fallbacks && opts.fallbacks.length > 0
+      ? ` | **Fallbacks**: \`${opts.fallbacks.join("` → `")}\``
+      : "";
+
   return `${frontmatterLines.join("\n")}
 
 # ASD Agent: asd-${role} (${meta.title})
 
 You are operating as the **${meta.title}** agent in the ASD v${ASD_VERSION} multi-agent system.${
-    effectiveModel ? `\n**Configured Model**: \`${effectiveModel}\` (synced from \`routing.jsonc\`)` : ""
+    effectiveModel ? `\n**Configured Model**: \`${effectiveModel}\`${fbSuffix} (synced from \`routing.jsonc\`)` : ""
   }
 
 ## Responsibilities
@@ -469,6 +483,52 @@ function bootstrapGlobalPresets(homeDir: string): { routingPath: string; mcpPath
     } else {
       safeWriteText(routingPath, `// ASD Default Routing\n{\n  "_asdVersion": "${ASD_VERSION}"\n}\n`);
     }
+  } else {
+    try {
+      const existingRaw = fs.readFileSync(routingPath, "utf8");
+      const parsed = parseJsonc<RoutingConfig & { _asdVersion?: string }>(existingRaw);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        typeof parsed._asdVersion === "string" &&
+        compareSemver(parsed._asdVersion, ASD_VERSION) < 0
+      ) {
+        let presetLightSubagents: RoutingConfig["lightSubagents"] | undefined;
+        if (fs.existsSync(presetRouting)) {
+          try {
+            const presetParsed = parseJsonc<RoutingConfig>(
+              fs.readFileSync(presetRouting, "utf8")
+            );
+            presetLightSubagents = presetParsed?.lightSubagents;
+          } catch {
+            presetLightSubagents = undefined;
+          }
+        }
+
+        const migrated: Record<string, unknown> = {
+          _asdVersion: ASD_VERSION,
+        };
+        const mergedLightSubagents = parsed.lightSubagents
+          ? { ...(presetLightSubagents ?? {}), ...parsed.lightSubagents }
+          : presetLightSubagents;
+        if (mergedLightSubagents) {
+          migrated.lightSubagents = mergedLightSubagents;
+        }
+        for (const [key, val] of Object.entries(parsed)) {
+          if (key === "_asdVersion" || key === "lightSubagents") continue;
+          migrated[key] = val;
+        }
+
+        const header = [
+          `// ASD v${ASD_VERSION} global user model routing configuration (~/.asd/routing.jsonc).`,
+          `// 1. "lightSubagents": LIGHT mode (in-harness native subagent delegation) model tier & fallback mapping.`,
+          `// 2. "agents" & "categories": HEAVY mode (external CLI parallel_spawn & cross-harness blind debate).`,
+        ].join("\n");
+        safeWriteText(routingPath, `${header}\n${JSON.stringify(migrated, null, 2)}\n`);
+      }
+    } catch {
+      // Preserve user file untouched if unparseable
+    }
   }
 
   if (!fs.existsSync(mcpPath)) {
@@ -480,6 +540,25 @@ function bootstrapGlobalPresets(homeDir: string): { routingPath: string; mcpPath
       safeWriteText(mcpPath, content);
     } else {
       safeWriteText(mcpPath, `// ASD Default MCP\n{\n  "_asdVersion": "${ASD_VERSION}"\n}\n`);
+    }
+  } else {
+    try {
+      const existingMcp = fs.readFileSync(mcpPath, "utf8");
+      const parsedMcp = parseJsonc<{ _asdVersion?: string }>(existingMcp);
+      if (
+        parsedMcp &&
+        typeof parsedMcp._asdVersion === "string" &&
+        compareSemver(parsedMcp._asdVersion, ASD_VERSION) < 0
+      ) {
+        const updatedMcp = existingMcp
+          .replace(/\bASD v\d+\.\d+(?:\.\d+)?\b/g, `ASD v${ASD_VERSION}`)
+          .replace(/"_asdVersion":\s*"[^"]*"/g, `"_asdVersion": "${ASD_VERSION}"`);
+        if (updatedMcp !== existingMcp) {
+          safeWriteText(mcpPath, updatedMcp);
+        }
+      }
+    } catch {
+      // Ignore unparseable user mcp.jsonc
     }
   }
 
@@ -523,8 +602,10 @@ function computeConfigHash(homeDir: string, projectRoot?: string): string {
 
   for (const harnessId of DEFAULT_HARNESS_IDS) {
     for (const role of AGENT_ROLES) {
-      const model = resolveHarnessRoleModel(role, harnessId, parsedRouting);
-      hash.update(generateAgentContent(role, { harnessId, model }));
+      const route = resolveLightSubagentRoute(harnessId, role, parsedRouting);
+      const model = route?.model;
+      const fallbacks = route?.fallbacks.map((f) => f.model);
+      hash.update(generateAgentContent(role, { harnessId, model, fallbacks }));
     }
   }
 
@@ -1019,8 +1100,10 @@ export async function syncHarnessConfigs(
         // 5 agent files (with highest-priority claude-code model from routing.jsonc)
         for (const role of AGENT_ROLES) {
           const agentPath = path.join(claudeDir, "agents", `asd-${role}.md`);
-          const model = resolveHarnessRoleModel(role, "claude-code", routingConfig);
-          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "claude-code", model }));
+          const route = resolveLightSubagentRoute("claude-code", role, routingConfig);
+          const model = route?.model;
+          const fallbacks = route?.fallbacks.map((f) => f.model);
+          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "claude-code", model, fallbacks }));
           written.push(agentPath);
         }
 
@@ -1074,8 +1157,10 @@ export async function syncHarnessConfigs(
         cleanupLegacyAgentFiles(path.join(opencodeDir, "agent"));
         for (const role of AGENT_ROLES) {
           const agentPath = path.join(opencodeDir, "agent", `asd-${role}.md`);
-          const model = resolveHarnessRoleModel(role, "opencode", routingConfig);
-          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "opencode", model }));
+          const route = resolveLightSubagentRoute("opencode", role, routingConfig);
+          const model = route?.model;
+          const fallbacks = route?.fallbacks.map((f) => f.model);
+          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "opencode", model, fallbacks }));
           written.push(agentPath);
         }
 
@@ -1201,8 +1286,10 @@ export async function syncHarnessConfigs(
         // 5 agents under ~/.gemini/config/agents/ (with normalized Antigravity tier from lightSubagents / routing.jsonc)
         for (const role of AGENT_ROLES) {
           const agentPath = path.join(configAgentsDir, `asd-${role}.md`);
-          const model = resolveHarnessRoleModel(role, "antigravity", routingConfig);
-          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "antigravity", model }));
+          const route = resolveLightSubagentRoute("antigravity", role, routingConfig);
+          const model = route?.model;
+          const fallbacks = route?.fallbacks.map((f) => f.model);
+          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "antigravity", model, fallbacks }));
           written.push(agentPath);
         }
 
@@ -1332,8 +1419,10 @@ export async function syncHarnessConfigs(
 
         for (const role of AGENT_ROLES) {
           const agentPath = path.join(cursorDir, "agents", `asd-${role}.md`);
-          const model = resolveHarnessRoleModel(role, "cursor", routingConfig);
-          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "cursor", model }));
+          const route = resolveLightSubagentRoute("cursor", role, routingConfig);
+          const model = route?.model;
+          const fallbacks = route?.fallbacks.map((f) => f.model);
+          safeWriteText(agentPath, generateAgentContent(role, { harnessId: "cursor", model, fallbacks }));
           written.push(agentPath);
         }
 
