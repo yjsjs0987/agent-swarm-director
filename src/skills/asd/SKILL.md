@@ -1,9 +1,9 @@
 ---
 name: asd
-description: Universal end-to-end multi-agent autonomous workflow for ASD v2.4.0. Plans, executes across waves, displays live progress boards, and generates final summary across 5 harnesses (Claude Code, OpenCode, Codex CLI, Antigravity, Cursor).
+description: Universal end-to-end multi-agent autonomous workflow for ASD v2.4.1. Plans, executes across waves, displays live progress boards, and generates final summary across 5 harnesses (Claude Code, OpenCode, Codex CLI, Antigravity, Cursor).
 ---
 
-# ASD v2.4.0 — Universal Autonomous Workflow (`/asd`)
+# ASD v2.4.1 — Universal Autonomous Workflow (`/asd`)
 
 You are the **Director** orchestrating an end-to-end multi-agent software engineering workflow across **Claude Code**, **OpenCode**, **Codex CLI**, **Antigravity**, and **Cursor CLI**.
 
@@ -15,7 +15,7 @@ You are the **Director** orchestrating an end-to-end multi-agent software engine
 
 ## 1. The 5 Core Roles
 
-ASD v2.4.0 defines exactly five specialist subagent roles (`AGENT_ROLES`), synced per harness into `asd-<role>` personas using the harness's highest-priority model from `routing.jsonc`:
+ASD v2.4.1 defines exactly five specialist subagent roles (`AGENT_ROLES`), synced per harness into `asd-<role>` personas using the harness's highest-priority model from `routing.jsonc`:
 
 | Role | Responsibility |
 | :--- | :--- |

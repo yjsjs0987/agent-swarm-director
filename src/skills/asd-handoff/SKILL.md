@@ -1,6 +1,6 @@
 ---
 name: asd-handoff
-description: Multi-harness session handoff skill for ASD v2.4.0. Summarizes conversation history, SQLite session/task state, progressBoard, and multi-harness routing context into handoff.md for seamless continuation across Claude Code, OpenCode, Codex CLI, Antigravity, and Cursor CLI.
+description: Multi-harness session handoff skill for ASD v2.4.1. Summarizes conversation history, SQLite session/task state, progressBoard, and multi-harness routing context into handoff.md for seamless continuation across Claude Code, OpenCode, Codex CLI, Antigravity, and Cursor CLI.
 ---
 
 # ASD Multi-Harness Session Handoff (`/asd-handoff`, `/handoff`)

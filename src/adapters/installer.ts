@@ -74,6 +74,7 @@ export interface SyncHarnessOptions {
   force?: boolean;
   projectRoot?: string;
   asdCliPath?: string;
+  runtimeDir?: string;
   noPath?: boolean;
 }
 
@@ -854,18 +855,62 @@ export function syncRepoVersionStrings(_asdRoot = getAsdRoot()): void {
   // No-op by design: sync must never mutate tracked repository source files or historical docs in-place.
 }
 
+export function resolveIsolatedRuntimeDir(
+  homeDir: string,
+  explicitRuntimeDir?: string
+): string {
+  if (explicitRuntimeDir && explicitRuntimeDir.trim().length > 0) {
+    return path.resolve(explicitRuntimeDir.trim());
+  }
+  if (process.env.ASD_RUNTIME_DIR && process.env.ASD_RUNTIME_DIR.trim().length > 0) {
+    return path.resolve(process.env.ASD_RUNTIME_DIR.trim());
+  }
+  const isRealHome = path.resolve(homeDir) === path.resolve(os.homedir());
+  const desktopCodeParent = path.join(homeDir, "Desktop", "code");
+  if (isRealHome && fs.existsSync(path.join(homeDir, "Desktop"))) {
+    return path.join(desktopCodeParent, "asd-runtime");
+  }
+  return path.join(homeDir, ".asd", "runtime");
+}
+
+export function stageIsolatedRuntime(asdRoot: string, runtimeDir: string): string {
+  const resolvedSource = path.resolve(asdRoot);
+  const resolvedTarget = path.resolve(runtimeDir);
+  if (resolvedSource !== resolvedTarget) {
+    ensureDir(resolvedTarget);
+    const pkgSrc = path.join(resolvedSource, "package.json");
+    if (fs.existsSync(pkgSrc)) {
+      fs.copyFileSync(pkgSrc, path.join(resolvedTarget, "package.json"));
+    }
+    for (const subDir of ["src", "presets", "scripts"]) {
+      const srcDir = path.join(resolvedSource, subDir);
+      const dstDir = path.join(resolvedTarget, subDir);
+      if (fs.existsSync(srcDir)) {
+        fs.rmSync(dstDir, { recursive: true, force: true });
+        fs.cpSync(srcDir, dstDir, { recursive: true, force: true });
+      }
+    }
+  }
+  return path.join(resolvedTarget, "src", "cli", "index.ts");
+}
+
 export async function syncHarnessConfigs(
   options?: SyncHarnessOptions
 ): Promise<SyncHarnessConfigsResult> {
   const homeDir = resolveHome(options?.homeDir);
   const asdRoot = getAsdRoot();
-  const asdCliPath = options?.asdCliPath || path.join(asdRoot, "src", "cli", "index.ts");
+  const runtimeDir = resolveIsolatedRuntimeDir(homeDir, options?.runtimeDir);
+  const stagedCliPath = options?.asdCliPath
+    ? options.asdCliPath
+    : stageIsolatedRuntime(asdRoot, runtimeDir);
+  const asdCliPath = stagedCliPath;
+  const effectiveCatalogRoot = options?.asdCliPath ? asdRoot : runtimeDir;
 
   // 1. Bootstrap presets, load catalog & native capabilities, and compute config hash
   const configHash = computeConfigHash(homeDir);
   const lastSync = loadLastSync(homeDir);
   const nativeCapabilitiesMap = loadHarnessNativeCapabilities();
-  const catalogMcpServers = loadCatalogMcpServers(homeDir, asdRoot);
+  const catalogMcpServers = loadCatalogMcpServers(homeDir, effectiveCatalogRoot);
 
   // Load routingConfig (local override if projectRoot provided, else global ~/.asd/routing.jsonc)
   let routingConfig: RoutingConfig | null = null;
@@ -912,7 +957,7 @@ export async function syncHarnessConfigs(
       lastSync.configHash === configHash &&
       lastSync.harnesses?.[harnessId]?.hash === configHash;
 
-    const allTargetsExist = targets.every((targetPath) => fs.existsSync(targetPath));
+    const allTargetsExist = fs.existsSync(asdCliPath) && targets.every((targetPath) => fs.existsSync(targetPath));
 
     if (isHashMatched && allTargetsExist) {
       harnessResults[harnessId] = {
@@ -1810,6 +1855,17 @@ export async function uninstallHarnessConfigs(
 
   // Remove ASD-managed PATH CLI shims
   removeCliPathShims(homeDir, removedFiles);
+
+  // Remove staged isolated runtime directory inside homeDir/.asd/runtime if present
+  const homeRuntimeDir = path.join(homeDir, ".asd", "runtime");
+  if (fs.existsSync(homeRuntimeDir)) {
+    try {
+      fs.rmSync(homeRuntimeDir, { recursive: true, force: true });
+      removedFiles.push(homeRuntimeDir);
+    } catch {
+      // Ignore
+    }
+  }
 
   // Remove last-sync.json
   const lastSyncPath = path.join(homeDir, ".asd", "state", "last-sync.json");

@@ -1,10 +1,10 @@
-# Agent Swarm Director (`agent-swarm-director` / ASD v2.4.0)
+# Agent Swarm Director (`agent-swarm-director` / ASD v2.4.1)
 
 [English](./README.md) | **한국어** | [🖥️ ASD-Nexus (공식 GUI)](https://github.com/yjsjs0987/ASD-Nexus) | [🏛️ 아키텍처 및 파일·함수 레퍼런스](./PROJECT_STATUS.md) | [🔌 외부 SDK 및 DB 레퍼런스](./EXTERNAL_SDK_REFERENCE.md) | [📋 패치 노트](./PATCH_NOTES_ko.md) | [📋 Patch Notes (EN)](./PATCH_NOTES.md)
 
 > **외부 의존성 0개(Zero-Dependency)로 Claude Code, OpenCode, Codex CLI, Antigravity, Cursor CLI 5개 AI 코딩 하네스를 통합 제어하는 범용 멀티 에이전트 오케스트레이션 하네스 및 SDK**
 
-**Agent Swarm Director (ASD v2.4.0)**는 5대 AI 코딩 하네스 전체에서 동작하는 범용 멀티 에이전트 컨트롤 플레인입니다. 외부 npm 런타임 패키지를 단 하나도 사용하지 않고(`dependencies: {}`), 순수 Node.js(`>=22.13.0`) 네이티브 TypeScript 실행과 내장 `node:sqlite`(WAL 모드)만으로 동작하며, 외부 GUI([**ASD-Nexus**](https://github.com/yjsjs0987/ASD-Nexus)) 연동을 위한 완전한 Node.js SDK를 제공합니다.
+**Agent Swarm Director (ASD v2.4.1)**는 5대 AI 코딩 하네스 전체에서 동작하는 범용 멀티 에이전트 컨트롤 플레인입니다. 외부 npm 런타임 패키지를 단 하나도 사용하지 않고(`dependencies: {}`), 순수 Node.js(`>=22.13.0`) 네이티브 TypeScript 실행과 내장 `node:sqlite`(WAL 모드)만으로 동작하며, 외부 GUI([**ASD-Nexus**](https://github.com/yjsjs0987/ASD-Nexus)) 연동을 위한 완전한 Node.js SDK를 제공합니다.
 
 > [!TIP]
 > ### 🖥️ 공식 GUI 프로젝트 안내 — **[ASD-Nexus](https://github.com/yjsjs0987/ASD-Nexus)**

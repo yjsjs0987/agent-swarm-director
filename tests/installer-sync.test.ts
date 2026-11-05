@@ -623,3 +623,36 @@ test("F20: OpenCode opencode.jsonc with comments is preserved and prevents dupli
     removeTempDir(f20Home);
   }
 });
+
+test("Runtime Isolation: syncHarnessConfigs stages isolated runtime copy and wires all harness hooks to the isolated runtime path", async () => {
+  const isoHome = createTempDir("asd-iso-home-");
+  const customRuntimeDir = createTempDir("asd-iso-runtime-");
+  try {
+    const res = await syncHarnessConfigs({
+      homeDir: isoHome,
+      runtimeDir: customRuntimeDir,
+    });
+    assert.equal(res.status, "updated");
+
+    const expectedCliPath = path.join(customRuntimeDir, "src", "cli", "index.ts");
+    assert.ok(fs.existsSync(expectedCliPath), "Staged CLI entrypoint must exist in isolated runtimeDir");
+    assert.ok(fs.existsSync(path.join(customRuntimeDir, "package.json")), "Staged package.json must exist");
+
+    const claudeSettings = JSON.parse(
+      fs.readFileSync(path.join(isoHome, ".claude", "settings.json"), "utf8")
+    );
+    const claudeHookCmd = claudeSettings.hooks.PreToolUse[0].hooks[0].command;
+    assert.ok(
+      claudeHookCmd.includes(expectedCliPath),
+      `Claude PreToolUse hook (${claudeHookCmd}) must point to isolated runtime (${expectedCliPath})`
+    );
+    assert.equal(
+      claudeHookCmd.includes(process.cwd()),
+      false,
+      "Claude hook must NOT point directly to live development repository"
+    );
+  } finally {
+    removeTempDir(isoHome);
+    removeTempDir(customRuntimeDir);
+  }
+});
