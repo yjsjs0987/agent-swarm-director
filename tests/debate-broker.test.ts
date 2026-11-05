@@ -509,6 +509,7 @@ Hope this helps!
           await runDebateBroker({
             projectRoot,
             sessionId,
+            debateId: "D-ALL-FAIL",
             topic: "All fail topic",
             proposal: "This should fail because no reviewers survive",
             commandRunner: mockRunner,
@@ -517,6 +518,26 @@ Hope this helps!
         },
         /All debate reviewers failed or timed out in Round 1/
       );
+
+      // F14: debate row must be transitioned to 'failed' with round1_bundle_json recorded, and prompt.md finalized
+      const failedRow = db.getDebate("D-ALL-FAIL");
+      assert.ok(failedRow, "Debate row must exist");
+      assert.equal(failedRow.status, "failed");
+      assert.ok(failedRow.round1_bundle_json, "round1_bundle_json must record failedReviewers");
+      const r1Bundle = JSON.parse(failedRow.round1_bundle_json);
+      assert.equal(r1Bundle.openings.length, 0);
+      assert.ok(r1Bundle.failedReviewers.length >= 1);
+
+      const subagentsDir = path.join(projectRoot, ".asd", "sessions", sessionId, "subagents");
+      if (fs.existsSync(subagentsDir)) {
+        for (const entry of fs.readdirSync(subagentsDir)) {
+          assert.equal(
+            fs.existsSync(path.join(subagentsDir, entry, "prompt.md")),
+            false,
+            "prompt.md must be purged by finalizeSubagentArtifacts on all-fail debate"
+          );
+        }
+      }
     });
   });
 

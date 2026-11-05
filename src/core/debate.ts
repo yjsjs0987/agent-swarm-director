@@ -950,6 +950,20 @@ export async function runDebateBroker(
 
     // Graceful recovery check: must have at least 1 valid surviving opening
     if (survivingOpenings.length === 0) {
+      db.updateDebateVerdict(debateId, "failed", {
+        round1BundleJson: JSON.stringify({
+          openings: [],
+          failedReviewers,
+        }),
+      });
+      for (const sid of spawnedDebateSubIds) {
+        finalizeSubagentArtifacts({
+          projectRoot: options.projectRoot,
+          sessionId: options.sessionId,
+          subSessionId: sid,
+          keep: "tail",
+        });
+      }
       const errDetails = failedReviewers
         .map((f) => `[@${f.harness}/${f.model}]: ${f.error}`)
         .join("; ");
