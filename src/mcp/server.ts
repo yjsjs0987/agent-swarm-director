@@ -1915,6 +1915,7 @@ export class AsdMcpServer {
       status?: TaskStatus;
     };
 
+    const autoApprove = session.auto_approve !== 0;
     if (task.track === "LIGHT") {
       verifyResult = verifyAndCommitLightTask({
         projectRoot: this.projectRoot,
@@ -1924,6 +1925,7 @@ export class AsdMcpServer {
         verifyCmd: verifyCmd ?? task.verify_cmd,
         sessionId,
         db: this.db,
+        autoApprove,
       });
     } else {
       verifyResult = await verifyAndMergeHeavyTask({
@@ -1936,11 +1938,14 @@ export class AsdMcpServer {
         verifyCmd: verifyCmd ?? task.verify_cmd,
         sessionId,
         db: this.db,
+        autoApprove,
       });
     }
 
     let autoCreatedTasks: AutoCreatedCrossScopeTask[] = [];
     let deferredCrossScopeRequests: DeferredCrossScopeRequest[] = [];
+
+    const isPendingApproval = verifyResult.verified && verifyResult.status === "verifying";
 
     if (task.sub_session_id) {
       try {
@@ -1951,13 +1956,17 @@ export class AsdMcpServer {
           const meta = JSON.parse(fs.readFileSync(metaPath, "utf8")) as Record<string, unknown>;
           const finishedAt = Date.now();
           const startedAt = typeof meta.startedAt === "number" ? meta.startedAt : finishedAt;
-          meta.status = verifyResult.verified ? "done" : "failed";
-          meta.finishedAt = finishedAt;
-          meta.durationMs = Math.max(0, finishedAt - startedAt);
-          atomicWriteFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
-          const logAppend = verifyResult.verified
-            ? `[verify:PASS] Commit: ${verifyResult.commitSha || "n/a"} | Summary: ${doneClaim?.summary || "completed"}\n`
-            : `[verify:FAIL] ${verifyResult.error || "Verification failed"}\n`;
+          if (!isPendingApproval) {
+            meta.status = verifyResult.verified ? "done" : "failed";
+            meta.finishedAt = finishedAt;
+            meta.durationMs = Math.max(0, finishedAt - startedAt);
+            atomicWriteFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+          }
+          const logAppend = isPendingApproval
+            ? `[verify:PENDING_APPROVAL] Summary: ${doneClaim?.summary || "awaiting manual approval"}\n`
+            : verifyResult.verified
+              ? `[verify:PASS] Commit: ${verifyResult.commitSha || "n/a"} | Summary: ${doneClaim?.summary || "completed"}\n`
+              : `[verify:FAIL] ${verifyResult.error || "Verification failed"}\n`;
           fs.appendFileSync(logPath, logAppend, "utf8");
         }
       } catch {
@@ -1966,8 +1975,15 @@ export class AsdMcpServer {
     }
 
     if (verifyResult.verified) {
-      this.db.recordTaskVerified(sessionId, taskId, verifyResult.commitSha || "", doneClaim, task.duration_ms ?? 0);
-      this.db.resetNoProgress(sessionId);
+      if (isPendingApproval) {
+        this.db.updateTaskStatus(sessionId, taskId, "verifying", {
+          doneClaimJson: JSON.stringify(doneClaim),
+        });
+        this.db.resetNoProgress(sessionId);
+      } else {
+        this.db.recordTaskVerified(sessionId, taskId, verifyResult.commitSha || "", doneClaim, task.duration_ms ?? 0);
+        this.db.resetNoProgress(sessionId);
+      }
 
       if (Array.isArray(doneClaim.cross_scope_requests) && doneClaim.cross_scope_requests.length > 0) {
         const crossScopeRes = this.processCrossScopeRequests(sessionId, task.turn, [
@@ -2009,9 +2025,11 @@ export class AsdMcpServer {
       deferredCrossScopeRequests
     );
 
-    const finalStatus: TaskStatus = verifyResult.verified
-      ? "done"
-      : verifyResult.status ?? (this.db.getTask(sessionId, taskId)?.status as TaskStatus) ?? "failed";
+    const finalStatus: TaskStatus = isPendingApproval
+      ? "verifying"
+      : verifyResult.verified
+        ? "done"
+        : verifyResult.status ?? (this.db.getTask(sessionId, taskId)?.status as TaskStatus) ?? "failed";
 
     if ((finalStatus === "done" || finalStatus === "failed") && task.sub_session_id) {
       finalizeSubagentArtifacts({

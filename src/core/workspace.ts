@@ -30,8 +30,9 @@ import { ensureGitExclude, ensureProjectInitialized, getGitExcludePath } from ".
 import type { SqliteDriver } from "./db.ts";
 import { verifyChangedFilesBoundary } from "./policy.ts";
 import { hasLeakedSecrets } from "./redact.ts";
+import { renderPlanMd, renderSessionSummaryMd } from "./render.ts";
 import { finalizeSubagentArtifacts } from "./spawner.ts";
-import type { TaskStatus } from "./types.ts";
+import type { DoneClaim, TaskStatus } from "./types.ts";
 
 export { ensureGitExclude, getGitExcludePath };
 
@@ -1520,6 +1521,58 @@ export async function approvePendingTask(options: {
     allowedFiles = [...allowedFiles, "tests/**", "**/*.test.ts", "**/*.spec.ts"];
   }
 
+  const parseSavedDoneClaim = (fallbackSummary: string, changedFiles?: string[]): DoneClaim => {
+    if (task.done_claim_json) {
+      try {
+        const parsed = JSON.parse(task.done_claim_json) as Partial<DoneClaim>;
+        if (parsed && typeof parsed === "object") {
+          return {
+            summary: typeof parsed.summary === "string" && parsed.summary.trim() ? parsed.summary : fallbackSummary,
+            changed_files: Array.isArray(parsed.changed_files) && parsed.changed_files.length > 0 ? parsed.changed_files : (changedFiles ?? allowedFiles),
+            key_decisions: Array.isArray(parsed.key_decisions) ? parsed.key_decisions : ["Approved via manual review gate"],
+            risks: Array.isArray(parsed.risks) ? parsed.risks : [],
+            ...(Array.isArray(parsed.cross_scope_requests) ? { cross_scope_requests: parsed.cross_scope_requests } : {}),
+          };
+        }
+      } catch {
+        // Fallback below
+      }
+    }
+    return {
+      summary: fallbackSummary,
+      changed_files: changedFiles ?? allowedFiles,
+      key_decisions: ["Approved via manual review gate"],
+      risks: [],
+    };
+  };
+
+  const finalizeSessionAfterApproval = (): void => {
+    const sessionRow = db.getSession(sessionId);
+    if (!sessionRow) return;
+    const allTasks = db.getSessionTasks(sessionId);
+    const allDone = allTasks.length > 0 && allTasks.every((t) => t.status === "done");
+    if (allDone) {
+      db.updateSessionPhase(sessionId, "done");
+      const updatedSession = db.getSession(sessionId) ?? sessionRow;
+      const sessionDebates = db.getSessionDebates(sessionId);
+      renderSessionSummaryMd(
+        updatedSession,
+        allTasks,
+        sessionDebates,
+        path.join(projectRoot, ".asd", "summary.md")
+      );
+      renderSessionSummaryMd(
+        updatedSession,
+        allTasks,
+        sessionDebates,
+        path.join(projectRoot, ".asd", "sessions", sessionId, "summary.md")
+      );
+      renderPlanMd(updatedSession, allTasks);
+    } else {
+      renderPlanMd(sessionRow, allTasks);
+    }
+  };
+
   if (task.track === "HEAVY" || (task.worktree_path && fs.existsSync(task.worktree_path))) {
     const res = await verifyAndMergeHeavyTask({
       projectRoot,
@@ -1539,14 +1592,10 @@ export async function approvePendingTask(options: {
         sessionId,
         taskId,
         res.commitSha || "",
-        {
-          summary: `Approved and merged task ${task.task_id}: ${task.title}`,
-          changed_files: res.changedFiles ?? allowedFiles,
-          key_decisions: ["Approved via manual review gate"],
-          risks: [],
-        },
+        parseSavedDoneClaim(`Approved and merged task ${task.task_id}: ${task.title}`, res.changedFiles),
         task.duration_ms ?? 0
       );
+      finalizeSessionAfterApproval();
     }
     if ((res.status === "done" || res.status === "failed") && task.sub_session_id) {
       finalizeSubagentArtifacts({
@@ -1579,14 +1628,10 @@ export async function approvePendingTask(options: {
       sessionId,
       taskId,
       res.commitSha || "",
-      {
-        summary: `Approved and committed task ${task.task_id}: ${task.title}`,
-        changed_files: res.changedFiles ?? allowedFiles,
-        key_decisions: ["Approved via manual review gate"],
-        risks: [],
-      },
+      parseSavedDoneClaim(`Approved and committed task ${task.task_id}: ${task.title}`, res.changedFiles),
       task.duration_ms ?? 0
     );
+    finalizeSessionAfterApproval();
   }
   const finalLightStatus = res.status ?? (res.verified ? "done" : "failed");
   if ((finalLightStatus === "done" || finalLightStatus === "failed") && task.sub_session_id) {

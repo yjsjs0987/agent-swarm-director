@@ -1382,6 +1382,102 @@ describe("ASD MCP Server (src/mcp/server.ts)", () => {
       assert.ok(summaryContent.includes("complete-session-1"));
       assert.ok(summaryContent.includes("100%"));
     });
+    test("F02: handleVerify respects session.auto_approve = 0 by pausing LIGHT/HEAVY tasks at verifying until approvePendingTask", async () => {
+      const projectRoot = makeProjectRoot();
+      const server = new AsdMcpServer({ projectRoot, autoSync: false });
+      openServers.push(server);
+
+      await server.handleRequest("asd_plan", {
+        action: "create",
+        sessionId: "verify-manual-gate-f02",
+        tasks: [
+          { taskId: "T1.1", turn: 1, title: "Light gated task", track: "LIGHT", targetFiles: ["gated-light.ts"] },
+          { taskId: "T1.2", turn: 1, title: "Heavy gated task", track: "HEAVY", targetFiles: ["gated-heavy.ts"] },
+        ],
+      });
+
+      const db = openProjectDb(projectRoot);
+      db.updateSessionHarnessInfo("verify-manual-gate-f02", { autoApprove: false });
+      assert.equal(db.getSession("verify-manual-gate-f02")?.auto_approve, 0);
+
+      // Claim T1.2 to create worktree
+      await server.handleRequest("asd_dispatch", {
+        sessionId: "verify-manual-gate-f02",
+        turn: 1,
+        mode: "claim_only",
+      });
+
+      // 1. LIGHT task edit & verify
+      fs.writeFileSync(path.join(projectRoot, "gated-light.ts"), "export const lightGated = 1;\n", "utf8");
+      const lightVerify = (await server.handleRequest("asd_verify", {
+        sessionId: "verify-manual-gate-f02",
+        taskId: "T1.1",
+        doneClaim: {
+          summary: "Light gated summary",
+          changed_files: ["gated-light.ts"],
+          key_decisions: ["Hold for manual review"],
+          risks: [],
+        },
+      })) as AsdVerifyOutput;
+
+      assert.equal(lightVerify.verified, true);
+      assert.equal(lightVerify.status, "verifying");
+      assert.equal(lightVerify.commitSha, undefined);
+      assert.equal(db.getTask("verify-manual-gate-f02", "T1.1")?.status, "verifying");
+      assert.notEqual(db.getSession("verify-manual-gate-f02")?.phase, "done");
+
+      // 2. HEAVY task edit & verify
+      const wtPath = path.join(projectRoot, ".asd", "wt", "1-T1.2");
+      fs.writeFileSync(path.join(wtPath, "gated-heavy.ts"), "export const heavyGated = 2;\n", "utf8");
+      const heavyVerify = (await server.handleRequest("asd_verify", {
+        sessionId: "verify-manual-gate-f02",
+        taskId: "T1.2",
+        doneClaim: {
+          summary: "Heavy gated summary",
+          changed_files: ["gated-heavy.ts"],
+          key_decisions: ["Keep worktree for diff"],
+          risks: [],
+        },
+      })) as AsdVerifyOutput;
+
+      assert.equal(heavyVerify.verified, true);
+      assert.equal(heavyVerify.status, "verifying");
+      assert.equal(heavyVerify.commitSha, undefined);
+      assert.equal(db.getTask("verify-manual-gate-f02", "T1.2")?.status, "verifying");
+      assert.ok(fs.existsSync(wtPath), "Worktree must stay intact while verifying");
+      assert.notEqual(db.getSession("verify-manual-gate-f02")?.phase, "done");
+
+      // Approve both tasks via approvePendingTask
+      const { approvePendingTask } = await import("../src/core/workspace.ts");
+      const app1 = await approvePendingTask({
+        projectRoot,
+        sessionId: "verify-manual-gate-f02",
+        taskId: "T1.1",
+        db,
+      });
+      assert.equal(app1.ok, true);
+      assert.equal(app1.status, "done");
+      assert.ok(app1.commitSha);
+
+      const app2 = await approvePendingTask({
+        projectRoot,
+        sessionId: "verify-manual-gate-f02",
+        taskId: "T1.2",
+        db,
+      });
+      assert.equal(app2.ok, true);
+      assert.equal(app2.status, "done");
+      assert.ok(app2.commitSha);
+      assert.equal(fs.existsSync(wtPath), false);
+
+      // Now that all tasks are approved and done, session phase must be 'done' and summary.md written
+      assert.equal(db.getSession("verify-manual-gate-f02")?.phase, "done");
+      assert.ok(fs.existsSync(path.join(projectRoot, ".asd", "summary.md")));
+      const savedClaim = JSON.parse(db.getTask("verify-manual-gate-f02", "T1.2")?.done_claim_json || "{}");
+      assert.equal(savedClaim.summary, "Heavy gated summary");
+
+      db.close();
+    });
   });
 
   describe("6. asd_debate Tool", () => {
