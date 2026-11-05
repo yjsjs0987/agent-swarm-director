@@ -32,6 +32,8 @@ import {
   detectAvailableCliHarnesses,
   inferModelFamily,
   isFallbackTriggerOutput,
+  normalizeAgentRole,
+  resolveLightSubagentRoute,
   runWithFallbacks,
   selectDiverseReviewer,
 } from "./router.ts";
@@ -137,6 +139,10 @@ export interface RunDebateBrokerOptions {
   proposerRoute?: ProposalRouteInput;
   routingConfig?: RoutingConfig;
   runtimeCapabilities?: RuntimeCapabilities;
+  harnesses?: HarnessId[];
+  roles?: AgentRole[];
+  models?: string[];
+  count?: number;
   reviewerRoles?: AgentRole[];
   reviewerRoutes?: Array<{
     harness: HarnessId;
@@ -658,6 +664,401 @@ export function buildRound2Prompt(
 // Core Debate Broker
 // ============================================================================
 
+const DEFAULT_DEBATE_ROLE_CYCLE: readonly AgentRole[] = [
+  "critic",
+  "architect",
+  "planner",
+  "worker",
+  "scout",
+];
+
+const DEFAULT_HARNESS_DEBATE_MODELS: Record<HarnessId, string> = {
+  "claude-code": "claude-opus-4-6",
+  opencode: "glm-5",
+  codex: "gpt-5-codex",
+  antigravity: "gemini-3-pro",
+  cursor: "claude-sonnet-4-6",
+};
+
+/**
+ * Resolves the best HEAVY/external CLI debate model and fallbacks configured for a specific
+ * `(harness, role)` pair in `routing.jsonc`.
+ */
+export function resolveHarnessDebateModel(
+  harness: HarnessId,
+  role: AgentRole,
+  routingConfig?: RoutingConfig,
+  occurrenceIndex = 0
+): {
+  model: string;
+  modelFamily: string;
+  fallbacks: Array<{ harness: HarnessId; model: string; modelFamily: string }>;
+} {
+  const agentsMap = routingConfig?.heavyRouting?.agents ?? routingConfig?.agents;
+  const categoriesMap =
+    routingConfig?.heavyRouting?.categories ?? routingConfig?.categories;
+
+  const matchedModels: string[] = [];
+  const crossFallbacks: Array<{
+    harness: HarnessId;
+    model: string;
+    modelFamily: string;
+  }> = [];
+
+  const collectFromEntry = (
+    entry?: {
+      harness?: HarnessId;
+      model?: string;
+      modelFamily?: string;
+      fallbacks?: Array<{ harness: HarnessId; model: string; modelFamily?: string }>;
+    }
+  ) => {
+    if (!entry) return;
+    const all = [
+      ...(entry.harness && entry.model
+        ? [{ harness: entry.harness, model: entry.model, modelFamily: entry.modelFamily }]
+        : []),
+      ...(entry.fallbacks ?? []),
+    ];
+    for (const c of all) {
+      if (!c.model || !c.model.trim()) continue;
+      const m = c.model.trim();
+      if (c.harness === harness) {
+        if (!matchedModels.includes(m)) matchedModels.push(m);
+      } else if (
+        c.harness &&
+        !crossFallbacks.some((f) => f.harness === c.harness && f.model === m)
+      ) {
+        crossFallbacks.push({
+          harness: c.harness,
+          model: m,
+          modelFamily: c.modelFamily ?? inferModelFamily(m, c.harness),
+        });
+      }
+    }
+  };
+
+  // 1. Role-specific entry in agents table
+  const canonicalRole = normalizeAgentRole(role);
+  collectFromEntry(agentsMap?.[canonicalRole] ?? agentsMap?.[role]);
+
+  // 2. Other roles in agents table + high/medium/general categories
+  for (const r of DEFAULT_DEBATE_ROLE_CYCLE) {
+    if (r !== canonicalRole) collectFromEntry(agentsMap?.[r]);
+  }
+  for (const catKey of ["high", "medium", "general", "research"]) {
+    collectFromEntry(categoriesMap?.[catKey]);
+  }
+
+  // 3. Fallback to lightSubagents (for non-enum models or when agents table has no match)
+  if (matchedModels.length === 0) {
+    const lightRoute = resolveLightSubagentRoute(harness, canonicalRole, routingConfig);
+    if (lightRoute && harness !== "antigravity") {
+      matchedModels.push(lightRoute.model);
+      for (const fb of lightRoute.fallbacks) {
+        if (!matchedModels.includes(fb.model)) matchedModels.push(fb.model);
+      }
+    }
+  }
+
+  const chosenModel =
+    matchedModels[occurrenceIndex] ??
+    matchedModels[0] ??
+    DEFAULT_HARNESS_DEBATE_MODELS[harness] ??
+    "default";
+  const sameHarnessFallbacks = matchedModels
+    .filter((m) => m !== chosenModel)
+    .map((m) => ({
+      harness,
+      model: m,
+      modelFamily: inferModelFamily(m, harness),
+    }));
+
+  return {
+    model: chosenModel,
+    modelFamily: inferModelFamily(chosenModel, harness),
+    fallbacks: [...sameHarnessFallbacks, ...crossFallbacks],
+  };
+}
+
+/**
+ * Resolves the Round 1 reviewer list for `runDebateBroker` based on:
+ * 1. Explicit `reviewerRoutes` or `models` (`[role@]harness[:model]`)
+ * 2. Explicit `harnesses` (`--harnesses h1,h2,...`) + optional `count` / `roles`
+ * 3. Explicit `roles` (`--roles r1,r2,...`) or `count` (`--count N`) from `routing.jsonc`
+ * 4. Default 2-reviewer diverse selection (`critic`, `architect`)
+ */
+export function resolveDebateReviewers(options: {
+  proposerRoute?: ProposalRouteInput;
+  routingConfig?: RoutingConfig;
+  runtimeCapabilities?: RuntimeCapabilities;
+  harnesses?: HarnessId[];
+  roles?: AgentRole[];
+  models?: string[];
+  count?: number;
+  reviewerRoles?: AgentRole[];
+  reviewerRoutes?: RunDebateBrokerOptions["reviewerRoutes"];
+  hasMockRunner?: boolean;
+}): { reviewers: ReviewerSpec[]; diversityDegraded: boolean } {
+  const reviewers: ReviewerSpec[] = [];
+  let diversityDegraded = false;
+  const effectiveRoutingConfig = options.routingConfig;
+  const effectiveCapabilities = options.runtimeCapabilities;
+  const explicitRoles = options.roles ?? options.reviewerRoles;
+
+  // 1. Explicit reviewerRoutes
+  if (options.reviewerRoutes && options.reviewerRoutes.length > 0) {
+    for (const route of options.reviewerRoutes) {
+      const family =
+        route.modelFamily ?? inferModelFamily(route.model, route.harness);
+      reviewers.push({
+        role: route.role ?? "critic",
+        harness: route.harness,
+        model: route.model,
+        modelFamily: family,
+        diversityDegraded: false,
+      });
+    }
+    return { reviewers, diversityDegraded };
+  }
+
+  // 2. Explicit models specs (e.g. ["opencode:glm-5", "codex:gpt-5-codex"] or ["critic@opencode:glm-5"])
+  if (options.models && options.models.length > 0) {
+    const harnessCounts = new Map<HarnessId, number>();
+    for (let i = 0; i < options.models.length; i++) {
+      const rawSpec = options.models[i]!.trim();
+      if (!rawSpec) continue;
+      let role: AgentRole =
+        explicitRoles?.[i] ??
+        DEFAULT_DEBATE_ROLE_CYCLE[i % DEFAULT_DEBATE_ROLE_CYCLE.length]!;
+      let remainder = rawSpec;
+      if (remainder.includes("@")) {
+        const atIdx = remainder.indexOf("@");
+        const rolePart = remainder.slice(0, atIdx).trim();
+        if (rolePart) role = normalizeAgentRole(rolePart);
+        remainder = remainder.slice(atIdx + 1).trim();
+      }
+      const sepIdx = remainder.indexOf(":");
+      const harness = (
+        sepIdx >= 0 ? remainder.slice(0, sepIdx).trim() : remainder
+      ) as HarnessId;
+      const explicitModel =
+        sepIdx >= 0 ? remainder.slice(sepIdx + 1).trim() : "";
+      const occ = harnessCounts.get(harness) ?? 0;
+      harnessCounts.set(harness, occ + 1);
+      const resolved = resolveHarnessDebateModel(
+        harness,
+        role,
+        effectiveRoutingConfig,
+        occ
+      );
+      const model = explicitModel || resolved.model;
+      reviewers.push({
+        role,
+        harness,
+        model,
+        modelFamily: inferModelFamily(model, harness),
+        diversityDegraded: false,
+        fallbacks: resolved.fallbacks,
+      });
+    }
+    if (reviewers.length > 0) {
+      const families = new Set(reviewers.map((r) => r.modelFamily));
+      if (reviewers.length > 1 && families.size === 1) diversityDegraded = true;
+      return { reviewers, diversityDegraded };
+    }
+  }
+
+  // 3. Explicit harnesses list (e.g. --harnesses opencode,codex,claude-code)
+  if (options.harnesses && options.harnesses.length > 0) {
+    const cleanHarnesses = options.harnesses.filter(Boolean);
+    const targetCount =
+      options.count && Number.isFinite(options.count) && options.count > 0
+        ? Math.min(Math.max(1, Math.trunc(options.count)), 10)
+        : cleanHarnesses.length;
+
+    const expandedHarnesses: HarnessId[] = [];
+    for (let i = 0; i < targetCount; i++) {
+      expandedHarnesses.push(cleanHarnesses[i % cleanHarnesses.length]!);
+    }
+
+    const harnessCounts = new Map<HarnessId, number>();
+    for (let i = 0; i < expandedHarnesses.length; i++) {
+      const harness = expandedHarnesses[i]!;
+      const role: AgentRole =
+        explicitRoles?.[i] ??
+        DEFAULT_DEBATE_ROLE_CYCLE[i % DEFAULT_DEBATE_ROLE_CYCLE.length]!;
+      const occ = harnessCounts.get(harness) ?? 0;
+      harnessCounts.set(harness, occ + 1);
+      const resolved = resolveHarnessDebateModel(
+        harness,
+        role,
+        effectiveRoutingConfig,
+        occ
+      );
+      reviewers.push({
+        role,
+        harness,
+        model: resolved.model,
+        modelFamily: resolved.modelFamily,
+        diversityDegraded: false,
+        fallbacks: resolved.fallbacks,
+      });
+    }
+    const families = new Set(reviewers.map((r) => r.modelFamily));
+    if (reviewers.length > 1 && families.size === 1) diversityDegraded = true;
+    return { reviewers, diversityDegraded };
+  }
+
+  // 4. Role-based / Count-based / Auto-assigned selection from routing.jsonc
+  const proposerRoute: ProposalRouteInput = options.proposerRoute ?? {
+    harness: "claude-code",
+    model: "claude-opus-4-6",
+    modelFamily: "claude",
+  };
+
+  let targetRoles: AgentRole[];
+  if (explicitRoles && explicitRoles.length > 0) {
+    targetRoles = [...explicitRoles];
+    if (options.count && options.count > targetRoles.length) {
+      const clamped = Math.min(Math.trunc(options.count), 10);
+      while (targetRoles.length < clamped) {
+        targetRoles.push(
+          DEFAULT_DEBATE_ROLE_CYCLE[
+            targetRoles.length % DEFAULT_DEBATE_ROLE_CYCLE.length
+          ]!
+        );
+      }
+    } else if (options.count && options.count > 0 && options.count < targetRoles.length) {
+      targetRoles = targetRoles.slice(0, Math.trunc(options.count));
+    }
+  } else if (options.count && Number.isFinite(options.count) && options.count > 0) {
+    const clamped = Math.min(Math.max(1, Math.trunc(options.count)), 10);
+    targetRoles = [];
+    for (let i = 0; i < clamped; i++) {
+      targetRoles.push(
+        DEFAULT_DEBATE_ROLE_CYCLE[i % DEFAULT_DEBATE_ROLE_CYCLE.length]!
+      );
+    }
+  } else {
+    targetRoles = ["critic", "architect"];
+  }
+
+  const isExplicitRoleOrCountSelection =
+    Boolean(options.roles && options.roles.length > 0) ||
+    Boolean(options.count && options.count > 0);
+  const agentsMap =
+    effectiveRoutingConfig?.heavyRouting?.agents ??
+    effectiveRoutingConfig?.agents;
+  const usedPairs = new Set<string>();
+  let prevRoute: ProposalRouteInput = proposerRoute;
+
+  for (let i = 0; i < targetRoles.length; i++) {
+    const role = targetRoles[i]!;
+    const canonicalRole = normalizeAgentRole(role);
+
+    // If user explicitly requested roles from routing.jsonc (e.g. --roles critic,architect,worker),
+    // try the role's configured route/fallbacks in routing.jsonc first (preferring unused harness:model pairs)
+    if (isExplicitRoleOrCountSelection && agentsMap?.[canonicalRole]) {
+      const entry = agentsMap[canonicalRole]!;
+      const candidates = [
+        {
+          harness: entry.harness,
+          model: entry.model,
+          modelFamily:
+            entry.modelFamily ?? inferModelFamily(entry.model, entry.harness),
+        },
+        ...(entry.fallbacks ?? []).map((fb) => ({
+          harness: fb.harness,
+          model: fb.model,
+          modelFamily:
+            fb.modelFamily ?? inferModelFamily(fb.model, fb.harness),
+        })),
+      ].filter((c) => {
+        if (!c.harness || !c.model) return false;
+        if (
+          effectiveCapabilities?.availableHarnesses &&
+          effectiveCapabilities.availableHarnesses.length > 0 &&
+          !effectiveCapabilities.availableHarnesses.includes(c.harness)
+        ) {
+          return false;
+        }
+        if (
+          effectiveCapabilities?.availableModelFamilies &&
+          effectiveCapabilities.availableModelFamilies.length > 0 &&
+          !effectiveCapabilities.availableModelFamilies.includes(c.modelFamily)
+        ) {
+          return false;
+        }
+        return true;
+      });
+
+      const chosen =
+        candidates.find((c) => !usedPairs.has(`${c.harness}:${c.model}`)) ??
+        candidates[0];
+      if (chosen) {
+        usedPairs.add(`${chosen.harness}:${chosen.model}`);
+        const remainingFallbacks = candidates.filter(
+          (c) => !(c.harness === chosen.harness && c.model === chosen.model)
+        );
+        reviewers.push({
+          role,
+          harness: chosen.harness,
+          model: chosen.model,
+          modelFamily: chosen.modelFamily,
+          diversityDegraded: false,
+          fallbacks: remainingFallbacks,
+        });
+        prevRoute = chosen;
+        continue;
+      }
+    }
+
+    const sel = selectDiverseReviewer(
+      prevRoute,
+      role,
+      effectiveRoutingConfig,
+      effectiveCapabilities
+    );
+    if (sel.diversityDegraded) diversityDegraded = true;
+
+    const isDuplicateClone =
+      !options.hasMockRunner &&
+      !isExplicitRoleOrCountSelection &&
+      reviewers.some((r) => r.harness === sel.harness && r.model === sel.model);
+
+    if (isDuplicateClone) {
+      diversityDegraded = true;
+    } else {
+      usedPairs.add(`${sel.harness}:${sel.model}`);
+      reviewers.push({
+        role,
+        harness: sel.harness,
+        model: sel.model,
+        modelFamily: sel.modelFamily,
+        diversityDegraded: sel.diversityDegraded,
+        fallbacks: sel.route.fallbacks,
+      });
+      prevRoute = {
+        harness: sel.harness,
+        model: sel.model,
+        modelFamily: sel.modelFamily,
+      };
+    }
+  }
+
+  const families = new Set(reviewers.map((r) => r.modelFamily));
+  if (reviewers.length > 1 && families.size === 1) {
+    diversityDegraded = true;
+  }
+
+  return { reviewers, diversityDegraded };
+}
+
+// ============================================================================
+// Core Debate Broker
+// ============================================================================
+
 /**
  * Executes zero-polling parallel blind cross-model debate.
  *
@@ -709,9 +1110,7 @@ export async function runDebateBroker(
       `[Debate ${debateId}] Initialized debate for topic: "${options.topic}"`
     );
 
-    // 1. Select Reviewers prioritizing cross-model family diversity
-    let diversityDegraded = false;
-    const reviewers: ReviewerSpec[] = [];
+    // 1. Select Reviewers (explicit harnesses/roles/models/count or diverse auto-selection)
     const effectiveRoutingConfig =
       options.routingConfig ??
       loadRoutingConfig(options.projectRoot, options.homeDir);
@@ -721,80 +1120,20 @@ export async function runDebateBroker(
         ? { availableHarnesses: detectAvailableCliHarnesses() }
         : undefined);
 
-    if (options.reviewerRoutes && options.reviewerRoutes.length > 0) {
-      for (const route of options.reviewerRoutes) {
-        const family =
-          route.modelFamily ?? inferModelFamily(route.model, route.harness);
-        reviewers.push({
-          role: route.role ?? "critic",
-          harness: route.harness,
-          model: route.model,
-          modelFamily: family,
-          diversityDegraded: false,
-        });
-      }
-    } else {
-      const proposerRoute: ProposalRouteInput = options.proposerRoute ?? {
-        harness: "claude-code",
-        model: "claude-opus-4-6",
-        modelFamily: "claude",
-      };
-
-      const roles = options.reviewerRoles ?? ["critic", "architect"];
-
-      // Select Reviewer 1 diverse against proposer
-      const role1 = roles[0] ?? "critic";
-      const sel1 = selectDiverseReviewer(
-        proposerRoute,
-        role1,
-        effectiveRoutingConfig,
-        effectiveCapabilities
-      );
-      if (sel1.diversityDegraded) diversityDegraded = true;
-
-      reviewers.push({
-        role: role1,
-        harness: sel1.harness,
-        model: sel1.model,
-        modelFamily: sel1.modelFamily,
-        diversityDegraded: sel1.diversityDegraded,
-        fallbacks: sel1.route.fallbacks,
-      });
-
-      // Select Reviewer 2 diverse against Reviewer 1 and proposer
-      if (roles.length > 1) {
-        const role2 = roles[1] ?? "architect";
-        const sel2 = selectDiverseReviewer(
-          {
-            harness: sel1.harness,
-            model: sel1.model,
-            modelFamily: sel1.modelFamily,
-          },
-          role2,
-          effectiveRoutingConfig,
-          effectiveCapabilities
-        );
-        if (sel2.diversityDegraded) diversityDegraded = true;
-
-        const isDuplicateClone =
-          !options.commandRunner &&
-          sel2.harness === sel1.harness &&
-          sel2.model === sel1.model;
-
-        if (isDuplicateClone) {
-          diversityDegraded = true;
-        } else {
-          reviewers.push({
-            role: role2,
-            harness: sel2.harness,
-            model: sel2.model,
-            modelFamily: sel2.modelFamily,
-            diversityDegraded: sel2.diversityDegraded,
-            fallbacks: sel2.route.fallbacks,
-          });
-        }
-      }
-    }
+    const resolvedSelection = resolveDebateReviewers({
+      proposerRoute: options.proposerRoute,
+      routingConfig: effectiveRoutingConfig,
+      runtimeCapabilities: effectiveCapabilities,
+      harnesses: options.harnesses,
+      roles: options.roles,
+      models: options.models,
+      count: options.count,
+      reviewerRoles: options.reviewerRoles,
+      reviewerRoutes: options.reviewerRoutes,
+      hasMockRunner: Boolean(options.commandRunner),
+    });
+    const reviewers = resolvedSelection.reviewers;
+    let diversityDegraded = resolvedSelection.diversityDegraded;
 
     options.onProgress?.(
       `[Debate ${debateId}] Selected ${reviewers.length} reviewer(s): ` +

@@ -379,6 +379,10 @@ export interface AsdDebateInput {
   files?: string[];
   includeDiff?: boolean;
   harness?: HarnessId;
+  harnesses?: HarnessId[];
+  roles?: AgentRole[];
+  models?: string[];
+  count?: number;
 }
 
 export interface AsdDebateOutput {

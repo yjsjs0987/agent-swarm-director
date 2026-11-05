@@ -157,7 +157,32 @@ Antigravity의 `PreToolUse` 훅은 `asd-*` 에이전트뿐만 아니라 OMO 등 
 
 ---
 
-## 5. 설정 변경 후 적용 및 확인 명령어
+## 5. `/asd-debate` (`HEAVY` 모드) 참여 하네스·역할·개수 지정 방법
+
+`/asd-debate`를 `HEAVY` 모드(외부 CLI 블라인드 토론)로 실행할 때, AI가 먼저 **참여할 하네스의 종류와 수**를 물어봅니다. 직접 지정하거나 **"알아서 배정해줘"**(AI 자율 배정 또는 `routing.jsonc` 역할 기반 배정)로 실행할 수 있습니다.
+
+1. **참여할 하네스 종류 직접 지정 (`--harnesses`)**:
+   - 모델명을 일일이 적지 않고 하네스 이름만 지정하면 `routing.jsonc`에 설정된 해당 하네스의 대표 모델/폴백을 자동으로 매핑합니다.
+   ```bash
+   asd debate --topic "아키텍처 검증" --proposal "..." --harnesses "opencode,codex,claude-code" --diff
+   ```
+2. **`routing.jsonc` 역할 기반 배정 (`--roles`)**:
+   - `routing.jsonc`의 `agents`에 정의된 역할(`critic`, `architect`, `planner`, `worker`, `scout`)을 골라 배정합니다.
+   ```bash
+   asd debate --topic "보안 및 설계 검토" --proposal "..." --roles "critic,architect,planner" --diff
+   ```
+3. **참여 에이전트 수 지정 (`--count`) 또는 모델 직접 지정 (`--models`)**:
+   ```bash
+   # routing.jsonc에서 3개 역할을 다양성 우선으로 자동 선발
+   asd debate --topic "설계 검토" --proposal "..." --count 3
+
+   # 역할@하네스:모델 직접 지정
+   asd debate --topic "설계 검토" --proposal "..." --models "critic@opencode:nvidia/z-ai/glm-5.3-flash,architect@codex:gpt-6.1-sol"
+   ```
+
+---
+
+## 6. 설정 변경 후 적용 및 확인 명령어
 
 1. **전역 하네스 및 스탠드얼론 런타임 동기화**:
    ```bash

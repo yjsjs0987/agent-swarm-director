@@ -114,6 +114,10 @@ export interface CliArgs {
     summary?: string;
     files?: string;
     cmd?: string;
+    harnesses?: string;
+    roles?: string;
+    models?: string;
+    count?: number;
   };
   rest: string[];
 }
@@ -185,6 +189,15 @@ export function parseCliArgs(args: string[]): CliArgs {
       options.summary = readOptVal(arg, "--summary", next);
     } else if (arg === "--files" || arg.startsWith("--files=")) {
       options.files = readOptVal(arg, "--files", next);
+    } else if (arg === "--harnesses" || arg.startsWith("--harnesses=")) {
+      options.harnesses = readOptVal(arg, "--harnesses", next);
+    } else if (arg === "--roles" || arg.startsWith("--roles=")) {
+      options.roles = readOptVal(arg, "--roles", next);
+    } else if (arg === "--models" || arg.startsWith("--models=")) {
+      options.models = readOptVal(arg, "--models", next);
+    } else if (arg === "--count" || arg.startsWith("--count=")) {
+      const c = Number.parseInt(readOptVal(arg, "--count", next) || "", 10);
+      if (Number.isFinite(c) && c > 0) options.count = c;
     } else if (arg === "--cmd" || arg.startsWith("--cmd=") || arg === "--verify-cmd" || arg.startsWith("--verify-cmd=")) {
       options.cmd = readOptVal(arg, arg.startsWith("--verify-cmd") ? "--verify-cmd" : "--cmd", next);
     } else if (arg === "--project-root" || arg === "--projectRoot") {
@@ -1455,13 +1468,38 @@ export async function main(
             }
             if (!topic || !proposal) {
               throw new Error(
-                "Usage: asd debate --topic \"<topic>\" --proposal \"<proposal>\" [--files \"path[:start-end],...\"] [--diff] [--task <taskId>] [--session <sessionId>]"
+                'Usage: asd debate --topic "<topic>" --proposal "<proposal>" [--harnesses "h1,h2,..."] [--roles "r1,r2,..."] [--models "h1:m1,h2:m2"] [--count <N>] [--files "path[:start-end],..."] [--diff] [--task <taskId>] [--session <sessionId>]'
               );
             }
             const debateFiles = options.files
               ? options.files.split(",").map((s) => s.trim()).filter(Boolean)
               : Array.isArray(jsonPayload.files)
                 ? (jsonPayload.files as string[])
+                : undefined;
+            const rawHarnessesOpt =
+              options.harnesses ||
+              (options.harness && options.harness.includes(",") ? options.harness : undefined);
+            const debateHarnesses = rawHarnessesOpt
+              ? (rawHarnessesOpt.split(",").map((s) => s.trim()).filter(Boolean) as HarnessId[])
+              : Array.isArray(jsonPayload.harnesses)
+                ? (jsonPayload.harnesses as HarnessId[])
+                : undefined;
+            const debateRoles = options.roles
+              ? (options.roles.split(",").map((s) => s.trim()).filter(Boolean) as AgentRole[])
+              : Array.isArray(jsonPayload.roles)
+                ? (jsonPayload.roles as AgentRole[])
+                : undefined;
+            const debateModels = options.models
+              ? options.models.split(",").map((s) => s.trim()).filter(Boolean)
+              : Array.isArray(jsonPayload.models)
+                ? (jsonPayload.models as string[])
+                : undefined;
+            const debateCount =
+              options.count ??
+              (typeof jsonPayload.count === "number" ? jsonPayload.count : undefined);
+            const singleHarnessHint =
+              options.harness && !options.harness.includes(",")
+                ? (options.harness as HarnessId)
                 : undefined;
             const includeDiff = Boolean(flags.diff || jsonPayload.includeDiff);
             const res = await server.handleDebate(
@@ -1472,7 +1510,11 @@ export async function main(
                 proposal,
                 ...(debateFiles && debateFiles.length > 0 ? { files: debateFiles } : {}),
                 ...(includeDiff ? { includeDiff: true } : {}),
-                ...(options.harness ? { harness: options.harness as HarnessId } : {}),
+                ...(singleHarnessHint ? { harness: singleHarnessHint } : {}),
+                ...(debateHarnesses && debateHarnesses.length > 0 ? { harnesses: debateHarnesses } : {}),
+                ...(debateRoles && debateRoles.length > 0 ? { roles: debateRoles } : {}),
+                ...(debateModels && debateModels.length > 0 ? { models: debateModels } : {}),
+                ...(debateCount && debateCount > 0 ? { count: debateCount } : {}),
               },
               undefined,
               (msg) => {

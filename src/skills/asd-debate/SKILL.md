@@ -1,9 +1,9 @@
 ---
 name: asd-debate
-description: Cross-harness adversarial debate workflow for ASD v2.4.1. Conducts multi-model blind debate and synthesizes binding consensus across 5 harnesses.
+description: Cross-harness adversarial debate workflow for ASD v2.4.2. Conducts multi-model blind debate and synthesizes binding consensus across 5 harnesses.
 ---
 
-# ASD v2.4.1 — Adversarial Debate Workflow (`/asd-debate`)
+# ASD v2.4.2 — Adversarial Debate Workflow (`/asd-debate`)
 
 You are the **Debate Broker** coordinating a hostile design review before committing to a major architectural or implementation decision.
 
@@ -21,9 +21,16 @@ Use the standard ASD criteria (canonical definition in `/asd`, Section 2):
 
 ## 2. Debate Protocol
 
-1. **Step 1: Frame the Proposal & Ask for User Confirmation (With AI Recommendation)**
+1. **Step 1: Frame the Proposal, Mode, & Participant Selection (Ask for User Confirmation)**
    - State the **Topic** and **Proposal** (including key files and trade-offs).
-   - If the user has not specified `LIGHT` or `HEAVY`, present your recommendation with a brief rationale and ask for confirmation before starting.
+   - If the user has not specified `LIGHT` or `HEAVY`, present your recommendation with a brief rationale.
+   - **When `HEAVY` Mode is selected or recommended**, ALWAYS ask the user how they want to assign the participating harnesses and reviewer count before running `asd debate` (unless the user already specified them):
+     1. **직접 지정 (User-Specified Harnesses & Count)**:
+        - Ask which harnesses (`claude-code`, `opencode`, `codex`, `cursor`, `antigravity`) and how many reviewers (`2`~`5`) to spawn.
+        - Example: *"opencode, codex, claude-code 3개로 해줘"* → `--harnesses "opencode,codex,claude-code"`
+     2. **자동 배정 ("알아서 배정해줘" / Auto-Assign)**:
+        - **AI 자율 배정 (AI Autonomous Assignment)**: Choose the best combination of harnesses/count suited to the topic (`--harnesses "..." --count N`).
+        - **`routing.jsonc` 역할 기반 배정 (Role-Based Assignment from `routing.jsonc`)**: Pick roles from `routing.jsonc` (`critic`, `architect`, `planner`, `worker`, `scout`) matching the debate topic (`--roles "critic,architect,planner"` or `--count N`).
 
 2. **Step 2: Execute Adversarial Debate**
    - **`LIGHT` Confirmed (Internal Subagent Delegation — NO External CLI Spawning)**:
@@ -45,10 +52,19 @@ Use the standard ASD criteria (canonical definition in `/asd`, Section 2):
        ```
      - If `asd-critic` returns `REJECT` or reviewers conflict, invoke `asd-architect` via the internal subagent tool to issue a binding synthesis.
    - **`HEAVY` Confirmed (Multi-Harness External CLI Debate)**:
-     - Invoke the cross-harness CLI debate broker, passing `--files "path[:start-end],..."` and/or `--diff` so Node.js embeds ground-truth source slices directly into reviewer prompts (zero Main Agent token overhead):
-       ```bash
-       asd debate --topic "<topic>" --proposal "<proposal>" --files "src/path/file.ts:10-120" --diff
-       ```
+     - Invoke the cross-harness CLI debate broker according to the user's participant choice, passing `--files "path[:start-end],..."` and/or `--diff` so Node.js embeds ground-truth source slices directly into reviewer prompts (zero Main Agent token overhead):
+       - **User-Specified Harnesses**:
+         ```bash
+         asd debate --topic "<topic>" --proposal "<proposal>" --harnesses "opencode,codex,claude-code" --files "src/path/file.ts:10-120" --diff
+         ```
+       - **Role-Based Assignment from `routing.jsonc` (or AI Autonomous Assignment)**:
+         ```bash
+         asd debate --topic "<topic>" --proposal "<proposal>" --roles "critic,architect,planner" --files "src/path/file.ts:10-120" --diff
+         ```
+       - **Explicit Harness:Model Specs or Count**:
+         ```bash
+         asd debate --topic "<topic>" --proposal "<proposal>" --count 3 --files "src/path/file.ts:10-120" --diff
+         ```
 
 3. **Step 3: Apply Verdict**
    - **`APPROVE`**: Proceed with the plan as proposed and render the current `progressBoard`.

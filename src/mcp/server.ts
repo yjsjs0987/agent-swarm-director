@@ -266,6 +266,31 @@ export const ASD_MCP_TOOLS = [
           enum: ["claude-code", "opencode", "codex", "antigravity", "cursor"],
           description: "Optional proposer harness hint.",
         },
+        harnesses: {
+          type: "array",
+          items: {
+            type: "string",
+            enum: ["claude-code", "opencode", "codex", "antigravity", "cursor"],
+          },
+          description:
+            "Optional explicit list of harnesses to participate in Round 1 debate.",
+        },
+        roles: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional list of roles from routing.jsonc to assign as debate reviewers.",
+        },
+        models: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional explicit reviewer model specs in '[role@]harness[:model]' format.",
+        },
+        count: {
+          type: "integer",
+          description: "Optional number of debate reviewers to spawn in Round 1.",
+        },
       },
       required: ["sessionId", "topic", "proposal"],
     },
@@ -2103,6 +2128,10 @@ export class AsdMcpServer {
       proposal: input.proposal,
       files: input.files,
       includeDiff: input.includeDiff,
+      harnesses: input.harnesses,
+      roles: input.roles,
+      models: input.models,
+      count: input.count,
       ...(input.harness
         ? { runtimeCapabilities: { availableHarnesses: [input.harness] } }
         : {}),

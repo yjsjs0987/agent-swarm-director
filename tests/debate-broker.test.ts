@@ -802,5 +802,126 @@ Hope this helps!
       assert.ok(capturedPrompt.includes("UNVERIFIED hypothesis"));
       assert.ok(capturedPrompt.includes("file:line"));
     });
+
+    test("supports explicit harnesses (--harnesses), roles (--roles), models (--models), and count (--count) selection", async () => {
+      const projectRoot = makeProjectRoot();
+      const db = openProjectDb(projectRoot);
+      openDrivers.push(db);
+
+      const routingConfig = {
+        agents: {
+          critic: {
+            harness: "opencode" as const,
+            model: "nvidia/z-ai/glm-5.3-flash",
+            modelFamily: "glm",
+            fallbacks: [{ harness: "codex" as const, model: "gpt-6.1-sol", modelFamily: "gpt" }],
+          },
+          architect: {
+            harness: "codex" as const,
+            model: "gpt-6.1-sol",
+            modelFamily: "gpt",
+            fallbacks: [{ harness: "claude-code" as const, model: "claude-opus-5-5", modelFamily: "claude" }],
+          },
+          planner: {
+            harness: "claude-code" as const,
+            model: "claude-sonnet-5-5",
+            modelFamily: "claude",
+            fallbacks: [],
+          },
+          worker: {
+            harness: "opencode" as const,
+            model: "nvidia/z-ai/glm-5.3-flash",
+            modelFamily: "glm",
+            fallbacks: [],
+          },
+          scout: {
+            harness: "antigravity" as const,
+            model: "gemini-3-flash-lite",
+            modelFamily: "gemini",
+            fallbacks: [],
+          },
+        },
+        categories: {},
+      };
+
+      const capturedHarnesses: Array<{ harness: string; model: string; role: string }> = [];
+      const mockRunner: CommandRunner = {
+        async run(cmd, args, opts) {
+          const metaPath = opts.env["ASD_SUBAGENT_META"] ?? "";
+          const meta: SubagentSessionMeta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+          capturedHarnesses.push({ harness: meta.harness, model: meta.model, role: meta.role });
+          opts.onSpawn?.(9100);
+          opts.onStdout(
+            JSON.stringify({
+              verdict: "APPROVE",
+              hard_constraints: [],
+              decisions: [`Approved by ${meta.harness}`],
+              risks: [],
+              reasoning: "LGTM",
+            })
+          );
+          return { exitCode: 0, pid: 9100 };
+        },
+      };
+
+      // 1. Explicit --harnesses opencode,codex,claude-code (3 harnesses)
+      const resHarnesses = await runDebateBroker({
+        projectRoot,
+        sessionId: "sess-harnesses",
+        topic: "Multi-harness explicit selection",
+        proposal: "Spawn 3 specific harnesses",
+        harnesses: ["opencode", "codex", "claude-code"],
+        routingConfig,
+        commandRunner: mockRunner,
+        db,
+      });
+      assert.equal(resHarnesses.verdict, "APPROVE");
+      assert.equal(capturedHarnesses.length, 3);
+      assert.deepEqual(
+        capturedHarnesses.map((c) => c.harness),
+        ["opencode", "codex", "claude-code"]
+      );
+      assert.equal(capturedHarnesses[0]!.model, "nvidia/z-ai/glm-5.3-flash");
+      assert.equal(capturedHarnesses[1]!.model, "gpt-6.1-sol");
+      assert.equal(capturedHarnesses[2]!.model, "claude-sonnet-5-5");
+
+      // 2. Explicit --roles critic,architect,planner from routing.jsonc
+      capturedHarnesses.length = 0;
+      const resRoles = await runDebateBroker({
+        projectRoot,
+        sessionId: "sess-roles",
+        topic: "Role-based selection from routing.jsonc",
+        proposal: "Assign critic, architect, and planner from routing.jsonc",
+        roles: ["critic", "architect", "planner"],
+        routingConfig,
+        commandRunner: mockRunner,
+        db,
+      });
+      assert.equal(resRoles.verdict, "APPROVE");
+      assert.equal(capturedHarnesses.length, 3);
+      assert.deepEqual(
+        capturedHarnesses.map((c) => c.role),
+        ["critic", "architect", "planner"]
+      );
+      assert.deepEqual(
+        capturedHarnesses.map((c) => c.harness),
+        ["opencode", "codex", "claude-code"]
+      );
+
+      // 3. Explicit --count 4
+      capturedHarnesses.length = 0;
+      const resCount = await runDebateBroker({
+        projectRoot,
+        sessionId: "sess-count",
+        topic: "Count-based auto assignment",
+        proposal: "Auto-assign 4 reviewers from routing.jsonc",
+        count: 4,
+        routingConfig,
+        commandRunner: mockRunner,
+        db,
+      });
+      assert.equal(resCount.verdict, "APPROVE");
+      assert.equal(capturedHarnesses.length, 4);
+    });
   });
 });
