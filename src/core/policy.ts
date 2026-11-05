@@ -21,11 +21,27 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+  loadRoutingConfig,
   normalizePathForCompare,
   resolveAsdPaths,
 } from "./config.ts";
 import { SqliteDriver } from "./db.ts";
+import {
+  normalizeAntigravityModel,
+  resolveLightSubagentModel,
+} from "./router.ts";
 import { ASD_VERSION, type SubagentSessionMeta } from "./types.ts";
+
+export const POLICY_DENY_PREFIX =
+  "[ASD Policy Guard — DO NOT bypass via shell/python/powershell]" as const;
+
+export function formatPolicyDenyReason(reason: string): string {
+  const trimmed = reason.trim();
+  if (trimmed.startsWith("[ASD Policy Guard")) {
+    return trimmed;
+  }
+  return `${POLICY_DENY_PREFIX} ${trimmed}`;
+}
 
 // ============================================================================
 // Manifest & Policy Types
@@ -66,9 +82,22 @@ export const DEFAULT_HARNESS_TOOL_MANIFEST: HarnessToolManifest = {
       FilePathKeys: ["path", "file_path", "target_file"],
     },
     antigravity: {
-      WriteTools: ["write_file", "edit_file"],
+      WriteTools: [
+        "write_file",
+        "edit_file",
+        "write_to_file",
+        "replace_file_content",
+        "multi_replace_file_content",
+      ],
       BashTools: ["run_command"],
-      FilePathKeys: ["Path", "TargetFile", "path", "file_path"],
+      FilePathKeys: [
+        "Path",
+        "TargetFile",
+        "path",
+        "file_path",
+        "tool_input.Path",
+        "tool_input.TargetFile",
+      ],
     },
     cursor: {
       WriteTools: [
@@ -122,6 +151,7 @@ export interface PreToolUsePayload {
 export interface PreToolUseResult {
   allowed: boolean;
   reason?: string;
+  overwrite?: Record<string, unknown>;
 }
 
 export interface StopHookPayload {
@@ -419,6 +449,70 @@ function extractBashCommand(payload: PreToolUsePayload): string {
   return "";
 }
 
+function stripBenignGitExclusions(cmd: string): string {
+  return cmd
+    // Exclude flags in grep/rg/find/fd/tar/git
+    .replace(/--exclude-dir\s*=\s*['"]?[^'"\s]*\.git[^'"\s]*['"]?/gi, " ")
+    .replace(/--exclude\s*=\s*['"]?[^'"\s]*\.git[^'"\s]*['"]?/gi, " ")
+    .replace(/(?:-g|--glob)\s*=?[\s'"]*![^'"\s]*\.git[^'"\s]*['"]?/gi, " ")
+    .replace(/-not\s+-path\s+['"][^'"]*\.git[^'"]*['"]/gi, " ")
+    .replace(/!\s+-path\s+['"][^'"]*\.git[^'"]*['"]/gi, " ")
+    // Remote git repository URLs (https://.../repo.git, git@github.com:.../repo.git)
+    .replace(/(?:https?|git|ssh):\/\/[^\s'"]+\.git\b/gi, " ")
+    .replace(/\bgit@[^\s'"]+\.git\b/gi, " ");
+}
+
+function isBlockedGitCommand(cmd: string, isSubagent: boolean): boolean {
+  const sanitized = stripBenignGitExclusions(cmd);
+  const lower = sanitized.toLowerCase();
+
+  const hasGitPathToken =
+    lower.includes(".git/") ||
+    lower.includes(".git\\") ||
+    /(?:^|[\s"'`/\\])\.git(?:[/\\]|[\s"'`]|$)/.test(lower);
+
+  if (!hasGitPathToken) {
+    return false;
+  }
+
+  // Subagents are strictly forbidden from touching or inspecting .git paths via bash
+  if (isSubagent) {
+    return true;
+  }
+
+  // For the main session, avoid false positives when .git appears inside JSON payloads or commit messages,
+  // while blocking any direct destructive/write/config manipulation targeting .git
+  const hasDestructiveOrWriteOp =
+    /\b(?:rm|rmdir|del|erase|mv|move|cp|copy|chmod|chown|remove-item|move-item|copy-item|set-content|add-content|out-file|tee|truncate)\b/i.test(
+      sanitized
+    ) ||
+    /\bsed\s+-i\b/i.test(sanitized) ||
+    /(?:>>|(?<![2&])>(?!&))\s*['"]?(?:[^\s'"]*[/\\])?\.git(?:[/\\]|['"\s]|$)/i.test(
+      sanitized
+    ) ||
+    /(?:^|[\s"'`/\\])\.git[/\\](?:config|hooks|head|index|objects|refs|logs|info|packed-refs)\b/i.test(
+      lower
+    );
+
+  if (hasDestructiveOrWriteOp) {
+    return true;
+  }
+
+  // Also block bare shell commands directly targeting .git as a standalone path argument (e.g. `rm -rf .git`, `ls .git`)
+  // when not part of an `asd plan` / `git commit -m` payload
+  if (
+    !/\basd\b.*\bplan\b/i.test(sanitized) &&
+    !/\bgit\s+commit\b/i.test(sanitized) &&
+    /^\s*(?:rm|rmdir|del|erase|mv|move|ls|dir|cat|type|head|tail)\b[^\n;|]*?(?:^|[\s"'`/\\])\.git(?:[/\\]|[\s"'`]|$)/i.test(
+      sanitized
+    )
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 /**
  * Evaluates PreToolUse hook requests in <1ms without opening SQLite.
  * Fail-closed if ASD_SESSION_ROLE === "subagent" and meta.json is missing or unreadable.
@@ -439,8 +533,9 @@ export function evaluatePreToolUse(
     if (!metaPath) {
       return {
         allowed: false,
-        reason:
-          "Fail-closed: ASD_SESSION_ROLE is subagent but ASD_SUBAGENT_META is not set",
+        reason: formatPolicyDenyReason(
+          "Fail-closed: ASD_SESSION_ROLE is subagent but ASD_SUBAGENT_META is not set"
+        ),
       };
     }
     try {
@@ -449,9 +544,11 @@ export function evaluatePreToolUse(
     } catch (err) {
       return {
         allowed: false,
-        reason: `Fail-closed: failed to read subagent meta.json at ${metaPath}: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        reason: formatPolicyDenyReason(
+          `Fail-closed: failed to read subagent meta.json at ${metaPath}: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        ),
       };
     }
   } else if (activeEnv.ASD_SUBAGENT_META) {
@@ -483,6 +580,68 @@ export function evaluatePreToolUse(
     activeEnv.ASD_PROJECT_ROOT ??
     process.cwd();
 
+  // 1b. Antigravity invoke_subagent Model tier enforcement (overwrite "inherit" or raw model strings)
+  if (toolName.toLowerCase() === "invoke_subagent") {
+    const inputObj = (payload.tool_input ??
+      payload.input ??
+      (payload.toolCall && typeof payload.toolCall === "object"
+        ? (payload.toolCall as Record<string, unknown>).args
+        : undefined) ??
+      payload) as Record<string, unknown>;
+
+    const rawModel =
+      typeof inputObj.Model === "string"
+        ? inputObj.Model.trim()
+        : typeof inputObj.model === "string"
+          ? inputObj.model.trim()
+          : "";
+
+    const rawTypeName =
+      typeof inputObj.TypeName === "string"
+        ? inputObj.TypeName.trim()
+        : typeof inputObj.typeName === "string"
+          ? inputObj.typeName.trim()
+          : typeof inputObj.Role === "string"
+            ? inputObj.Role.trim()
+            : typeof inputObj.role === "string"
+              ? inputObj.role.trim()
+              : "";
+
+    const isExplicitValidTier =
+      rawModel === "flash_lite" || rawModel === "flash" || rawModel === "pro";
+
+    if (!isExplicitValidTier) {
+      let targetTier: string;
+      const normalizedFromExplicit =
+        rawModel && rawModel.toLowerCase() !== "inherit" && rawModel.toLowerCase() !== "inherent"
+          ? normalizeAntigravityModel(rawModel)
+          : "inherit";
+
+      if (normalizedFromExplicit !== "inherit") {
+        targetTier = normalizedFromExplicit;
+      } else {
+        let routingCfg;
+        try {
+          routingCfg = loadRoutingConfig(rootDir, activeEnv.ASD_HOME_DIR);
+        } catch {
+          routingCfg = undefined;
+        }
+        targetTier =
+          resolveLightSubagentModel("antigravity", rawTypeName, routingCfg) ??
+          "flash";
+      }
+
+      return {
+        allowed: true,
+        overwrite: {
+          Model: targetTier,
+        },
+      };
+    }
+
+    return { allowed: true };
+  }
+
   // 2. Check if tool is BashTool
   const isBashTool = harnessTools
     ? harnessTools.BashTools.some(
@@ -496,15 +655,13 @@ export function evaluatePreToolUse(
     const cmd = extractBashCommand(payload);
     const cmdLower = cmd.toLowerCase();
 
-    // Protect .git corruption for both host and subagent
-    if (
-      cmdLower.includes(".git/") ||
-      cmdLower.includes(".git\\") ||
-      /(?:^|[\s"'`/\\])\.git(?:[/\\]|[\s"'`]|$)/.test(cmdLower)
-    ) {
+    // Protect .git corruption for both host and subagent (with benign exclusions allowed)
+    if (isBlockedGitCommand(cmd, isSubagent)) {
       return {
         allowed: false,
-        reason: "Bash command blocked: targets protected .git directory",
+        reason: formatPolicyDenyReason(
+          "Bash command blocked: targets protected .git directory"
+        ),
       };
     }
 
@@ -516,30 +673,41 @@ export function evaluatePreToolUse(
       ) {
         return {
           allowed: false,
-          reason:
-            "Bash command blocked for subagent: targets protected .asd directory",
+          reason: formatPolicyDenyReason(
+            "Bash command blocked for subagent: targets protected .asd directory"
+          ),
         };
       }
       if (/(?:^|[\s"'`=:/\\])\.env(?:\.[a-z0-9._-]+)?(?:[\s"'`;|&><)]|$)/i.test(cmdLower)) {
         return {
           allowed: false,
-          reason: "Bash command blocked for subagent: targets protected .env file",
+          reason: formatPolicyDenyReason(
+            "Bash command blocked for subagent: targets protected .env file"
+          ),
         };
       }
-      // Block redirection writes: > or >> (excluding 2>&1 and >&2)
-      if (cmd.includes(">>") || /(?:^|[^2&])>{1}(?!&)/.test(cmd)) {
+      // Block redirection writes: > or >> (excluding 2>&1 and >&2) and shell/script write bypasses
+      if (
+        cmd.includes(">>") ||
+        /(?:^|[^2&])>{1}(?!&)/.test(cmd) ||
+        /\b(?:set-content|add-content|out-file|tee)\b/i.test(cmd) ||
+        /\bsed\s+-i\b/i.test(cmd) ||
+        /\b(?:writeFileSync|writeFile|appendFileSync)\s*\(/i.test(cmd)
+      ) {
         return {
           allowed: false,
-          reason:
-            "Bash command blocked for subagent: output redirection (>, >>) is forbidden",
+          reason: formatPolicyDenyReason(
+            "Bash command blocked for subagent: output redirection (>, >>, Out-File, Set-Content, tee) is forbidden. DO NOT attempt to bypass allowedFiles via shell/bash commands; emit a crossScopeRequests entry in your final asd-report block instead."
+          ),
         };
       }
       // Block destructive commands
-      if (/\b(?:rm|rmdir|del|erase|mv|move)\b/i.test(cmd)) {
+      if (/\b(?:rm|rmdir|del|erase|mv|move|remove-item|move-item)\b/i.test(cmd)) {
         return {
           allowed: false,
-          reason:
-            "Bash command blocked for subagent: destructive command (rm, del, mv) is forbidden",
+          reason: formatPolicyDenyReason(
+            "Bash command blocked for subagent: destructive command (rm, del, mv, Remove-Item) is forbidden"
+          ),
         };
       }
     }
@@ -575,48 +743,84 @@ export function evaluatePreToolUse(
   if (targetPaths.length === 0) {
     return {
       allowed: false,
-      reason:
-        "Write tool detected but target file path could not be extracted",
+      reason: formatPolicyDenyReason(
+        "Write tool detected but target file path could not be extracted"
+      ),
     };
   }
 
   // 5. Verify each target path
   for (const targetPath of targetPaths) {
+    if (targetPath.includes("\0")) {
+      return {
+        allowed: false,
+        reason: formatPolicyDenyReason("Target path contains null byte"),
+      };
+    }
+
     const safeCheck = resolveSafeTargetPath(targetPath, rootDir);
-    if (!safeCheck.safe) {
-      return {
-        allowed: false,
-        reason:
-          safeCheck.reason ??
-          `Target path '${targetPath}' escapes root directory`,
-      };
-    }
 
-    const relPath = path
-      .relative(rootDir, safeCheck.resolvedPath)
-      .replaceAll("\\", "/");
-
-    const protCheck = checkProtectedPath(relPath);
-    if (protCheck.protected) {
-      return {
-        allowed: false,
-        reason:
-          protCheck.reason ?? `Target path '${relPath}' is a protected path`,
-      };
-    }
-
-    if (isSubagent && meta) {
-      if (!meta.allowedFiles || meta.allowedFiles.length === 0) {
+    if (isSubagent) {
+      // Subagents are strictly confined inside rootDir + allowedFiles
+      if (!safeCheck.safe) {
         return {
           allowed: false,
-          reason: `Target path '${relPath}' is blocked: subagent allowedFiles is empty`,
+          reason: formatPolicyDenyReason(
+            `${
+              safeCheck.reason ??
+              `Target path '${targetPath}' escapes root directory`
+            }. DO NOT attempt to bypass via shell/bash commands. Emit a crossScopeRequests entry in your final asd-report block instead.`
+          ),
         };
       }
-      const allowed = isPathAllowed(relPath, meta.allowedFiles);
-      if (!allowed) {
+
+      const relPath = path
+        .relative(rootDir, safeCheck.resolvedPath)
+        .replaceAll("\\", "/");
+
+      const protCheck = checkProtectedPath(relPath);
+      if (protCheck.protected) {
         return {
           allowed: false,
-          reason: `Target path '${relPath}' is outside allowedFiles boundary`,
+          reason: formatPolicyDenyReason(
+            protCheck.reason ?? `Target path '${relPath}' is a protected path`
+          ),
+        };
+      }
+
+      if (meta) {
+        if (!meta.allowedFiles || meta.allowedFiles.length === 0) {
+          return {
+            allowed: false,
+            reason: formatPolicyDenyReason(
+              `Target path '${relPath}' is blocked: subagent allowedFiles is empty. DO NOT attempt to bypass via shell/bash commands. Emit a crossScopeRequests entry in your final asd-report block instead.`
+            ),
+          };
+        }
+        const allowed = isPathAllowed(relPath, meta.allowedFiles);
+        if (!allowed) {
+          return {
+            allowed: false,
+            reason: formatPolicyDenyReason(
+              `Target path '${relPath}' is outside allowedFiles boundary. DO NOT attempt to bypass via shell/bash commands. Emit a crossScopeRequests entry in your final asd-report block instead.`
+            ),
+          };
+        }
+      }
+    } else {
+      // Main session (!isSubagent): allow external paths (e.g. ~/.gemini/**/brain/**, ~/.claude/memory/**, os.tmpdir())
+      // so the main agent never resorts to Bash/PowerShell workarounds, while pin-point blocking protected paths anywhere.
+      const pathToCheck = safeCheck.safe
+        ? path.relative(rootDir, safeCheck.resolvedPath).replaceAll("\\", "/")
+        : targetPath.replaceAll("\\", "/");
+
+      const protCheck = checkProtectedPath(pathToCheck);
+      if (protCheck.protected) {
+        return {
+          allowed: false,
+          reason: formatPolicyDenyReason(
+            protCheck.reason ?? `Target path '${targetPath}' is a protected path`
+          ),
         };
       }
     }

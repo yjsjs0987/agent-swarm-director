@@ -738,4 +738,219 @@ describe("Bash .git and .asd boundary regex (P0 Issue 6b)", () => {
       assert.equal(res.allowed, true, `Expected allowed command: ${command}`);
     }
   });
+
+  test("allows benign .git exclusion flags (--exclude-dir=.git, -not -path '*/.git/*') while blocking destructive .git writes", () => {
+    const rootDir = makeTmpDir();
+    const metaPath = path.join(rootDir, "meta.json");
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({
+        roleType: "subagent",
+        allowedFiles: ["src/"],
+        worktreePath: rootDir,
+      })
+    );
+    const subEnv = {
+      ASD_SESSION_ROLE: "subagent",
+      ASD_SUBAGENT_META: metaPath,
+      ASD_PROJECT_ROOT: rootDir,
+    };
+
+    const benignGitExclusions = [
+      'grep -rn "pattern" --exclude-dir=.git .',
+      'grep -rn "pattern" --exclude-dir=".git" src/',
+      "find . -not -path '*/.git/*' -name '*.ts'",
+      'rg --glob "!.git/*" "TODO"',
+    ];
+
+    for (const cmd of benignGitExclusions) {
+      const subRes = evaluatePreToolUse(
+        { tool: "bash", command: cmd },
+        DEFAULT_HARNESS_TOOL_MANIFEST,
+        subEnv
+      );
+      assert.equal(subRes.allowed, true, `Subagent should allow exclusion flag: ${cmd}`);
+
+      const mainRes = evaluatePreToolUse(
+        { tool: "bash", command: cmd },
+        DEFAULT_HARNESS_TOOL_MANIFEST,
+        { ASD_PROJECT_ROOT: rootDir }
+      );
+      assert.equal(mainRes.allowed, true, `Main session should allow exclusion flag: ${cmd}`);
+    }
+
+    // Destructive .git commands remain blocked for both main and subagent
+    const mainRmGit = evaluatePreToolUse(
+      { tool: "bash", command: "rm -rf .git" },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      { ASD_PROJECT_ROOT: rootDir }
+    );
+    assert.equal(mainRmGit.allowed, false);
+    assert.match(mainRmGit.reason ?? "", /\[ASD Policy Guard/);
+
+    const mainWriteGitConfig = evaluatePreToolUse(
+      { tool: "bash", command: "echo pwn > .git/config" },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      { ASD_PROJECT_ROOT: rootDir }
+    );
+    assert.equal(mainWriteGitConfig.allowed, false);
+  });
+
+  test("main session allows external artifact/scratch paths (~/.gemini/**/brain/**, tmp) while blocking protected paths anywhere", () => {
+    const rootDir = makeTmpDir();
+    const outsideDir = makeTmpDir("asd-brain-outside-");
+    const env = { ASD_PROJECT_ROOT: rootDir };
+
+    // 1. Main session writing to Antigravity brain artifact/scratch directory outside rootDir -> ALLOWED
+    const brainArtifactPath = path.join(
+      outsideDir,
+      ".gemini",
+      "antigravity-cli",
+      "brain",
+      "conv-123",
+      "scratch",
+      "note.md"
+    );
+    const resBrain = evaluatePreToolUse(
+      {
+        harness: "antigravity",
+        tool_name: "write_file",
+        tool_input: { Path: brainArtifactPath },
+        projectRoot: rootDir,
+      },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(resBrain.allowed, true);
+
+    // Also test write_to_file / replace_file_content in Antigravity manifest
+    const resWriteToFile = evaluatePreToolUse(
+      {
+        harness: "antigravity",
+        tool_name: "write_to_file",
+        tool_input: { TargetFile: brainArtifactPath },
+        projectRoot: rootDir,
+      },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(resWriteToFile.allowed, true);
+
+    // 2. Main session writing to external protected path (.env, .git/config, .asd/PLAN.md, *.pem) -> BLOCKED
+    const extEnvRes = evaluatePreToolUse(
+      {
+        harness: "antigravity",
+        tool_name: "write_to_file",
+        tool_input: { TargetFile: path.join(outsideDir, ".env.production") },
+        projectRoot: rootDir,
+      },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(extEnvRes.allowed, false);
+    assert.match(extEnvRes.reason ?? "", /\[ASD Policy Guard/);
+
+    const extAsdRes = evaluatePreToolUse(
+      {
+        harness: "antigravity",
+        tool_name: "edit_file",
+        tool_input: { Path: path.join(outsideDir, ".asd", "PLAN.md") },
+        projectRoot: rootDir,
+      },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(extAsdRes.allowed, false);
+  });
+
+  test("Antigravity invoke_subagent overwrites 'inherit' or raw Gemini model strings with role-appropriate tier", () => {
+    const rootDir = makeTmpDir();
+    const env = { ASD_PROJECT_ROOT: rootDir };
+
+    // 1. asd-scout with Model: "inherit" -> overwrite: { Model: "flash_lite" }
+    const scoutRes = evaluatePreToolUse(
+      {
+        harness: "antigravity",
+        tool_name: "invoke_subagent",
+        tool_input: {
+          TypeName: "asd-scout",
+          Model: "inherit",
+          Prompt: "Find files",
+        },
+        projectRoot: rootDir,
+      },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(scoutRes.allowed, true);
+    assert.deepEqual(scoutRes.overwrite, { Model: "flash_lite" });
+
+    // 2. explore with omitted Model -> overwrite: { Model: "flash_lite" }
+    const exploreRes = evaluatePreToolUse(
+      {
+        harness: "antigravity",
+        tool_name: "invoke_subagent",
+        tool_input: {
+          TypeName: "explore",
+          Prompt: "Search codebase",
+        },
+        projectRoot: rootDir,
+      },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(exploreRes.allowed, true);
+    assert.deepEqual(exploreRes.overwrite, { Model: "flash_lite" });
+
+    // 3. asd-worker with Model: "inherit" -> overwrite: { Model: "flash" }
+    const workerRes = evaluatePreToolUse(
+      {
+        harness: "antigravity",
+        tool_name: "invoke_subagent",
+        tool_input: {
+          TypeName: "asd-worker",
+          Model: "inherit",
+        },
+        projectRoot: rootDir,
+      },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(workerRes.allowed, true);
+    assert.deepEqual(workerRes.overwrite, { Model: "flash" });
+
+    // 4. asd-architect with Model: "inherit" -> overwrite: { Model: "pro" }
+    const archRes = evaluatePreToolUse(
+      {
+        harness: "antigravity",
+        tool_name: "invoke_subagent",
+        tool_input: {
+          TypeName: "asd-architect",
+          Model: "inherit",
+        },
+        projectRoot: rootDir,
+      },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(archRes.allowed, true);
+    assert.deepEqual(archRes.overwrite, { Model: "pro" });
+
+    // 5. Explicit valid tier ("flash") -> no overwrite needed
+    const explicitRes = evaluatePreToolUse(
+      {
+        harness: "antigravity",
+        tool_name: "invoke_subagent",
+        tool_input: {
+          TypeName: "asd-worker",
+          Model: "flash",
+        },
+        projectRoot: rootDir,
+      },
+      DEFAULT_HARNESS_TOOL_MANIFEST,
+      env
+    );
+    assert.equal(explicitRes.allowed, true);
+    assert.equal(explicitRes.overwrite, undefined);
+  });
 });
