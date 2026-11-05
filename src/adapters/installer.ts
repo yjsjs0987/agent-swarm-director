@@ -677,7 +677,8 @@ function syncJsonMcpConfigFile(options: {
   if (fs.existsSync(filePath)) {
     backupUserFile(filePath);
     try {
-      config = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+      const parsed = parseJsonc(fs.readFileSync(filePath, "utf8"));
+      config = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
     } catch {
       config = {};
     }
@@ -1000,13 +1001,39 @@ export async function syncHarnessConfigs(
         safeWriteText(agentsMdPath, generateAllAgentsMarkdown(routingConfig, "opencode"));
         written.push(agentsMdPath);
 
-        // opencode.json
+        // opencode.json & opencode.jsonc
+        const opencodeJsoncPath = path.join(opencodeDir, "opencode.jsonc");
+        const opencodeJsoncKeys = new Set<string>();
+        if (fs.existsSync(opencodeJsoncPath)) {
+          backupUserFile(opencodeJsoncPath);
+          try {
+            const parsedJsonc = parseJsonc(fs.readFileSync(opencodeJsoncPath, "utf8"));
+            if (parsedJsonc && typeof parsedJsonc === "object" && !Array.isArray(parsedJsonc)) {
+              const rec = parsedJsonc as Record<string, unknown>;
+              if (rec.mcp && typeof rec.mcp === "object") {
+                for (const k of Object.keys(rec.mcp as Record<string, unknown>)) {
+                  opencodeJsoncKeys.add(k);
+                }
+              }
+              if (rec.mcpServers && typeof rec.mcpServers === "object") {
+                for (const [k, v] of Object.entries(rec.mcpServers as Record<string, unknown>)) {
+                  if (!(v && typeof v === "object" && (v as Record<string, unknown>)._asdManaged === true)) {
+                    opencodeJsoncKeys.add(k);
+                  }
+                }
+              }
+            }
+          } catch {
+            // ignore malformed opencode.jsonc
+          }
+        }
         const opencodeJsonPath = path.join(opencodeDir, "opencode.json");
         syncJsonMcpConfigFile({
           filePath: opencodeJsonPath,
           harnessId: "opencode",
           catalog: catalogMcpServers,
           nativeCapabilities: nativeCaps,
+          externalExistingKeys: opencodeJsoncKeys,
           mutateBeforeMerge: (cfg, extKeys) => {
             cfg._asdVersion = ASD_VERSION;
             if (cfg.mcp && typeof cfg.mcp === "object") {
@@ -1514,7 +1541,9 @@ export async function uninstallHarnessConfigs(
       return;
     }
     try {
-      const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+      const rawParsed = parseJsonc(fs.readFileSync(filePath, "utf8"));
+      if (!rawParsed || typeof rawParsed !== "object" || Array.isArray(rawParsed)) throw new Error("Invalid JSON/JSONC object");
+      const parsed = rawParsed as Record<string, unknown>;
       if (parsed.mcpServers && typeof parsed.mcpServers === "object") {
         stripAsdManagedMcpEntries(parsed.mcpServers as Record<string, unknown>);
       }
@@ -1563,6 +1592,13 @@ export async function uninstallHarnessConfigs(
     "_asdVersion",
     "agentRouting",
   ]);
+  const opencodeJsoncFile = path.join(opencodeDir, "opencode.jsonc");
+  if (fs.existsSync(`${opencodeJsoncFile}.asd-backup`)) {
+    if (restoreUserBackup(opencodeJsoncFile)) {
+      restoredFiles.push(opencodeJsoncFile);
+      harnessStatus.opencode.restored.push(opencodeJsoncFile);
+    }
+  }
 
   // 3. Codex
   const codexDir = path.join(homeDir, ".codex");

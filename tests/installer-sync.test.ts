@@ -579,3 +579,47 @@ test("F19: Codex config.toml with user [table] sections places notify in root sc
     removeTempDir(f19Home);
   }
 });
+
+test("F20: OpenCode opencode.jsonc with comments is preserved and prevents duplicate catalog MCP servers across idempotent syncs", async () => {
+  const f20Home = createTempDir("asd-f20-home-");
+  try {
+    const opencodeDir = path.join(f20Home, ".config", "opencode");
+    fs.mkdirSync(opencodeDir, { recursive: true });
+    const originalJsonc = [
+      "// User OpenCode JSONC config with comments",
+      "{",
+      "  \"model\": \"openai/gpt-5.4\",",
+      "  // User already configured context7 in opencode.jsonc",
+      "  \"mcp\": {",
+      "    \"context7\": { \"type\": \"local\", \"command\": [\"custom-c7\"] },",
+      "  },",
+      "  \"mcpServers\": {",
+      "    \"grep_app\": { \"url\": \"https://custom.grep.app/mcp\" },",
+      "  },",
+      "}",
+    ].join("\n") + "\n";
+    const jsoncPath = path.join(opencodeDir, "opencode.jsonc");
+    fs.writeFileSync(jsoncPath, originalJsonc, "utf8");
+
+    const firstSync = await syncHarnessConfigs({ homeDir: f20Home });
+    assert.equal(firstSync.status, "updated");
+
+    // 1. opencode.jsonc is preserved intact (including comments)
+    assert.equal(fs.readFileSync(jsoncPath, "utf8"), originalJsonc);
+
+    // 2. opencode.json exists and does NOT duplicate context7 or grep_app from opencode.jsonc
+    const jsonPath = path.join(opencodeDir, "opencode.json");
+    assert.ok(fs.existsSync(jsonPath));
+    const syncedJson = JSON.parse(fs.readFileSync(jsonPath, "utf8"));
+    assert.equal(syncedJson.mcpServers.context7, undefined, "context7 in opencode.jsonc mcp must not be duplicated");
+    assert.equal(syncedJson.mcpServers.grep_app, undefined, "grep_app in opencode.jsonc mcpServers must not be duplicated");
+    assert.ok(syncedJson.mcpServers.websearch, "Remaining catalog server websearch must be injected");
+
+    // 3. Second sync is idempotent (skipped)
+    const secondSync = await syncHarnessConfigs({ homeDir: f20Home });
+    assert.equal(secondSync.harnesses.opencode.status, "skipped");
+    assert.equal(secondSync.harnesses.opencode.skipped, true);
+  } finally {
+    removeTempDir(f20Home);
+  }
+});
