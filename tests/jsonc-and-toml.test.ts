@@ -178,6 +178,42 @@ describe("jsonc.ts - TOML fence management", () => {
     assert.ok(!result.includes(BEGIN_FENCE));
     assert.ok(!result.includes(END_FENCE));
   });
+
+  test("F19: upsertTomlFence places managed block before the first [table] header so root keys never fall into a table", () => {
+    const userWithTables = [
+      'model = "gpt-5.4"',
+      "",
+      "[features]",
+      "web_search = true",
+      "",
+      "[profiles.fast]",
+      'model = "gpt-5-mini"',
+    ].join("\n");
+
+    const fenced = upsertTomlFence(userWithTables, 'notify = ["node", "hook.js"]');
+    const idxModel = fenced.indexOf('model = "gpt-5.4"');
+    const idxFence = fenced.indexOf(BEGIN_FENCE);
+    const idxNotify = fenced.indexOf('notify = ["node", "hook.js"]');
+    const idxEndFence = fenced.indexOf(END_FENCE);
+    const idxFeatures = fenced.indexOf("[features]");
+
+    assert.ok(idxModel !== -1 && idxFence !== -1 && idxFeatures !== -1);
+    assert.ok(idxModel < idxFence, "Root user keys must stay above fence");
+    assert.ok(idxNotify < idxFeatures, "notify in fence must appear BEFORE [features] table header");
+    assert.ok(idxEndFence < idxFeatures, "END_FENCE must appear BEFORE [features] table header");
+
+    // Idempotency check with tables
+    const second = upsertTomlFence(fenced, 'notify = ["node", "hook.js"]');
+    assert.equal(fenced, second);
+
+    // Also relocates an existing legacy fence that was previously below [features]
+    const legacyMisplaced = `model = "gpt-5.4"\n\n[features]\nweb_search = true\n\n${BEGIN_FENCE}\nnotify = ["old"]\n${END_FENCE}\n`;
+    const relocated = upsertTomlFence(legacyMisplaced, 'notify = ["node", "hook.js"]');
+    assert.ok(
+      relocated.indexOf('notify = ["node", "hook.js"]') < relocated.indexOf("[features]"),
+      "Legacy fence below [features] must be relocated before [features]"
+    );
+  });
 });
 
 describe("redact.ts - redactSecrets", () => {

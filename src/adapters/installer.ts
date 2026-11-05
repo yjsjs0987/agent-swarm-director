@@ -722,7 +722,13 @@ export function buildCodexManagedTomlBlock(options: {
   const blocks: string[] = [];
 
   // Codex notify hook: receives turn-complete JSON payload as final argv (and/or stdin)
-  const hasUnmanagedNotify = /^\s*notify\s*=/m.test(unmanagedToml);
+  // Check only the root-scope portion of unmanagedToml (before the first [table] header)
+  const firstTableMatch = /^\s*\[{1,2}[^\]\r\n]+\]{1,2}\s*(?:#.*)?$/m.exec(unmanagedToml);
+  const rootScopeToml =
+    firstTableMatch && firstTableMatch.index !== undefined
+      ? unmanagedToml.slice(0, firstTableMatch.index)
+      : unmanagedToml;
+  const hasUnmanagedNotify = /^\s*notify\s*=/m.test(rootScopeToml);
   if (!hasUnmanagedNotify) {
     blocks.push(
       `notify = ["node", "--no-warnings", "${resolvedCliPath}", "hook", "stop", "--harness", "codex"]`

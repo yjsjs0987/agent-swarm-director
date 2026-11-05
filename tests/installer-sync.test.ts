@@ -544,3 +544,38 @@ describe("Installer & Sync Engine", () => {
     });
   });
 });
+
+test("F19: Codex config.toml with user [table] sections places notify in root scope before any [table]", async () => {
+  const f19Home = createTempDir("asd-f19-home-");
+  try {
+    const codexDir = path.join(f19Home, ".codex");
+    fs.mkdirSync(codexDir, { recursive: true });
+    // User config has [features] and [some_table] with a table-scoped notify = false
+    fs.writeFileSync(
+      path.join(codexDir, "config.toml"),
+      [
+        'model = "gpt-5.4"',
+        "",
+        "[features]",
+        "fast_apply = true",
+        "notify = false",
+      ].join("\n") + "\n",
+      "utf8"
+    );
+
+    await syncHarnessConfigs({ homeDir: f19Home });
+
+    const syncedToml = fs.readFileSync(path.join(codexDir, "config.toml"), "utf8");
+    const idxRootNotify = syncedToml.indexOf('notify = ["node"');
+    const idxFeaturesTable = syncedToml.indexOf("[features]");
+
+    assert.ok(idxRootNotify !== -1, "Managed root notify hook must be injected even if a table has notify = false");
+    assert.ok(idxFeaturesTable !== -1, "User [features] table must be preserved");
+    assert.ok(
+      idxRootNotify < idxFeaturesTable,
+      "Managed notify hook must appear in TOML root scope BEFORE [features]"
+    );
+  } finally {
+    removeTempDir(f19Home);
+  }
+});

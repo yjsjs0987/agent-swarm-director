@@ -181,24 +181,32 @@ export function upsertTomlFence(
     : BEGIN_FENCE;
   const endMarker = END_FENCE;
 
-  const fenceRegex = new RegExp(
-    `# >>> BEGIN MANAGED BY ASD-V2 \\(v[^)]+\\) >>>[\\s\\S]*?# <<< END MANAGED BY ASD-V2 <<<`,
-    "g"
-  );
-
   const newBlock = `${beginMarker}\n${blockContent.trimEnd()}\n${endMarker}`;
 
-  if (fenceRegex.test(existingToml)) {
-    // Replace existing fence(s)
-    return existingToml.replace(fenceRegex, newBlock);
-  }
+  // Strip any existing managed fence(s) first so even a previously misplaced fence
+  // (e.g. appended after a [table] header) is relocated to root scope before the first [table].
+  const fenceRegex = new RegExp(
+    `\\n*# >>> BEGIN MANAGED BY ASD-V2 \\(v[^)]+\\) >>>[\\s\\S]*?# <<< END MANAGED BY ASD-V2 <<<\\n*`,
+    "g"
+  );
+  const stripped = existingToml.replace(fenceRegex, "\n").replace(/\n{3,}/g, "\n\n").trim();
 
-  // No existing fence - append to end
-  const trimmed = existingToml.trimEnd();
-  if (trimmed.length === 0) {
+  if (stripped.length === 0) {
     return newBlock;
   }
-  return `${trimmed}\n\n${newBlock}`;
+
+  // Find the first TOML table header line (e.g. [features] or [[items]]) outside comments
+  const tableHeaderMatch = /^\s*\[{1,2}[^\]\r\n]+\]{1,2}\s*(?:#.*)?$/m.exec(stripped);
+  if (tableHeaderMatch && tableHeaderMatch.index !== undefined) {
+    const beforeTable = stripped.slice(0, tableHeaderMatch.index).trimEnd();
+    const fromTable = stripped.slice(tableHeaderMatch.index).trimStart();
+    if (beforeTable.length === 0) {
+      return `${newBlock}\n\n${fromTable}`;
+    }
+    return `${beforeTable}\n\n${newBlock}\n\n${fromTable}`;
+  }
+
+  return `${stripped}\n\n${newBlock}`;
 }
 
 /**
