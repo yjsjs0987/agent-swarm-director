@@ -206,3 +206,41 @@ test("debates: create -> verdict -> injectDebateAcceptance appends", () => {
   drv.injectDebateAcceptance("s1", "T1.1", "must not break X");
   assert.equal(drv.getTask("s1", "T1.1")!.acceptance, "base\n\nmust not break X");
 });
+
+// 10. purgeOrphanedSessions deletes non-existent and tmpdir test sessions while preserving keepProjectRoot.
+test("purgeOrphanedSessions: removes non-existent and temp test sessions, preserves keepProjectRoot", () => {
+  const drv = makeDriver();
+  const realRoot = process.cwd();
+  const missingRoot = path.join(os.tmpdir(), "asd-nonexistent-missing-dir-999999");
+  const tempTestRoot = fs.mkdtempSync(path.join(os.tmpdir(), "asd-orphan-test-"));
+
+  try {
+    drv.createOrGetSession({
+      sessionId: "s-keep",
+      projectRoot: realRoot,
+      mainHarness: "antigravity",
+    });
+    drv.createOrGetSession({
+      sessionId: "s-missing",
+      projectRoot: missingRoot,
+      mainHarness: "claude-code",
+    });
+    drv.createOrGetSession({
+      sessionId: "s-tmptest",
+      projectRoot: tempTestRoot,
+      mainHarness: "opencode",
+    });
+    drv.upsertTasks("s-missing", [{ taskId: "T1.1", turn: 1, title: "orphan task" }]);
+
+    const res = drv.purgeOrphanedSessions({ keepProjectRoot: realRoot });
+    assert.ok(res.purgedSessionIds.includes("s-missing"));
+    assert.ok(res.purgedSessionIds.includes("s-tmptest"));
+    assert.equal(res.purgedSessionIds.includes("s-keep"), false);
+    assert.ok(drv.getSession("s-keep"));
+    assert.equal(drv.getSession("s-missing"), undefined);
+    assert.equal(drv.getSession("s-tmptest"), undefined);
+    assert.equal(drv.getTask("s-missing", "T1.1"), undefined);
+  } finally {
+    fs.rmSync(tempTestRoot, { recursive: true, force: true });
+  }
+});

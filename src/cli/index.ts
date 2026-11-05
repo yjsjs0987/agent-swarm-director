@@ -441,6 +441,7 @@ export interface CleanResult {
   branchesDeleted: string[];
   stashPopped: boolean;
   stashSha?: string;
+  purgedSessions?: string[];
   message?: string;
 }
 
@@ -454,6 +455,7 @@ export function runAsdClean(options?: {
   const homeDir = options?.homeDir;
   const worktreesRemoved: string[] = [];
   const branchesDeleted: string[] = [];
+  let purgedSessions: string[] = [];
   let stashPopped = false;
   let stashSha: string | undefined;
 
@@ -545,6 +547,29 @@ export function runAsdClean(options?: {
     // ignore
   }
 
+  // 2c. Purge orphaned test/non-existent sessions from global SQLite DB
+  {
+    let db: SqliteDriver | undefined;
+    try {
+      const paths = resolveAsdPaths(projectRoot, homeDir);
+      if (fs.existsSync(paths.dbPath)) {
+        db = openProjectDb(projectRoot, homeDir);
+        const purged = db.purgeOrphanedSessions({ keepProjectRoot: projectRoot });
+        purgedSessions = purged.purgedSessionIds;
+      }
+    } catch {
+      // ignore
+    } finally {
+      if (db) {
+        try {
+          db.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
   // 3. When --pop flag is passed: inspect session's stashed_work_sha & restore
   if (options?.pop) {
     let db: SqliteDriver | undefined;
@@ -626,6 +651,7 @@ export function runAsdClean(options?: {
     branchesDeleted,
     stashPopped,
     stashSha,
+    purgedSessions,
   };
 }
 
@@ -996,6 +1022,11 @@ export async function main(
               console.log(`    - ${b}`);
             }
           }
+          if (res.purgedSessions) {
+            console.log(
+              `  Purged orphaned DB sessions: ${res.purgedSessions.length}`
+            );
+          }
           if (flags.pop) {
             if (res.stashPopped) {
               console.log(
@@ -1183,6 +1214,9 @@ export async function main(
         }
 
         if (subcommand === "session-start" || subcommand === "pre-invocation") {
+          if (harnessId === "antigravity") {
+            process.stdout.write("{}\n");
+          }
           return 0;
         } else if (subcommand === "pre-tool-use") {
           const decision = evaluatePreToolUse(
@@ -1203,7 +1237,21 @@ export async function main(
             return formatted.exitCode;
           }
           if (harnessId === "antigravity") {
-            process.stdout.write(JSON.stringify({ decision: "allow" }) + "\n");
+            if (
+              decision.overwrite &&
+              Object.keys(decision.overwrite).length > 0
+            ) {
+              process.stdout.write(
+                JSON.stringify({
+                  decision: "allow",
+                  overwrite: decision.overwrite,
+                }) + "\n"
+              );
+            } else {
+              process.stdout.write(
+                JSON.stringify({ decision: "allow" }) + "\n"
+              );
+            }
           }
           return 0;
         } else if (subcommand === "stop") {
@@ -1229,6 +1277,11 @@ export async function main(
                 process.stderr.write(formatted.stderr + "\n");
               }
               return formatted.exitCode;
+            }
+            if (harnessId === "antigravity") {
+              process.stdout.write(
+                JSON.stringify({ decision: "allow" }) + "\n"
+              );
             }
             return 0;
           } finally {

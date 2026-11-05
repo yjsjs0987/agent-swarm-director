@@ -36,7 +36,7 @@ ASD v2.4.1 defines exactly five specialist subagent roles (`AGENT_ROLES`), synce
 
 1. **Step 1: Context & Codebase Discovery (Internal Delegation)**
    - Inspect the repository structure and existing `.asd/PLAN.md`.
-   - Delegate non-trivial read-only exploration to `asd-scout` via your harness's native subagent tool (`task` with `subagent_type: "asd-scout"` in OpenCode, `Agent`/`Task` in Claude Code, `invoke_subagent` in Antigravity).
+   - Delegate non-trivial read-only exploration to `asd-scout` via your harness's native subagent tool (`task` with `subagent_type: "asd-scout"` in OpenCode, `Agent`/`Task` in Claude Code, `invoke_subagent(TypeName="asd-scout", Model="flash_lite")` in Antigravity — **never pass `Model: "inherit"`**).
    - If the user request is ambiguous, ask brief, targeted clarifying questions before planning.
 
 2. **Step 2: Generate Plan (`asd plan`) & Recommend Mode**
@@ -68,7 +68,7 @@ ASD v2.4.1 defines exactly five specialist subagent roles (`AGENT_ROLES`), synce
        ```bash
        asd dispatch --turn <N> --mode claim_only
        ```
-     - Delegate each task via the **current harness's native subagent tool** (`task(subagent_type="asd-<role>")` in OpenCode, `Agent`/`Task` in Claude Code, `invoke_subagent` in Antigravity; Codex CLI and Cursor CLI: use native subagent support or execute directly within `allowedFiles` — Cursor personas are synced to `~/.cursor/agents/asd-<role>.md`).
+     - Delegate each task via the **current harness's native subagent tool** (`task(subagent_type="asd-<role>")` in OpenCode, `Agent`/`Task` in Claude Code, `invoke_subagent(TypeName="asd-<role>", Model="flash"|"flash_lite"|"pro")` in Antigravity according to `lightSubagents.antigravity` — `scout`=`"flash_lite"`, `worker`/`planner`=`"flash"`, `architect`/`critic`=`"pro"`, **never `"inherit"`**; Codex CLI and Cursor CLI: use native subagent support or execute directly within `allowedFiles` — Cursor personas are synced to `~/.cursor/agents/asd-<role>.md`).
      - After each task, gate verification: `asd verify --task <T-ID> --cmd "<verifyCmd>"`.
    - **`HEAVY` Confirmed (Multi-Harness External CLI & Worktree Spawn)**:
      ```bash

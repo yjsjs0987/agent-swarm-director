@@ -202,7 +202,14 @@ describe("ASD CLI (src/cli/index.ts)", () => {
           )
         );
         assert.ok(fs.existsSync(path.join(isolatedHome, ".codex", "config.toml")));
-        assert.ok(fs.existsSync(path.join(isolatedHome, ".gemini", "hooks.json")));
+        assert.ok(
+          fs.existsSync(path.join(isolatedHome, ".gemini", "config", "hooks.json"))
+        );
+        assert.ok(
+          fs.existsSync(
+            path.join(isolatedHome, ".gemini", "config", "agents", "asd-worker.md")
+          )
+        );
 
         // 2. Idempotent sync (skipped)
         const syncRes2 = runCli(["sync", "--home", isolatedHome], {
@@ -221,7 +228,10 @@ describe("ASD CLI (src/cli/index.ts)", () => {
 
         // Verify ASD managed files removed
         assert.equal(fs.existsSync(path.join(isolatedHome, ".claude", "settings.json")), false);
-        assert.equal(fs.existsSync(path.join(isolatedHome, ".gemini", "hooks.json")), false);
+        assert.equal(
+          fs.existsSync(path.join(isolatedHome, ".gemini", "config", "hooks.json")),
+          false
+        );
       } finally {
         removeTempDir(isolatedHome);
       }
@@ -434,6 +444,28 @@ describe("ASD CLI (src/cli/index.ts)", () => {
       );
       assert.equal(res.exitCode, 0);
       assert.ok(res.stdout.includes('"decision":"deny"'));
+    });
+
+    test("antigravity harness outputs overwrite Model for invoke_subagent with inherit", () => {
+      const res = runCli(
+        ["hook", "pre-tool-use", "--harness", "antigravity"],
+        {
+          input: JSON.stringify({
+            toolCall: {
+              name: "invoke_subagent",
+              args: {
+                TypeName: "asd-scout",
+                Model: "inherit",
+                Prompt: "Explore repo",
+              },
+            },
+          }),
+        }
+      );
+      assert.equal(res.exitCode, 0);
+      const parsed = JSON.parse(res.stdout.trim());
+      assert.equal(parsed.decision, "allow");
+      assert.deepEqual(parsed.overwrite, { Model: "flash_lite" });
     });
   });
 

@@ -43,7 +43,7 @@ Use the standard ASD criteria (canonical definition in `/asd`, Section 2):
      - For each task, delegate to the **current harness's native subagent tool**:
        - **OpenCode**: `task` tool with `subagent_type: "asd-<role>"` (e.g., `asd-worker`, `asd-scout`, `asd-critic`), run on the model synced into `~/.config/opencode/agent/asd-<role>.md`.
        - **Claude Code**: `Agent` / `Task` tool with `subagent_type: "asd-<role>"`.
-       - **Antigravity**: `invoke_subagent` with the matching role and model tier.
+       - **Antigravity**: `invoke_subagent` with `TypeName: "asd-<role>"` and explicit `Model` tier from `lightSubagents.antigravity` (`"flash_lite"` for `asd-scout`, `"flash"` for `asd-worker`/`asd-planner`, `"pro"` for `asd-architect`/`asd-critic` — **never use `Model: "inherit"`**).
        - **Codex CLI / Cursor CLI**: use native subagent delegation or execute directly within `allowedFiles` (Cursor personas are synced to `~/.cursor/agents/asd-<role>.md`).
    - **`HEAVY` Confirmed (Multi-Harness External CLI & Worktree Spawn)**:
      ```bash

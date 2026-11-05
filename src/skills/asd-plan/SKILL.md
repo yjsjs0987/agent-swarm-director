@@ -23,7 +23,7 @@ Use the standard ASD criteria (canonical definition in `/asd`, Section 2):
 
 1. **Step 1: Read-Only Exploration (Internal Subagent Delegation)**
    - Inspect relevant files, tests, and architecture constraints.
-   - Delegate read-only searches to the internal `asd-scout` subagent (`task` with `subagent_type: "asd-scout"` in OpenCode, `Agent`/`Task` in Claude Code, `invoke_subagent` in Antigravity). Never spawn external CLI processes during planning.
+   - Delegate read-only searches to the internal `asd-scout` subagent (`task` with `subagent_type: "asd-scout"` in OpenCode, `Agent`/`Task` in Claude Code, `invoke_subagent(TypeName="asd-scout", Model="flash_lite")` in Antigravity — **never pass `Model: "inherit"`**). Never spawn external CLI processes during planning.
 
 2. **Step 2: Clarify Ambiguities**
    - If critical requirements are underspecified, ask concise questions before generating the plan.

@@ -8,6 +8,7 @@
 
 import { DatabaseSync } from "node:sqlite";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { ensureProjectInitialized, resolveAsdPaths } from "./config.ts";
 import type {
@@ -552,6 +553,84 @@ export class SqliteDriver {
         .run(trimmed);
       return Number(res.changes ?? 0) > 0;
     });
+  }
+
+  /**
+   * Purge orphaned test/temp sessions from the global SQLite DB:
+   * - Sessions whose `project_root` directory no longer exists on disk, OR
+   * - Sessions whose `project_root` is inside `os.tmpdir()` and matches temporary test folder patterns.
+   * Never purges `options?.keepProjectRoot` if specified and existing on disk.
+   */
+  purgeOrphanedSessions(options?: { keepProjectRoot?: string }): {
+    purgedSessionIds: string[];
+    purgedProjectRoots: string[];
+  } {
+    const normalizeCmp = (p: string): string => {
+      const resolved = path.resolve(p).replace(/\\/g, "/").replace(/\/+$/, "");
+      return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    };
+    const tmpPrefix = normalizeCmp(os.tmpdir()) + "/";
+    const keepCmp = options?.keepProjectRoot
+      ? normalizeCmp(options.keepProjectRoot)
+      : null;
+    const tempTestPattern =
+      /(?:^|\/)asd-[a-z0-9_-]*(?:test|orphan|tmp|temp|fixture|smoke|cli|mcp|debate|driver|spawner|worktree|home|proj|db|policy|gui|light|merge|phase0)/i;
+
+    const allSessions = this.db
+      .prepare("SELECT session_id, project_root FROM sessions")
+      .all() as unknown as Array<{ session_id: string; project_root: string }>;
+
+    const toDeleteIds: string[] = [];
+    const purgedRootsSet = new Set<string>();
+
+    for (const row of allSessions) {
+      const root = (row.project_root || "").trim();
+      if (!root) {
+        toDeleteIds.push(row.session_id);
+        continue;
+      }
+      const rootCmp = normalizeCmp(root);
+      if (keepCmp && rootCmp === keepCmp && fs.existsSync(root)) {
+        continue;
+      }
+      const exists = fs.existsSync(root);
+      const isTmpTest =
+        rootCmp.startsWith(tmpPrefix) && tempTestPattern.test(rootCmp);
+      if (!exists || isTmpTest) {
+        toDeleteIds.push(row.session_id);
+        purgedRootsSet.add(root);
+      }
+    }
+
+    if (toDeleteIds.length === 0) {
+      return { purgedSessionIds: [], purgedProjectRoots: [] };
+    }
+
+    this.withImmediateTx(() => {
+      const delDrivers = this.db.prepare(
+        "DELETE FROM session_drivers WHERE session_id = ?"
+      );
+      const delTasks = this.db.prepare(
+        "DELETE FROM tasks WHERE session_id = ?"
+      );
+      const delDebates = this.db.prepare(
+        "DELETE FROM debates WHERE session_id = ?"
+      );
+      const delSession = this.db.prepare(
+        "DELETE FROM sessions WHERE session_id = ?"
+      );
+      for (const sid of toDeleteIds) {
+        delDrivers.run(sid);
+        delTasks.run(sid);
+        delDebates.run(sid);
+        delSession.run(sid);
+      }
+    });
+
+    return {
+      purgedSessionIds: toDeleteIds,
+      purgedProjectRoots: Array.from(purgedRootsSet),
+    };
   }
 
   /** Return the most recently created session for this project, or undefined. */
