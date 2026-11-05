@@ -19,7 +19,7 @@ function makeTempDir(prefix = "asd-driver-runner-"): string {
 test("CR-03: runDriverTurn first run uses headless command, records session_id, deletes output.log, and second run uses resume", async () => {
   const root = makeTempDir();
   try {
-    const db = openProjectDb(root);
+    const db = openProjectDb(root, root);
     const sessionId = "asd-20261101-120300-drv1";
     db.createOrGetSession({
       sessionId,
@@ -102,7 +102,7 @@ test("CR-03: runDriverTurn first run uses headless command, records session_id, 
 test("CR-03: runDriverTurn injects briefing once when switching to a new driver and rejects concurrent execution with DRIVER_BUSY", async () => {
   const root = makeTempDir();
   try {
-    const db = openProjectDb(root);
+    const db = openProjectDb(root, root);
     const sessionId = "asd-20261101-120301-drv2";
     db.createOrGetSession({
       sessionId,
@@ -209,7 +209,7 @@ test("CR-03: runDriverTurn injects briefing once when switching to a new driver 
 test("T2.2: runDriverTurn emits structured onEvent callbacks for thinking, tool_use, tool_result, and text across harnesses", async () => {
   const root = makeTempDir("asd-driver-events-");
   try {
-    const db = openProjectDb(root);
+    const db = openProjectDb(root, root);
     const sessionId = "asd-20261103-184500-evnt";
     db.createOrGetSession({
       sessionId,
@@ -298,6 +298,71 @@ test("T2.2: runDriverTurn emits structured onEvent callbacks for thinking, tool_
     assert.equal(ocEvents.length, 2);
     assert.equal(ocEvents[0]?.type, "tool_use");
     assert.equal(ocEvents[1]?.type, "tool_result");
+
+    db.close();
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("F16: runDriverTurn recovers full session_id when JSON line is split across stdout chunks", async () => {
+  const root = makeTempDir("asd-driver-split-sid-");
+  try {
+    const db = openProjectDb(root, root);
+    const sessionId = "asd-20261105-090000-f16a";
+    db.createOrGetSession({
+      sessionId,
+      projectRoot: root,
+      mainHarness: "claude-code",
+      mainModel: "claude-sonnet-4-6",
+    });
+
+    const fullUuid = "550e8400-e29b-41d4-a716-446655440000";
+    const jsonLine = JSON.stringify({ type: "system", session_id: fullUuid, text: "hello" }) + "\n";
+    // Split right in the middle of the UUID
+    const splitIdx = jsonLine.indexOf("41d4");
+    const chunk1 = jsonLine.slice(0, splitIdx);
+    const chunk2 = jsonLine.slice(splitIdx);
+
+    const firstRes = await runDriverTurn({
+      projectRoot: root,
+      homeDir: root,
+      db,
+      sessionId,
+      prompt: "First turn with split chunks",
+      commandRunner: {
+        async run(_cmd, _args, opts) {
+          opts.onSpawn?.(70001);
+          opts.onStdout(chunk1);
+          opts.onStdout(chunk2);
+          return { exitCode: 0, pid: 70001 };
+        },
+      },
+    });
+
+    assert.equal(firstRes.exitCode, 0);
+    assert.equal(firstRes.harnessSessionId, fullUuid);
+    const active = getActiveDriver(db, sessionId);
+    assert.equal(active?.harness_session_id, fullUuid);
+
+    const resumeArgs: string[][] = [];
+    await runDriverTurn({
+      projectRoot: root,
+      homeDir: root,
+      db,
+      sessionId,
+      prompt: "Second turn resume check",
+      commandRunner: {
+        async run(_cmd, args) {
+          resumeArgs.push(args);
+          return { exitCode: 0, pid: 70002 };
+        },
+      },
+    });
+
+    assert.equal(resumeArgs.length, 1);
+    assert.ok(resumeArgs[0].includes("--resume"));
+    assert.ok(resumeArgs[0].includes(fullUuid));
 
     db.close();
   } finally {

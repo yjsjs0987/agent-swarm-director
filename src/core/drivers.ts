@@ -362,7 +362,13 @@ export function buildDriverBriefing(input: {
   const doneTasks = tasks
     .filter((t) => t.status === "done" && t.done_claim_json)
     .slice()
-    .sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
+    .sort((a, b) => {
+      const diff = (b.updated_at ?? 0) - (a.updated_at ?? 0);
+      if (diff !== 0) return diff;
+      const turnDiff = b.turn - a.turn;
+      if (turnDiff !== 0) return turnDiff;
+      return b.task_id.localeCompare(a.task_id, undefined, { numeric: true });
+    });
   let sec5 = "";
   if (doneTasks.length > 0) {
     const lines = ["## Recently Completed Tasks"];
@@ -1069,14 +1075,16 @@ export async function runDriverTurn(input: {
     let lineBuffer = "";
     const handleOutputChunk = (chunk: string): void => {
       input.onOutput?.(chunk);
-      if (!input.onEvent) return;
       lineBuffer += chunk;
       let nlIdx = lineBuffer.indexOf("\n");
       while (nlIdx !== -1) {
         const line = lineBuffer.slice(0, nlIdx);
         lineBuffer = lineBuffer.slice(nlIdx + 1);
         for (const ev of parseDriverStreamLine(line, driver.harness)) {
-          input.onEvent(ev);
+          if (ev.harnessSessionId) {
+            recordDetectedSid(ev.harnessSessionId);
+          }
+          input.onEvent?.(ev);
         }
         nlIdx = lineBuffer.indexOf("\n");
       }
@@ -1158,9 +1166,12 @@ export async function runDriverTurn(input: {
         recordDetectedSid(extracted);
       },
       onBeforeStreamEnd: (res) => {
-        if (input.onEvent && lineBuffer.trim().length > 0) {
+        if (lineBuffer.trim().length > 0) {
           for (const ev of parseDriverStreamLine(lineBuffer, driver.harness)) {
-            input.onEvent(ev);
+            if (ev.harnessSessionId) {
+              recordDetectedSid(ev.harnessSessionId);
+            }
+            input.onEvent?.(ev);
           }
           lineBuffer = "";
         }

@@ -136,6 +136,7 @@ export interface TaskRow {
   is_cross_scope?: number;
   follow_up_of?: string | null;
   thinking_effort?: string | null;
+  updated_at?: number | null;
 }
 
 export interface TaskInput {
@@ -241,6 +242,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   commit_sha TEXT,                        -- 완료 후 생성된 체크포인트/병합 커밋 SHA
   duration_ms INTEGER,
   is_cross_scope INTEGER NOT NULL DEFAULT 0, -- Cross-Scope 자동 생성 태스크 여부 (0 | 1)
+  updated_at INTEGER,
   PRIMARY KEY (session_id, task_id),
   FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
 );
@@ -281,7 +283,7 @@ export function generateDriverId(nowMs = Date.now()): string {
   return `drv-${nowMs.toString(36)}-${rand}`;
 }
 
-const TASK_COLUMNS = `task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, assigned_harness, assigned_model, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, done_claim_json, worktree_path, sub_session_id, commit_sha, duration_ms, is_cross_scope, follow_up_of, thinking_effort`;
+const TASK_COLUMNS = `task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, assigned_harness, assigned_model, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, done_claim_json, worktree_path, sub_session_id, commit_sha, duration_ms, is_cross_scope, follow_up_of, thinking_effort, updated_at`;
 
 // ============================================================================
 // SqliteDriver
@@ -290,6 +292,22 @@ const TASK_COLUMNS = `task_id, session_id, turn, title, track, role, category, d
 export class SqliteDriver {
   private db: DatabaseSync;
   private txDepth = 0;
+  private lastTaskUpdatedAt = 0;
+
+  private nextTaskUpdatedAt(sessionId?: string): number {
+    let maxExisting = this.lastTaskUpdatedAt;
+    if (sessionId) {
+      const row = this.db
+        .prepare("SELECT MAX(updated_at) AS max_ts FROM tasks WHERE session_id = ?")
+        .get(sessionId) as { max_ts?: number | null } | undefined;
+      if (row && typeof row.max_ts === "number" && row.max_ts > maxExisting) {
+        maxExisting = row.max_ts;
+      }
+    }
+    const next = Math.max(Date.now(), maxExisting + 1);
+    this.lastTaskUpdatedAt = next;
+    return next;
+  }
   /**
    * When set, all multi-row reads (list/get-latest/all-tasks/all-debates) are
    * scoped to this project root — required now that every project shares one
@@ -344,6 +362,11 @@ export class SqliteDriver {
       if (!taskCols.some((c) => c.name === "thinking_effort")) {
         this.db.exec(
           "ALTER TABLE tasks ADD COLUMN thinking_effort TEXT DEFAULT NULL"
+        );
+      }
+      if (!taskCols.some((c) => c.name === "updated_at")) {
+        this.db.exec(
+          "ALTER TABLE tasks ADD COLUMN updated_at INTEGER DEFAULT NULL"
         );
       }
       // CR-01: Idempotent migration for existing sessions without any session_drivers rows
@@ -766,8 +789,8 @@ export class SqliteDriver {
   upsertTasks(sessionId: string, tasks: TaskInput[]): void {
     this.withImmediateTx(() => {
       const stmt = this.db.prepare(
-        `INSERT INTO tasks (task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, is_cross_scope, follow_up_of, thinking_effort)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO tasks (task_id, session_id, turn, title, track, role, category, difficulty, status, attempts, depends_on_json, target_files_json, context_hint, acceptance, verify_cmd, is_cross_scope, follow_up_of, thinking_effort, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(session_id, task_id) DO UPDATE SET
            turn = excluded.turn,
            title = excluded.title,
@@ -782,7 +805,8 @@ export class SqliteDriver {
            verify_cmd = excluded.verify_cmd,
            is_cross_scope = MAX(tasks.is_cross_scope, excluded.is_cross_scope),
            follow_up_of = COALESCE(excluded.follow_up_of, tasks.follow_up_of),
-           thinking_effort = COALESCE(excluded.thinking_effort, tasks.thinking_effort)`
+           thinking_effort = COALESCE(excluded.thinking_effort, tasks.thinking_effort),
+           updated_at = COALESCE(tasks.updated_at, excluded.updated_at)`
       );
       for (const t of tasks) {
         stmt.run(
@@ -801,7 +825,8 @@ export class SqliteDriver {
           t.verifyCmd ?? null,
           t.isCrossScope ? 1 : 0,
           t.followUpOf ?? null,
-          t.thinkingEffort ?? null
+          t.thinkingEffort ?? null,
+          this.nextTaskUpdatedAt(sessionId)
         );
       }
     });
@@ -814,9 +839,10 @@ export class SqliteDriver {
     extra?: TaskStatusExtra
   ): void {
     this.withImmediateTx(() => {
+      const ts = this.nextTaskUpdatedAt(sessionId);
       this.db
-        .prepare("UPDATE tasks SET status = ? WHERE session_id = ? AND task_id = ?")
-        .run(status, sessionId, taskId);
+        .prepare("UPDATE tasks SET status = ?, updated_at = ? WHERE session_id = ? AND task_id = ?")
+        .run(status, ts, sessionId, taskId);
       if (!extra) return;
       const sets: string[] = [];
       const vals: Array<string | number | null> = [];
@@ -863,11 +889,12 @@ export class SqliteDriver {
    */
   tryClaimTask(sessionId: string, taskId: string): boolean {
     return this.withImmediateTx(() => {
+      const ts = this.nextTaskUpdatedAt(sessionId);
       const res = this.db
         .prepare(
-          "UPDATE tasks SET status = 'running' WHERE session_id = ? AND task_id = ? AND status IN ('pending', 'escalated', 'failed')"
+          "UPDATE tasks SET status = 'running', updated_at = ? WHERE session_id = ? AND task_id = ? AND status IN ('pending', 'escalated', 'failed')"
         )
-        .run(sessionId, taskId);
+        .run(ts, sessionId, taskId);
       return Number(res.changes ?? 0) > 0;
     });
   }
@@ -875,11 +902,12 @@ export class SqliteDriver {
   /** Claim all pending tasks of a wave: status -> 'running'; returns the claimed rows. */
   claimWaveTasks(sessionId: string, turn: number): TaskRow[] {
     return this.withImmediateTx(() => {
+      const ts = this.nextTaskUpdatedAt(sessionId);
       this.db
         .prepare(
-          "UPDATE tasks SET status = 'running' WHERE session_id = ? AND turn = ? AND status = 'pending'"
+          "UPDATE tasks SET status = 'running', updated_at = ? WHERE session_id = ? AND turn = ? AND status = 'pending'"
         )
-        .run(sessionId, turn);
+        .run(ts, sessionId, turn);
       return this.db
         .prepare(
           "SELECT * FROM tasks WHERE session_id = ? AND turn = ? AND status = 'running' ORDER BY task_id"
@@ -897,11 +925,12 @@ export class SqliteDriver {
     durationMs: number
   ): void {
     this.withImmediateTx(() => {
+      const ts = this.nextTaskUpdatedAt(sessionId);
       this.db
         .prepare(
-          `UPDATE tasks SET status = 'done', commit_sha = ?, done_claim_json = ?, duration_ms = ? WHERE session_id = ? AND task_id = ?`
+          `UPDATE tasks SET status = 'done', commit_sha = ?, done_claim_json = ?, duration_ms = ?, updated_at = ? WHERE session_id = ? AND task_id = ?`
         )
-        .run(commitSha, JSON.stringify(doneClaim), durationMs, sessionId, taskId);
+        .run(commitSha, JSON.stringify(doneClaim), durationMs, ts, sessionId, taskId);
       this.db
         .prepare(
           "UPDATE sessions SET no_progress_count = 0, updated_at = ? WHERE session_id = ?"
@@ -916,11 +945,12 @@ export class SqliteDriver {
    */
   recordTaskAttemptFailure(sessionId: string, taskId: string): TaskRow {
     return this.withImmediateTx(() => {
+      const ts = this.nextTaskUpdatedAt(sessionId);
       this.db
         .prepare(
-          "UPDATE tasks SET attempts = attempts + 1 WHERE session_id = ? AND task_id = ?"
+          "UPDATE tasks SET attempts = attempts + 1, updated_at = ? WHERE session_id = ? AND task_id = ?"
         )
-        .run(sessionId, taskId);
+        .run(ts, sessionId, taskId);
       const bumped = this.getTask(sessionId, taskId);
       if (!bumped) throw new Error(`task not found: ${sessionId}/${taskId}`);
       if (bumped.attempts >= 3) {

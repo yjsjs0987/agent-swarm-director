@@ -193,4 +193,62 @@ describe("CR-02: 0-Token Driver Briefing (buildDriverBriefing)", () => {
       fs.rmSync(root, { recursive: true, force: true });
     }
   });
+  test("5. F18: Recently Completed Tasks are ordered newest-first by completion time (updated_at DESC)", () => {
+    const root = makeTempDir();
+    const db = new SqliteDriver(path.join(root, ".asd", "core.db"));
+    try {
+      const sid = "asd-20261105-090500-b005";
+      db.createOrGetSession({
+        sessionId: sid,
+        projectRoot: root,
+        mainHarness: "claude-code",
+      });
+
+      db.upsertTasks(sid, [
+        { taskId: "T1.1", turn: 1, title: "First completed", targetFiles: ["src/1.ts"] },
+        { taskId: "T1.2", turn: 1, title: "Third completed", targetFiles: ["src/2.ts"] },
+        { taskId: "T2.1", turn: 2, title: "Second completed", targetFiles: ["src/3.ts"] },
+      ]);
+
+      // Complete in order: T1.1 -> T2.1 -> T1.2
+      db.recordTaskVerified(
+        sid,
+        "T1.1",
+        "sha1",
+        { summary: "Done first", changed_files: ["src/1.ts"], key_decisions: [], risks: [] },
+        100
+      );
+      db.recordTaskVerified(
+        sid,
+        "T2.1",
+        "sha2",
+        { summary: "Done second", changed_files: ["src/3.ts"], key_decisions: [], risks: [] },
+        100
+      );
+      db.recordTaskVerified(
+        sid,
+        "T1.2",
+        "sha3",
+        { summary: "Done third", changed_files: ["src/2.ts"], key_decisions: [], risks: [] },
+        100
+      );
+
+      const briefing = buildDriverBriefing({
+        db,
+        projectRoot: root,
+        sessionId: sid,
+      });
+
+      const idxT12 = briefing.indexOf("- **T1.2** (Third completed)");
+      const idxT21 = briefing.indexOf("- **T2.1** (Second completed)");
+      const idxT11 = briefing.indexOf("- **T1.1** (First completed)");
+
+      assert.ok(idxT12 !== -1 && idxT21 !== -1 && idxT11 !== -1, "All completed tasks must appear");
+      assert.ok(idxT12 < idxT21, "T1.2 (completed last) must appear before T2.1");
+      assert.ok(idxT21 < idxT11, "T2.1 (completed second) must appear before T1.1");
+    } finally {
+      db.close();
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

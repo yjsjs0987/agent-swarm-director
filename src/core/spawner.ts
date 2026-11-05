@@ -351,6 +351,7 @@ export function executeHarnessProcess(
     let timedOut = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let sessionDetectBuffer = "";
 
     const finish = (exitCode: number, status: "done" | "failed"): void => {
       if (settled) return;
@@ -358,6 +359,17 @@ export function executeHarnessProcess(
       if (timer !== undefined) clearTimeout(timer);
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       if (options.signal) options.signal.removeEventListener("abort", onAbort);
+      if (!detectedHarnessSessionId && sessionDetectBuffer.length > 0) {
+        const extracted = extractHarnessSessionIdFromOutput(
+          sessionDetectBuffer,
+          options.harness
+        );
+        if (extracted) {
+          detectedHarnessSessionId = extracted;
+          options.onSessionIdDetected?.(extracted);
+        }
+        sessionDetectBuffer = "";
+      }
       const finishedAt = Date.now();
       const durationMs = finishedAt - startedAt;
       const result: ExecuteHarnessProcessResult = {
@@ -413,13 +425,22 @@ export function executeHarnessProcess(
       if (chunk && chunk.length > 0) {
         resetIdleTimer();
         if (!detectedHarnessSessionId) {
-          const extracted = extractHarnessSessionIdFromOutput(
-            chunk,
-            options.harness
-          );
-          if (extracted) {
-            detectedHarnessSessionId = extracted;
-            options.onSessionIdDetected?.(extracted);
+          sessionDetectBuffer += chunk;
+          let nlIdx = sessionDetectBuffer.indexOf("\n");
+          while (nlIdx !== -1) {
+            const line = sessionDetectBuffer.slice(0, nlIdx);
+            sessionDetectBuffer = sessionDetectBuffer.slice(nlIdx + 1);
+            if (!detectedHarnessSessionId) {
+              const extracted = extractHarnessSessionIdFromOutput(
+                line,
+                options.harness
+              );
+              if (extracted) {
+                detectedHarnessSessionId = extracted;
+                options.onSessionIdDetected?.(extracted);
+              }
+            }
+            nlIdx = sessionDetectBuffer.indexOf("\n");
           }
         }
       }
