@@ -634,3 +634,93 @@ test("syncPlanFromMd: deletes tasks removed from PLAN.md so they do not resurrec
     db.close();
   }
 });
+
+test("F06: renderPlanMd -> syncPlanFromMd round-trip preserves all 7 TaskStatus values and supports manual [ ] <-> [~] <-> [x] transitions", () => {
+  const dir = tempDir("asd-sync-f06-");
+  const dbPath = path.join(dir, "core.db");
+  const planPath = path.join(dir, "PLAN.md");
+  const db = new SqliteDriver(dbPath);
+
+  try {
+    const sessionId = "sess-f06-roundtrip";
+    db.createOrGetSession({
+      sessionId,
+      projectRoot: dir,
+      mainHarness: "opencode",
+    });
+
+    const allStatuses: Array<{ id: string; status: TaskRow["status"] }> = [
+      { id: "T1.1", status: "pending" },
+      { id: "T1.2", status: "running" },
+      { id: "T1.3", status: "verifying" },
+      { id: "T1.4", status: "done" },
+      { id: "T1.5", status: "failed" },
+      { id: "T1.6", status: "escalated" },
+      { id: "T1.7", status: "merge_conflict" },
+    ];
+
+    db.upsertTasks(
+      sessionId,
+      allStatuses.map((s) => ({
+        taskId: s.id,
+        turn: 1,
+        title: `Task in ${s.status}`,
+        track: "LIGHT",
+        role: "worker",
+        targetFiles: [`src/${s.id}.ts`],
+      }))
+    );
+
+    for (const s of allStatuses) {
+      db.updateTaskStatus(sessionId, s.id, s.status as any);
+    }
+
+    const session = db.getSession(sessionId)!;
+    const rendered = renderPlanMd(session, db.getSessionTasks(sessionId), planPath);
+
+    // 1. parsePlanMd preserves all 7 statuses from rendered PLAN.md
+    const parsed = parsePlanMd(rendered);
+    assert.equal(parsed.length, 7);
+    for (const s of allStatuses) {
+      const p = parsed.find((x) => x.taskId === s.id);
+      assert.equal(p?.status, s.status, `parsePlanMd must preserve ${s.status}`);
+    }
+
+    // 2. syncPlanFromMd preserves all 7 statuses in DB without clobbering escalated/merge_conflict to failed
+    syncPlanFromMd(db, sessionId, planPath);
+    for (const s of allStatuses) {
+      assert.equal(
+        db.getTask(sessionId, s.id)?.status,
+        s.status,
+        `syncPlanFromMd round-trip must preserve ${s.status}`
+      );
+    }
+
+    // 3. Also verify that even if - Status: line is removed from a [~] task, syncPlanFromMd still preserves escalated / merge_conflict in DB
+    const strippedStatusMd = rendered
+      .split(/\r?\n/)
+      .filter((l) => !l.trim().startsWith("- Status:"))
+      .join("\n");
+    fs.writeFileSync(planPath, strippedStatusMd, "utf8");
+    syncPlanFromMd(db, sessionId, planPath);
+    assert.equal(db.getTask(sessionId, "T1.6")?.status, "escalated");
+    assert.equal(db.getTask(sessionId, "T1.7")?.status, "merge_conflict");
+
+    // 4. Manual checkbox transitions:
+    // - T1.1 ([ ] pending) -> [~] => failed
+    // - T1.6 ([~] escalated) -> [ ] => pending
+    // - T1.7 ([~] merge_conflict) -> [x] => done
+    const manuallyEditedMd = strippedStatusMd
+      .replace("- [ ] **T1.1**", "- [~] **T1.1**")
+      .replace("- [~] **T1.6**", "- [ ] **T1.6**")
+      .replace("- [~] **T1.7**", "- [x] **T1.7**");
+    fs.writeFileSync(planPath, manuallyEditedMd, "utf8");
+    syncPlanFromMd(db, sessionId, planPath);
+
+    assert.equal(db.getTask(sessionId, "T1.1")?.status, "failed");
+    assert.equal(db.getTask(sessionId, "T1.6")?.status, "pending");
+    assert.equal(db.getTask(sessionId, "T1.7")?.status, "done");
+  } finally {
+    db.close();
+  }
+});

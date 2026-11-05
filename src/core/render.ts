@@ -235,6 +235,14 @@ export function renderPlanMd(
       if (followUpOf && followUpOf.trim().length > 0) {
         lines.push(`  - FollowUpOf: ${followUpOf.trim()}`);
       }
+      if (
+        status === "running" ||
+        status === "verifying" ||
+        status === "escalated" ||
+        status === "merge_conflict"
+      ) {
+        lines.push(`  - Status: ${status}`);
+      }
     }
     lines.push("");
   }
@@ -307,6 +315,19 @@ export function parsePlanMd(markdownText: string): ParsedPlanTask[] {
       );
       if (followUpMatch) {
         currentTask.followUpOf = followUpMatch[1]!.trim() || null;
+        continue;
+      }
+      const statusMatch = line.match(
+        /^\s{2,}-\s*Status:\s*(pending|running|verifying|done|failed|escalated|merge_conflict)\s*$/i
+      );
+      if (statusMatch) {
+        const explicitStatus = statusMatch[1]!.toLowerCase() as TaskStatus;
+        if (
+          (currentTask.status === "pending" && (explicitStatus === "running" || explicitStatus === "verifying")) ||
+          (currentTask.status === "failed" && (explicitStatus === "escalated" || explicitStatus === "merge_conflict"))
+        ) {
+          currentTask.status = explicitStatus;
+        }
         continue;
       }
     }
@@ -604,21 +625,39 @@ export function syncPlanFromMd(
       db.upsertTasks(sessionId, [taskInput]);
 
       if (existing) {
+        const isExistingTilde =
+          existing.status === "failed" ||
+          existing.status === "escalated" ||
+          existing.status === "merge_conflict";
+        const isParsedTilde =
+          parsed.status === "failed" ||
+          parsed.status === "escalated" ||
+          parsed.status === "merge_conflict";
+
         if (parsed.status === "done" && existing.status !== "done") {
           db.updateTaskStatus(sessionId, parsed.taskId, "done");
         } else if (
-          parsed.status === "pending" &&
-          (existing.status === "done" ||
-            existing.status === "failed" ||
-            existing.status === "escalated" ||
-            existing.status === "merge_conflict")
+          (parsed.status === "pending" || parsed.status === "running" || parsed.status === "verifying") &&
+          (existing.status === "done" || isExistingTilde)
         ) {
+          // Manual checkbox reset from [x] or [~] to [ ] resets to pending
           db.updateTaskStatus(sessionId, parsed.taskId, "pending");
         } else if (
-          parsed.status === "failed" &&
-          existing.status !== "failed"
+          (parsed.status === "running" || parsed.status === "verifying") &&
+          existing.status !== parsed.status
         ) {
-          db.updateTaskStatus(sessionId, parsed.taskId, "failed");
+          db.updateTaskStatus(sessionId, parsed.taskId, parsed.status);
+        } else if (isParsedTilde) {
+          if (!isExistingTilde) {
+            // Manual checkbox change from [ ] or [x] to [~] transitions to parsed tilde status (default failed)
+            db.updateTaskStatus(sessionId, parsed.taskId, parsed.status);
+          } else if (
+            (parsed.status === "escalated" || parsed.status === "merge_conflict") &&
+            existing.status !== parsed.status
+          ) {
+            db.updateTaskStatus(sessionId, parsed.taskId, parsed.status);
+          }
+          // Otherwise, if parsed.status is generic "failed" from [~] and existing is already escalated/merge_conflict/failed, preserve existing.status!
         }
       } else {
         if (parsed.status !== "pending") {
