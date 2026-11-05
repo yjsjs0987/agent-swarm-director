@@ -121,14 +121,33 @@ export function resolveAsdPaths(projectRoot: string, homeDir?: string): AsdPaths
  * Fallback: <home>/.asd/routing.jsonc, bootstrapped from presets/default-routing.jsonc
  * on first use (parent dirs created, preset content copied).
  */
+export function normalizeRoutingConfigObject(raw: RoutingConfig): RoutingConfig {
+  if (!raw || typeof raw !== "object") return raw;
+  const agents =
+    raw.agents ??
+    raw.heavyRouting?.agents ??
+    ({} as Record<string, unknown>);
+  const categories =
+    raw.categories ??
+    raw.heavyRouting?.categories ??
+    ({} as Record<string, unknown>);
+  return {
+    ...raw,
+    agents: agents as RoutingConfig["agents"],
+    categories: categories as RoutingConfig["categories"],
+  };
+}
+
 export function loadRoutingConfig(
   projectRoot: string,
   homeDir?: string
 ): RoutingConfig {
   const paths = resolveAsdPaths(projectRoot, homeDir);
   if (fs.existsSync(paths.localRoutingPath)) {
-    return parseJsonc<RoutingConfig>(
-      fs.readFileSync(paths.localRoutingPath, "utf8")
+    return normalizeRoutingConfigObject(
+      parseJsonc<RoutingConfig>(
+        fs.readFileSync(paths.localRoutingPath, "utf8")
+      )
     );
   }
   if (!fs.existsSync(paths.globalRoutingPath)) {
@@ -143,8 +162,10 @@ export function loadRoutingConfig(
     const content = fs.readFileSync(presetPath, "utf8").replace(/"_asdVersion":\s*"[^"]*"/, `"_asdVersion": "${ASD_VERSION}"`);
     fs.writeFileSync(paths.globalRoutingPath, content, "utf8");
   }
-  return parseJsonc<RoutingConfig>(
-    fs.readFileSync(paths.globalRoutingPath, "utf8")
+  return normalizeRoutingConfigObject(
+    parseJsonc<RoutingConfig>(
+      fs.readFileSync(paths.globalRoutingPath, "utf8")
+    )
   );
 }
 

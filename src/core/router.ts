@@ -21,6 +21,7 @@ import type {
   DifficultyTier,
   DomainCategory,
   HarnessId,
+  LightSubagentsConfig,
   RouteEntry,
   RoutingConfig,
   TaskStatus,
@@ -193,6 +194,142 @@ export function normalizeAntigravityModel(
   return "inherit";
 }
 
+export const DEFAULT_LIGHT_SUBAGENTS: LightSubagentsConfig = {
+  antigravity: {
+    scout: "flash_lite",
+    worker: "flash",
+    planner: "flash",
+    architect: "pro",
+    critic: "pro",
+    defaultModel: "flash",
+  },
+  "claude-code": {
+    scout: "haiku",
+    worker: "sonnet",
+    planner: "sonnet",
+    architect: "opus",
+    critic: "opus",
+    defaultModel: "sonnet",
+  },
+  opencode: {
+    scout: "glm-5",
+    worker: "glm-5",
+    planner: "glm-5",
+    architect: "glm-5",
+    critic: "glm-5",
+    defaultModel: "glm-5",
+  },
+  codex: {
+    defaultModel: "gpt-5-codex",
+  },
+  cursor: {
+    defaultModel: "claude-sonnet-4-6",
+  },
+};
+
+/**
+ * Resolves the native subagent model tier for LIGHT mode (internal subagent delegation)
+ * on a specific harness.
+ * Priority:
+ * 1. `routingConfig.lightSubagents[harnessId]` (role match -> defaultModel)
+ * 2. Legacy fallback: `routingConfig.agents[role]` (primary + fallbacks matching `harnessId`)
+ * 3. `DEFAULT_LIGHT_SUBAGENTS[harnessId]`
+ *
+ * For `antigravity`, the returned string is guaranteed to be normalized via
+ * `normalizeAntigravityModel` into `"flash_lite" | "flash" | "pro"` (never raw `"gemini-3-..."`
+ * and never `"inherit"`, falling back to role default tier so weekly quotas are protected).
+ */
+export function resolveLightSubagentModel(
+  harnessId: HarnessId,
+  roleOrTypeName?: string | null,
+  routingConfig?: RoutingConfig | null
+): string | undefined {
+  const rawType = (roleOrTypeName ?? "").trim().toLowerCase();
+  const strippedRole = rawType.startsWith("asd-") ? rawType.slice(4) : rawType;
+  let canonicalRole = normalizeAgentRole(strippedRole);
+  if (!canonicalRole) {
+    if (
+      strippedRole === "explore" ||
+      strippedRole === "research" ||
+      strippedRole === "librarian" ||
+      strippedRole === "multimodal-looker"
+    ) {
+      canonicalRole = "scout";
+    } else if (
+      strippedRole === "oracle" ||
+      strippedRole === "momus" ||
+      strippedRole === "metis" ||
+      strippedRole === "prometheus"
+    ) {
+      canonicalRole = "architect";
+    } else if (strippedRole) {
+      canonicalRole = "worker";
+    }
+  }
+
+  const lightHarnessCfg = routingConfig?.lightSubagents?.[harnessId];
+  let resolvedModel: string | undefined;
+
+  if (lightHarnessCfg) {
+    if (rawType && typeof lightHarnessCfg[rawType] === "string" && lightHarnessCfg[rawType]!.trim()) {
+      resolvedModel = lightHarnessCfg[rawType]!.trim();
+    } else if (
+       strippedRole &&
+      typeof lightHarnessCfg[strippedRole] === "string" &&
+      lightHarnessCfg[strippedRole]!.trim()
+    ) {
+      resolvedModel = lightHarnessCfg[strippedRole]!.trim();
+    } else if (
+      canonicalRole &&
+      typeof lightHarnessCfg[canonicalRole] === "string" &&
+      lightHarnessCfg[canonicalRole]!.trim()
+    ) {
+      resolvedModel = lightHarnessCfg[canonicalRole]!.trim();
+    } else if (
+      typeof lightHarnessCfg.defaultModel === "string" &&
+      lightHarnessCfg.defaultModel.trim()
+    ) {
+      resolvedModel = lightHarnessCfg.defaultModel.trim();
+    }
+  }
+
+  // Fallback to HEAVY agents table if lightSubagents is not configured for this harness
+  if (!resolvedModel && canonicalRole) {
+    const agentsMap = routingConfig?.agents ?? routingConfig?.heavyRouting?.agents;
+    const entry = agentsMap?.[canonicalRole];
+    if (entry) {
+      const candidates = [entry, ...(entry.fallbacks ?? [])];
+      const match = candidates.find(
+        (c) => c.harness === harnessId && typeof c.model === "string" && c.model.trim().length > 0
+      );
+      if (match) {
+        resolvedModel = match.model.trim();
+      }
+    }
+  }
+
+  // Fallback to built-in default light subagent tiers for Antigravity
+  if (!resolvedModel && harnessId === "antigravity") {
+    const defAg = DEFAULT_LIGHT_SUBAGENTS.antigravity!;
+    resolvedModel =
+      (canonicalRole ? defAg[canonicalRole] : undefined) ??
+      defAg.defaultModel ??
+      "flash";
+  }
+
+  if (harnessId === "antigravity") {
+    const normalized = normalizeAntigravityModel(resolvedModel);
+    if (normalized === "inherit") {
+      if (canonicalRole === "scout") return "flash_lite";
+      if (canonicalRole === "architect" || canonicalRole === "critic") return "pro";
+      return "flash";
+    }
+    return normalized;
+  }
+
+  return resolvedModel;
+}
+
 /**
  * Resolves the absolute path of a binary on PATH across POSIX and Windows.
  */
@@ -316,8 +453,19 @@ export function inferModelFamily(model: string, harness?: HarnessId): string {
  * with `claim_only` mode). If headless CLI spawn is unavailable, automatically falls back
  * to the first available CLI harness (`@cc`, `@oc`, `@cx`) in `fallbacks`.
  */
+function getEffectiveAgents(cfg: RoutingConfig): Record<AgentRole, RouteEntry> {
+  return (cfg.agents ?? cfg.heavyRouting?.agents ?? {}) as Record<AgentRole, RouteEntry>;
+}
+
+function getEffectiveCategories(cfg: RoutingConfig): Record<string, RouteEntry> {
+  return (cfg.categories ?? cfg.heavyRouting?.categories ?? {}) as Record<string, RouteEntry>;
+}
+
 function allConfigEntries(cfg: RoutingConfig): RouteEntry[] {
-  return [...Object.values(cfg.agents), ...Object.values(cfg.categories)];
+  return [
+    ...Object.values(getEffectiveAgents(cfg)),
+    ...Object.values(getEffectiveCategories(cfg)),
+  ];
 }
 
 function inferHarnessFromFamily(family: string): HarnessId {
@@ -486,12 +634,14 @@ function resolveBaseRoute(
   cfg: RoutingConfig
 ): ResolvedRoute {
   const role = normalizeAgentRole(request.role);
+  const agentsMap = getEffectiveAgents(cfg);
+  const categoriesMap = getEffectiveCategories(cfg);
 
   // Tier 2: Specialist role match (planner, architect, scout, critic)
   if (role && SPECIALIST_ROLES.includes(role)) {
     const agentEntry =
-      (request.role ? (cfg.agents as Record<string, RouteEntry | undefined>)[request.role] : undefined) ??
-      cfg.agents[role];
+      (request.role ? (agentsMap as Record<string, RouteEntry | undefined>)[request.role] : undefined) ??
+      agentsMap[role];
     if (agentEntry) {
       return {
         harness: agentEntry.harness,
@@ -509,7 +659,7 @@ function resolveBaseRoute(
   if (isWorker && request.category) {
     const cat = request.category as DomainCategory;
     if (REGISTERED_DOMAIN_CATEGORIES.includes(cat)) {
-      const catEntry = cfg.categories[cat];
+      const catEntry = categoriesMap[cat];
       if (catEntry) {
         return {
           harness: catEntry.harness,
@@ -526,11 +676,11 @@ function resolveBaseRoute(
   const rawDiffKey = (request.difficulty ?? "medium") as string;
   const normDiffKey = normalizeDifficultyTier(rawDiffKey);
   const diffEntry =
-    cfg.categories[rawDiffKey] ??
-    cfg.categories[normDiffKey] ??
-    cfg.categories["general"] ??
-    (role && cfg.agents[role]) ??
-    cfg.agents.worker;
+    categoriesMap[rawDiffKey] ??
+    categoriesMap[normDiffKey] ??
+    categoriesMap["general"] ??
+    (role && agentsMap[role]) ??
+    agentsMap.worker;
 
   if (diffEntry) {
     return {
@@ -543,7 +693,7 @@ function resolveBaseRoute(
   }
 
   // Ultimate fallback to worker
-  const workerEntry = cfg.agents.worker;
+  const workerEntry = agentsMap.worker;
   return {
     harness: workerEntry?.harness ?? "opencode",
     model: workerEntry?.model ?? "glm-5",

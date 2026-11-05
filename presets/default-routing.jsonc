@@ -1,10 +1,46 @@
-// ASD v2.4.0 default model routing preset.
+// ASD v2.4.1 default model routing preset.
 // Bootstrapped to ~/.asd/routing.jsonc on first use; per-project
 // overrides live in <project>/.asd/routing.jsonc (1st priority).
-// 5 core agent roles (planner, architect, worker, scout, critic) +
-// domain categories & 3 difficulty tiers (low, medium, high).
+//
+// Role Split:
+// 1. "lightSubagents": Used in LIGHT mode (single-harness internal subagent delegation)
+//    and PreToolUse hook model overwrites to protect weekly model quotas.
+// 2. "agents" & "categories" (or "heavyRouting"): Used in HEAVY mode
+//    (external CLI parallel_spawn & cross-harness blind debate).
 {
-  "_asdVersion": "2.4.0",
+  "_asdVersion": "2.4.1",
+  "lightSubagents": {
+    "antigravity": {
+      "scout": "flash_lite",
+      "worker": "flash",
+      "planner": "flash",
+      "architect": "pro",
+      "critic": "pro",
+      "defaultModel": "flash"
+    },
+    "claude-code": {
+      "scout": "haiku",
+      "worker": "sonnet",
+      "planner": "sonnet",
+      "architect": "opus",
+      "critic": "opus",
+      "defaultModel": "sonnet"
+    },
+    "opencode": {
+      "scout": "glm-5",
+      "worker": "glm-5",
+      "planner": "glm-5",
+      "architect": "glm-5",
+      "critic": "glm-5",
+      "defaultModel": "glm-5"
+    },
+    "codex": {
+      "defaultModel": "gpt-5-codex"
+    },
+    "cursor": {
+      "defaultModel": "claude-sonnet-4-6"
+    }
+  },
   "agents": {
     "planner": {
       "harness": "claude-code",

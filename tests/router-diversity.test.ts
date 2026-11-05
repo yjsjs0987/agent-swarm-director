@@ -31,6 +31,7 @@ import * as path from "node:path";
 import { parseJsonc } from "../src/core/jsonc.ts";
 import type { RoutingConfig } from "../src/core/types.ts";
 import {
+  DEFAULT_LIGHT_SUBAGENTS,
   DIVERSITY_DEGRADED_TAG,
   REGISTERED_DOMAIN_CATEGORIES,
   SPECIALIST_ROLES,
@@ -38,6 +39,7 @@ import {
   inferModelFamily,
   normalizeAntigravityModel,
   resolveFallback,
+  resolveLightSubagentModel,
   resolveRoute,
   selectDiverseReviewer,
 } from "../src/core/router.ts";
@@ -548,3 +550,37 @@ test("normalizeAntigravityModel: maps arbitrary Gemini/Antigravity names to nati
   assert.equal(normalizeAntigravityModel(""), "inherit");
   assert.equal(normalizeAntigravityModel(undefined), "inherit");
 });
+
+test("resolveLightSubagentModel: resolves per-harness LIGHT subagent tiers from lightSubagents and normalizes Antigravity models", () => {
+  assert.ok(defaultRouting.lightSubagents, "default-routing.jsonc must include lightSubagents");
+  assert.ok(DEFAULT_LIGHT_SUBAGENTS.antigravity);
+
+  // Antigravity roles resolve to native tiers (never raw gemini-3-* or inherit)
+  assert.equal(resolveLightSubagentModel("antigravity", "scout", defaultRouting), "flash_lite");
+  assert.equal(resolveLightSubagentModel("antigravity", "asd-scout", defaultRouting), "flash_lite");
+  assert.equal(resolveLightSubagentModel("antigravity", "explore", defaultRouting), "flash_lite");
+  assert.equal(resolveLightSubagentModel("antigravity", "research", defaultRouting), "flash_lite");
+  assert.equal(resolveLightSubagentModel("antigravity", "worker", defaultRouting), "flash");
+  assert.equal(resolveLightSubagentModel("antigravity", "asd-worker", defaultRouting), "flash");
+  assert.equal(resolveLightSubagentModel("antigravity", "planner", defaultRouting), "flash");
+  assert.equal(resolveLightSubagentModel("antigravity", "architect", defaultRouting), "pro");
+  assert.equal(resolveLightSubagentModel("antigravity", "critic", defaultRouting), "pro");
+  assert.equal(resolveLightSubagentModel("antigravity", "sisyphus-junior", defaultRouting), "flash");
+
+  // Claude Code roles resolve to lightSubagents tiers
+  assert.equal(resolveLightSubagentModel("claude-code", "scout", defaultRouting), "haiku");
+  assert.equal(resolveLightSubagentModel("claude-code", "worker", defaultRouting), "sonnet");
+  assert.equal(resolveLightSubagentModel("claude-code", "architect", defaultRouting), "opus");
+
+  // Legacy config without lightSubagents still normalizes Antigravity models and never returns inherit
+  const legacyCfg: RoutingConfig = {
+    _asdVersion: "2.4.1",
+    agents: defaultRouting.agents,
+    categories: defaultRouting.categories,
+  };
+  assert.equal(resolveLightSubagentModel("antigravity", "worker", legacyCfg), "flash");
+  assert.equal(resolveLightSubagentModel("antigravity", "scout", legacyCfg), "flash_lite");
+  assert.equal(resolveLightSubagentModel("antigravity", "planner", legacyCfg), "flash");
+  assert.equal(resolveLightSubagentModel("antigravity", "architect", legacyCfg), "pro");
+});
+

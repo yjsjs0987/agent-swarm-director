@@ -205,8 +205,29 @@ export interface RouteEntry {
   }>;
 }
 
+export interface LightSubagentHarnessConfig {
+  planner?: string;
+  architect?: string;
+  worker?: string;
+  scout?: string;
+  critic?: string;
+  defaultModel?: string;
+  [roleOrType: string]: string | undefined;
+}
+
+export type LightSubagentsConfig = Partial<
+  Record<HarnessId, LightSubagentHarnessConfig>
+>;
+
+export interface HeavyRoutingSection {
+  agents?: Record<AgentRole, RouteEntry>;
+  categories?: Record<string, RouteEntry>;
+}
+
 export interface RoutingConfig {
   _asdVersion: string;
+  lightSubagents?: LightSubagentsConfig;
+  heavyRouting?: HeavyRoutingSection;
   agents: Record<AgentRole, RouteEntry>;
   categories: Record<string, RouteEntry>;
 }
