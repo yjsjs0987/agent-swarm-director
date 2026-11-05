@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
+import * as child_process from "node:child_process";
 import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { openProjectDb } from "../src/core/db.ts";
@@ -442,6 +443,62 @@ test("T5.1: discoverProjectCliSessions enriches from core.db harness_session_id 
     }
   } finally {
     fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(projectRoot, { recursive: true, force: true });
+  }
+});
+
+test("F17: concurrent child processes calling recordCliRecentSession preserve all entries without loss", async () => {
+  const projectRoot = makeTempDir("asd-f17-concurrent-");
+  try {
+    fs.mkdirSync(path.join(projectRoot, ".asd"), { recursive: true });
+    const trackerUrl = new URL("../src/core/session-tracker.ts", import.meta.url).href;
+
+    const spawnWriter = (workerPrefix: string, count: number): Promise<void> =>
+      new Promise((resolve, reject) => {
+        const script = `
+          import { recordCliRecentSession } from ${JSON.stringify(trackerUrl)};
+          const root = ${JSON.stringify(projectRoot)};
+          const prefix = ${JSON.stringify(workerPrefix)};
+          for (let i = 0; i < ${count}; i++) {
+            recordCliRecentSession(root, {
+              harnessSessionId: prefix + "-" + i,
+              harness: "claude-code",
+              model: "claude-sonnet-4-6",
+              summary: "Summary for " + prefix + "-" + i,
+            });
+          }
+        `;
+        const child = child_process.spawn(
+          process.execPath,
+          ["--no-warnings", "--input-type=module", "-e", script],
+          { stdio: ["ignore", "pipe", "pipe"] }
+        );
+        let stderr = "";
+        child.stderr.on("data", (d) => (stderr += String(d)));
+        child.on("close", (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Child ${workerPrefix} exited with ${code}: ${stderr}`));
+        });
+      });
+
+    const perProcessCount = 15;
+    await Promise.all([
+      spawnWriter("procA", perProcessCount),
+      spawnWriter("procB", perProcessCount),
+    ]);
+
+    const recorded = readCliRecentSessions(projectRoot);
+    assert.equal(
+      recorded.length,
+      perProcessCount * 2,
+      `Expected all ${perProcessCount * 2} concurrent entries to be preserved, got ${recorded.length}`
+    );
+    const ids = new Set(recorded.map((r) => r.harnessSessionId));
+    for (let i = 0; i < perProcessCount; i++) {
+      assert.ok(ids.has(`procA-${i}`), `Missing procA-${i}`);
+      assert.ok(ids.has(`procB-${i}`), `Missing procB-${i}`);
+    }
+  } finally {
     fs.rmSync(projectRoot, { recursive: true, force: true });
   }
 });

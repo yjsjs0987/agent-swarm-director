@@ -815,6 +815,151 @@ export function getCliRecentSessionsPath(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), ".asd", "sessions", "cli-recent.json");
 }
 
+const STALE_CLI_RECENT_LOCK_MAX_AGE_MS = 60_000;
+const DEFAULT_CLI_RECENT_LOCK_TIMEOUT_MS = 10_000;
+const heldCliRecentLockDepth = new Map<string, number>();
+
+function isCliRecentPidAlive(pid: number): boolean {
+  if (!pid || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === "EPERM";
+  }
+}
+
+function isCliRecentLockStale(lockPath: string, now = Date.now()): boolean {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(lockPath, "utf8");
+  } catch {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(raw) as { pid?: number; acquiredAt?: number };
+    const pid = typeof parsed.pid === "number" ? parsed.pid : -1;
+    const acquiredAt = typeof parsed.acquiredAt === "number" ? parsed.acquiredAt : 0;
+    if (now - acquiredAt > STALE_CLI_RECENT_LOCK_MAX_AGE_MS) return true;
+    if (!isCliRecentPidAlive(pid)) return true;
+    return false;
+  } catch {
+    try {
+      const stat = fs.statSync(lockPath);
+      return now - stat.mtimeMs > 2_000;
+    } catch {
+      return false;
+    }
+  }
+}
+
+function tryOpenCliRecentLockFile(lockPath: string, purpose: string): boolean {
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(lockPath, "wx");
+    fs.writeFileSync(
+      fd,
+      JSON.stringify({
+        pid: process.pid,
+        acquiredAt: Date.now(),
+        purpose,
+      }) + "\n",
+      "utf8"
+    );
+    return true;
+  } catch (err: unknown) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code === "EEXIST" || code === "EPERM" || code === "EACCES") {
+      return false;
+    }
+    throw err;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
+function releaseCliRecentLockFile(lockPath: string): void {
+  try {
+    if (!fs.existsSync(lockPath)) return;
+    const raw = fs.readFileSync(lockPath, "utf8");
+    const parsed = JSON.parse(raw) as { pid?: number };
+    if (parsed.pid === process.pid) {
+      fs.unlinkSync(lockPath);
+    }
+  } catch {}
+}
+
+function sleepCliRecentSync(ms: number): void {
+  if (ms <= 0) return;
+  try {
+    const sab = new SharedArrayBuffer(4);
+    const view = new Int32Array(sab);
+    Atomics.wait(view, 0, 0, ms);
+  } catch {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {}
+  }
+}
+
+function withCliRecentFileLockSync<T>(
+  projectRoot: string,
+  purpose: string,
+  fn: () => T,
+  timeoutMs = DEFAULT_CLI_RECENT_LOCK_TIMEOUT_MS
+): T {
+  const resolvedRoot = path.resolve(projectRoot);
+  const key = process.platform === "win32" ? resolvedRoot.toLowerCase() : resolvedRoot;
+  const currentDepth = heldCliRecentLockDepth.get(key) ?? 0;
+  if (currentDepth > 0) {
+    heldCliRecentLockDepth.set(key, currentDepth + 1);
+    try {
+      return fn();
+    } finally {
+      heldCliRecentLockDepth.set(key, currentDepth);
+    }
+  }
+
+  const lockPath = path.join(resolvedRoot, ".asd", "sessions", "cli-recent.lock");
+  const start = Date.now();
+  let attempt = 0;
+
+  while (true) {
+    if (tryOpenCliRecentLockFile(lockPath, purpose)) {
+      break;
+    }
+    const now = Date.now();
+    if (isCliRecentLockStale(lockPath, now)) {
+      try {
+        fs.unlinkSync(lockPath);
+      } catch {}
+      continue;
+    }
+    const elapsed = now - start;
+    if (elapsed >= timeoutMs) {
+      throw new Error("CLI_RECENT_LOCK_TIMEOUT");
+    }
+    const backoff = Math.min(250, 20 * Math.pow(1.5, attempt));
+    const waitMs = Math.min(backoff, Math.max(1, timeoutMs - elapsed));
+    attempt++;
+    sleepCliRecentSync(Math.round(waitMs));
+  }
+
+  heldCliRecentLockDepth.set(key, 1);
+  try {
+    return fn();
+  } finally {
+    heldCliRecentLockDepth.delete(key);
+    releaseCliRecentLockFile(lockPath);
+  }
+}
+
+
 interface DiscoveredLocalTranscript {
   harnessSessionId: string;
   harness: HarnessId;
@@ -1361,58 +1506,60 @@ export function syncLocalHarnessTranscripts(
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   ensureGitExclude(resolvedRoot, ".asd/");
 
-  const existingList = readCliRecentSessionsRaw(resolvedRoot);
-  let changed = false;
+  return withCliRecentFileLockSync(resolvedRoot, "syncLocalHarnessTranscripts", () => {
+    const existingList = readCliRecentSessionsRaw(resolvedRoot);
+    let changed = false;
 
-  for (const item of discovered) {
-    const idx = existingList.findIndex(
-      (s) => s.harnessSessionId === item.harnessSessionId && s.harness === item.harness
-    );
-    if (idx >= 0) {
-      const prev = existingList[idx]!;
-      if (!prev.summary && item.summary) {
-        prev.summary = item.summary;
+    for (const item of discovered) {
+      const idx = existingList.findIndex(
+        (s) => s.harnessSessionId === item.harnessSessionId && s.harness === item.harness
+      );
+      if (idx >= 0) {
+        const prev = existingList[idx]!;
+        if (!prev.summary && item.summary) {
+          prev.summary = item.summary;
+          changed = true;
+        }
+        if (!prev.model && item.model) {
+          prev.model = item.model;
+          changed = true;
+        }
+        if (!prev.transcriptPath && item.transcriptPath) {
+          prev.transcriptPath = item.transcriptPath;
+          changed = true;
+        }
+        if (item.updatedAt > prev.updatedAt) {
+          prev.updatedAt = item.updatedAt;
+          changed = true;
+        }
+      } else {
+        existingList.push({
+          harnessSessionId: item.harnessSessionId,
+          harness: item.harness,
+          model: item.model ?? null,
+          summary: item.summary,
+          transcriptPath: item.transcriptPath,
+          asdSessionId: null,
+          projectRoot: resolvedRoot,
+          startedAt: item.startedAt,
+          updatedAt: item.updatedAt,
+        });
         changed = true;
       }
-      if (!prev.model && item.model) {
-        prev.model = item.model;
-        changed = true;
-      }
-      if (!prev.transcriptPath && item.transcriptPath) {
-        prev.transcriptPath = item.transcriptPath;
-        changed = true;
-      }
-      if (item.updatedAt > prev.updatedAt) {
-        prev.updatedAt = item.updatedAt;
-        changed = true;
-      }
-    } else {
-      existingList.push({
-        harnessSessionId: item.harnessSessionId,
-        harness: item.harness,
-        model: item.model ?? null,
-        summary: item.summary,
-        transcriptPath: item.transcriptPath,
-        asdSessionId: null,
-        projectRoot: resolvedRoot,
-        startedAt: item.startedAt,
-        updatedAt: item.updatedAt,
-      });
-      changed = true;
     }
-  }
 
-  if (changed) {
-    existingList.sort((a, b) => b.updatedAt - a.updatedAt);
-    const nextList = existingList.slice(0, MAX_RECENT_CLI_SESSIONS);
-    atomicWriteFileSync(
-      filePath,
-      JSON.stringify({ sessions: nextList }, null, 2) + "\n"
-    );
-    return nextList;
-  }
+    if (changed) {
+      existingList.sort((a, b) => b.updatedAt - a.updatedAt);
+      const nextList = existingList.slice(0, MAX_RECENT_CLI_SESSIONS);
+      atomicWriteFileSync(
+        filePath,
+        JSON.stringify({ sessions: nextList }, null, 2) + "\n"
+      );
+      return nextList;
+    }
 
-  return existingList;
+    return existingList;
+  });
 }
 
 function readCliRecentSessionsRaw(projectRoot: string): CliRecentSessionEntry[] {
@@ -1477,62 +1624,64 @@ export function recordCliRecentSession(
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   ensureGitExclude(resolvedRoot, ".asd/");
 
-  const existingList = readCliRecentSessionsRaw(resolvedRoot);
-  const now = Date.now();
-  const idx = existingList.findIndex(
-    (s) => s.harnessSessionId === input.harnessSessionId && s.harness === input.harness
-  );
-
-  let updatedEntry: CliRecentSessionEntry;
-  if (idx >= 0) {
-    const prev = existingList[idx]!;
-    const incomingSummary = (input.summary || "").trim();
-    const isGenericIncoming =
-      incomingSummary.startsWith("Tool:") || incomingSummary.startsWith("Shell:");
-    const hasMeaningfulPrev = Boolean(
-      prev.summary &&
-        !prev.summary.startsWith("Tool:") &&
-        !prev.summary.startsWith("Shell:")
+  return withCliRecentFileLockSync(resolvedRoot, "recordCliRecentSession", () => {
+    const existingList = readCliRecentSessionsRaw(resolvedRoot);
+    const now = Date.now();
+    const idx = existingList.findIndex(
+      (s) => s.harnessSessionId === input.harnessSessionId && s.harness === input.harness
     );
-    const resolvedSummary =
-      incomingSummary && (!hasMeaningfulPrev || !isGenericIncoming)
-        ? incomingSummary
-        : prev.summary || incomingSummary || "";
-    updatedEntry = {
-      ...prev,
-      model: (input.model && input.model.trim()) || prev.model || null,
-      summary: resolvedSummary,
-      transcriptPath:
-        (input.transcriptPath && input.transcriptPath.trim()) ||
-        prev.transcriptPath ||
-        null,
-      asdSessionId:
-        (input.asdSessionId && input.asdSessionId.trim()) ||
-        prev.asdSessionId ||
-        null,
-      updatedAt: now,
-    };
-    existingList.splice(idx, 1);
-  } else {
-    updatedEntry = {
-      harnessSessionId: input.harnessSessionId,
-      harness: input.harness,
-      model: (input.model && input.model.trim()) || null,
-      summary: (input.summary || "").trim(),
-      transcriptPath: (input.transcriptPath && input.transcriptPath.trim()) || null,
-      asdSessionId: (input.asdSessionId && input.asdSessionId.trim()) || null,
-      projectRoot: resolvedRoot,
-      startedAt: now,
-      updatedAt: now,
-    };
-  }
 
-  const nextList = [updatedEntry, ...existingList].slice(0, MAX_RECENT_CLI_SESSIONS);
-  atomicWriteFileSync(
-    filePath,
-    JSON.stringify({ sessions: nextList }, null, 2) + "\n"
-  );
-  return updatedEntry;
+    let updatedEntry: CliRecentSessionEntry;
+    if (idx >= 0) {
+      const prev = existingList[idx]!;
+      const incomingSummary = (input.summary || "").trim();
+      const isGenericIncoming =
+        incomingSummary.startsWith("Tool:") || incomingSummary.startsWith("Shell:");
+      const hasMeaningfulPrev = Boolean(
+        prev.summary &&
+          !prev.summary.startsWith("Tool:") &&
+          !prev.summary.startsWith("Shell:")
+      );
+      const resolvedSummary =
+        incomingSummary && (!hasMeaningfulPrev || !isGenericIncoming)
+          ? incomingSummary
+          : prev.summary || incomingSummary || "";
+      updatedEntry = {
+        ...prev,
+        model: (input.model && input.model.trim()) || prev.model || null,
+        summary: resolvedSummary,
+        transcriptPath:
+          (input.transcriptPath && input.transcriptPath.trim()) ||
+          prev.transcriptPath ||
+          null,
+        asdSessionId:
+          (input.asdSessionId && input.asdSessionId.trim()) ||
+          prev.asdSessionId ||
+          null,
+        updatedAt: now,
+      };
+      existingList.splice(idx, 1);
+    } else {
+      updatedEntry = {
+        harnessSessionId: input.harnessSessionId,
+        harness: input.harness,
+        model: (input.model && input.model.trim()) || null,
+        summary: (input.summary || "").trim(),
+        transcriptPath: (input.transcriptPath && input.transcriptPath.trim()) || null,
+        asdSessionId: (input.asdSessionId && input.asdSessionId.trim()) || null,
+        projectRoot: resolvedRoot,
+        startedAt: now,
+        updatedAt: now,
+      };
+    }
+
+    const nextList = [updatedEntry, ...existingList].slice(0, MAX_RECENT_CLI_SESSIONS);
+    atomicWriteFileSync(
+      filePath,
+      JSON.stringify({ sessions: nextList }, null, 2) + "\n"
+    );
+    return updatedEntry;
+  });
 }
 
 /**
@@ -1806,35 +1955,37 @@ export function unlinkHarnessSessionFromAsdSession(options: {
   try {
     const filePath = getCliRecentSessionsPath(projectRoot);
     if (fs.existsSync(filePath)) {
-      const recentList = readCliRecentSessionsRaw(projectRoot);
-      let fileChanged = false;
-      for (const entry of recentList) {
-        const matchesAsd =
-          targetAsdSessionId && entry.asdSessionId === targetAsdSessionId;
-        const matchesHarness =
-          targetHarnessSessionId &&
-          entry.harnessSessionId === targetHarnessSessionId &&
-          (!options.harness || entry.harness === options.harness);
-        if (matchesAsd || matchesHarness) {
-          if (!targetHarnessSessionId) {
-            targetHarnessSessionId = entry.harnessSessionId;
+      withCliRecentFileLockSync(projectRoot, "unlinkHarnessSessionFromAsdSession", () => {
+        const recentList = readCliRecentSessionsRaw(projectRoot);
+        let fileChanged = false;
+        for (const entry of recentList) {
+          const matchesAsd =
+            targetAsdSessionId && entry.asdSessionId === targetAsdSessionId;
+          const matchesHarness =
+            targetHarnessSessionId &&
+            entry.harnessSessionId === targetHarnessSessionId &&
+            (!options.harness || entry.harness === options.harness);
+          if (matchesAsd || matchesHarness) {
+            if (!targetHarnessSessionId) {
+              targetHarnessSessionId = entry.harnessSessionId;
+            }
+            if (!targetAsdSessionId && entry.asdSessionId) {
+              targetAsdSessionId = entry.asdSessionId;
+            }
+            if (entry.asdSessionId !== null) {
+              entry.asdSessionId = null;
+              fileChanged = true;
+            }
+            unlinked = true;
           }
-          if (!targetAsdSessionId && entry.asdSessionId) {
-            targetAsdSessionId = entry.asdSessionId;
-          }
-          if (entry.asdSessionId !== null) {
-            entry.asdSessionId = null;
-            fileChanged = true;
-          }
-          unlinked = true;
         }
-      }
-      if (fileChanged) {
-        atomicWriteFileSync(
-          filePath,
-          JSON.stringify({ sessions: recentList }, null, 2) + "\n"
-        );
-      }
+        if (fileChanged) {
+          atomicWriteFileSync(
+            filePath,
+            JSON.stringify({ sessions: recentList }, null, 2) + "\n"
+          );
+        }
+      });
     }
   } catch {
     // Ignore cli-recent update errors
@@ -2177,10 +2328,32 @@ export function discoverProjectCliSessions(
       const filePath = getCliRecentSessionsPath(resolvedRoot);
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       ensureGitExclude(resolvedRoot, ".asd/");
-      atomicWriteFileSync(
-        filePath,
-        JSON.stringify({ sessions: merged }, null, 2) + "\n"
-      );
+      withCliRecentFileLockSync(resolvedRoot, "discoverProjectCliSessions", () => {
+        const freshMap = new Map<string, CliRecentSessionEntry>();
+        for (const item of merged) {
+          freshMap.set(`${item.harness}::${item.harnessSessionId}`, { ...item });
+        }
+        for (const latestDisk of readCliRecentSessionsRaw(resolvedRoot)) {
+          const k = `${latestDisk.harness}::${latestDisk.harnessSessionId}`;
+          const cur = freshMap.get(k);
+          if (!cur) {
+            freshMap.set(k, latestDisk);
+          } else {
+            if (!cur.asdSessionId && latestDisk.asdSessionId) cur.asdSessionId = latestDisk.asdSessionId;
+            if (!cur.model && latestDisk.model) cur.model = latestDisk.model;
+            if (!cur.summary && latestDisk.summary) cur.summary = latestDisk.summary;
+            if (!cur.transcriptPath && latestDisk.transcriptPath) cur.transcriptPath = latestDisk.transcriptPath;
+            if (latestDisk.updatedAt > cur.updatedAt) cur.updatedAt = latestDisk.updatedAt;
+          }
+        }
+        const finalMerged = [...freshMap.values()]
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+          .slice(0, MAX_RECENT_CLI_SESSIONS);
+        atomicWriteFileSync(
+          filePath,
+          JSON.stringify({ sessions: finalMerged }, null, 2) + "\n"
+        );
+      });
     } catch {
       // Best-effort cache write
     }
