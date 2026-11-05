@@ -248,6 +248,7 @@ export async function discoverHarnessModels(options?: {
   homeDir?: string;
   forceRefresh?: boolean;
   skipCliSpawn?: boolean;
+  enableGatewayProbe?: boolean;
   cacheTtlMs?: number;
   persistCache?: boolean;
 }): Promise<HarnessModelCatalog> {
@@ -318,8 +319,10 @@ export async function discoverHarnessModels(options?: {
   }
 
   // 3. Claude Code: scan `~/.claude/settings.json` and `~/.claude/litellm_config.yaml`
-  let gatewayToken = process.env.ANTHROPIC_AUTH_TOKEN || process.env.NVIDIA_NIM_API_KEY || "";
-  let gatewayBase = "https://integrate.api.nvidia.com/v1";
+  let anthropicToken = process.env.ANTHROPIC_AUTH_TOKEN?.trim() || "";
+  let anthropicBaseUrl = process.env.ANTHROPIC_BASE_URL?.trim() || "";
+  let nvidiaToken = process.env.NVIDIA_NIM_API_KEY?.trim() || "";
+  let litellmBaseUrl = "";
   try {
     const addClaudeModel = (raw: string | undefined) => {
       if (!raw || typeof raw !== "string") return;
@@ -350,7 +353,13 @@ export async function discoverHarnessModels(options?: {
       addClaudeModel(env.ANTHROPIC_DEFAULT_HAIKU_MODEL);
       addClaudeModel(env.ANTHROPIC_DEFAULT_OPUS_MODEL);
       if (env.ANTHROPIC_AUTH_TOKEN?.trim()) {
-        gatewayToken = env.ANTHROPIC_AUTH_TOKEN.trim();
+        anthropicToken = env.ANTHROPIC_AUTH_TOKEN.trim();
+      }
+      if (env.ANTHROPIC_BASE_URL?.trim()) {
+        anthropicBaseUrl = env.ANTHROPIC_BASE_URL.trim();
+      }
+      if (env.NVIDIA_NIM_API_KEY?.trim()) {
+        nvidiaToken = env.NVIDIA_NIM_API_KEY.trim();
       }
     }
 
@@ -361,7 +370,7 @@ export async function discoverHarnessModels(options?: {
       if (defMatch?.[1]) addClaudeModel(defMatch[1]);
       const baseMatch = yamlText.match(/api_base:\s*["']?([^"'\r\n#]+)["']?/);
       if (baseMatch?.[1]?.trim()) {
-        gatewayBase = baseMatch[1].trim().replace(/\/+$/, "");
+        litellmBaseUrl = baseMatch[1].trim().replace(/\/+$/, "");
       }
       for (const m of yamlText.matchAll(/-\s*model_name:\s*["']?([^"'\r\n#]+)["']?/g)) {
         if (m[1]) addClaudeModel(m[1]);
@@ -498,9 +507,11 @@ export async function discoverHarnessModels(options?: {
     // Ignore cursor scan errors
   }
 
-  // 6. Parallel non-blocking CLI & remote gateway probes (skipped when skipCliSpawn is true)
-  if (!options?.skipCliSpawn) {
-    const agyProbe = execCliOutputAsync("agy", ["models"], 3500).then((res) => {
+  // 6. Parallel non-blocking CLI & remote gateway probes
+  const runCliProbes = !options?.skipCliSpawn;
+  const runGatewayProbe = !options?.skipCliSpawn || Boolean(options?.enableGatewayProbe);
+  if (runCliProbes || runGatewayProbe) {
+    const agyProbe = !runCliProbes ? Promise.resolve() : execCliOutputAsync("agy", ["models"], 3500).then((res) => {
       if (!res.stdout) return;
       for (const rawLine of res.stdout.split(/\r?\n/)) {
         const line = rawLine.trim();
@@ -512,7 +523,7 @@ export async function discoverHarnessModels(options?: {
       }
     });
 
-    const opencodeProbe = execCliOutputAsync("opencode", ["models"], 3500, homeDir).then((res) => {
+    const opencodeProbe = !runCliProbes ? Promise.resolve() : execCliOutputAsync("opencode", ["models"], 3500, homeDir).then((res) => {
       if (res.status !== 0 || !res.stdout) return;
       const lines = res.stdout
         .split(/\r?\n/)
@@ -534,7 +545,7 @@ export async function discoverHarnessModels(options?: {
       }
     };
 
-    const cursorProbe = execCliOutputAsync("cursor-agent", ["models"], 3500).then((res) => {
+    const cursorProbe = !runCliProbes ? Promise.resolve() : execCliOutputAsync("cursor-agent", ["models"], 3500).then((res) => {
       if (res.stdout) {
         parseCursorModelsOutput(res.stdout);
       } else {
@@ -544,16 +555,30 @@ export async function discoverHarnessModels(options?: {
       }
     });
 
+    // Pair each token strictly with its matching gateway base URL (F21)
+    let gatewayToken = "";
+    let gatewayBase = "";
+    const explicitGatewayBase = (anthropicBaseUrl || litellmBaseUrl).replace(/\/+$/, "");
+    if (anthropicToken && explicitGatewayBase) {
+      gatewayToken = anthropicToken;
+      gatewayBase = explicitGatewayBase;
+    } else if (nvidiaToken) {
+      gatewayToken = nvidiaToken;
+      gatewayBase = explicitGatewayBase || "https://integrate.api.nvidia.com/v1";
+    }
+
     const gatewayProbe = (async () => {
       if (
         !gatewayToken ||
+        !gatewayBase ||
         gatewayToken.includes("dummy") ||
-        gatewayToken.includes("여기에_")
+        gatewayToken.includes("\uC5EC\uAE30\uC5D0_")
       ) {
         return;
       }
       try {
-        const res = await fetch(`${gatewayBase}/models`, {
+        const modelsEndpoint = gatewayBase.endsWith("/models") ? gatewayBase : `${gatewayBase}/models`;
+        const res = await fetch(modelsEndpoint, {
           headers: { Authorization: `Bearer ${gatewayToken}` },
           signal: AbortSignal.timeout(2500),
         });
@@ -1385,10 +1410,19 @@ const worktreeStatusCache = new Map<
 >();
 const WORKTREE_STATUS_CACHE_TTL_MS = 3500;
 
+const transcriptSyncThrottleCache = new Map<string, number>();
+export const TRANSCRIPT_SYNC_THROTTLE_MS = 15_000;
+
+export function resetDashboardTranscriptSyncThrottle(): void {
+  transcriptSyncThrottleCache.clear();
+}
+
 export async function collectDashboardSnapshot(options?: {
   projectRoot?: string;
   homeDir?: string;
   skipCliSpawn?: boolean;
+  syncLocalTranscripts?: boolean;
+  transcriptSyncThrottleMs?: number;
 }): Promise<DashboardSnapshot> {
   const projectRoot = path.resolve(options?.projectRoot || process.cwd());
   const homeDir = options?.homeDir;
@@ -1598,10 +1632,21 @@ export async function collectDashboardSnapshot(options?: {
     allDebates,
     drivers,
     subagentLogs,
-    cliRecentSessions: readCliRecentSessions(projectRoot, {
-      syncLocalTranscripts: true,
-      homeDir,
-    }),
+    cliRecentSessions: (() => {
+      const throttleMs = options?.transcriptSyncThrottleMs ?? TRANSCRIPT_SYNC_THROTTLE_MS;
+      const lastSyncAt = transcriptSyncThrottleCache.get(cacheKey) ?? 0;
+      const shouldSync =
+        options?.syncLocalTranscripts !== undefined
+          ? options.syncLocalTranscripts
+          : nowMs - lastSyncAt >= throttleMs;
+      if (shouldSync) {
+        transcriptSyncThrottleCache.set(cacheKey, nowMs);
+      }
+      return readCliRecentSessions(projectRoot, {
+        syncLocalTranscripts: shouldSync,
+        homeDir,
+      });
+    })(),
     routingConfig,
     hasLocalRouting,
     localRoutingPath: paths.localRoutingPath,
