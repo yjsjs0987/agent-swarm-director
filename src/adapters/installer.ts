@@ -29,7 +29,11 @@ import * as path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parseJsonc, removeTomlFence, upsertTomlFence } from "../core/jsonc.ts";
 import { evaluatePreToolUse } from "../core/policy.ts";
-import { resolveBinaryOnPath } from "../core/router.ts";
+import {
+  normalizeAntigravityModel,
+  resolveBinaryOnPath,
+  resolveLightSubagentModel,
+} from "../core/router.ts";
 import {
   AGENT_ROLES,
   ASD_VERSION,
@@ -243,13 +247,7 @@ export function resolveHarnessRoleModel(
   harnessId: HarnessId,
   routingConfig?: RoutingConfig | null
 ): string | undefined {
-  const entry = routingConfig?.agents?.[role];
-  if (!entry) return undefined;
-  const candidates = [entry, ...(entry.fallbacks ?? [])];
-  const match = candidates.find(
-    (c) => c.harness === harnessId && typeof c.model === "string" && c.model.trim().length > 0
-  );
-  return match?.model;
+  return resolveLightSubagentModel(harnessId, role, routingConfig);
 }
 
 const LEGACY_REMOVED_ROLES = [
@@ -335,6 +333,21 @@ export function generateAgentContent(
     focus: "Specialized multi-agent execution.",
   };
 
+  const effectiveModel =
+    opts?.harnessId === "antigravity"
+      ? (() => {
+          const norm = normalizeAntigravityModel(
+            opts.model ?? resolveLightSubagentModel("antigravity", role)
+          );
+          if (norm === "inherit") {
+            if (role === "scout") return "flash_lite";
+            if (role === "architect" || role === "critic") return "pro";
+            return "flash";
+          }
+          return norm;
+        })()
+      : opts?.model;
+
   const frontmatterLines = [
     `---`,
     `name: asd-${role}`,
@@ -343,8 +356,12 @@ export function generateAgentContent(
   if (opts?.harnessId === "opencode") {
     frontmatterLines.push(`mode: subagent`);
   }
-  if (opts?.model) {
-    frontmatterLines.push(`model: ${opts.model}`);
+  if (effectiveModel) {
+    frontmatterLines.push(`model: ${effectiveModel}`);
+  }
+  if (opts?.harnessId === "antigravity") {
+    frontmatterLines.push(`mainAgent: false`);
+    frontmatterLines.push(`subagent: true`);
   }
   frontmatterLines.push(`---`);
   const protectedAsdRuleBlock = [
@@ -354,7 +371,7 @@ export function generateAgentContent(
     `- If an operation on \`.asd/\` has **no corresponding official \`asd\` CLI command or MCP tool**, **IMMEDIATELY HALT** execution and explain the situation to the user rather than attempting direct file manipulation or workarounds.`,
   ].join("\n");
 
-  const presetBody = getAgentTemplate(role, opts?.model);
+  const presetBody = getAgentTemplate(role, effectiveModel);
   if (presetBody) {
     const bodyWithRule = presetBody.includes("Protected `.asd/` Directory")
       ? presetBody
@@ -367,7 +384,7 @@ export function generateAgentContent(
 # ASD Agent: asd-${role} (${meta.title})
 
 You are operating as the **${meta.title}** agent in the ASD v${ASD_VERSION} multi-agent system.${
-    opts?.model ? `\n**Configured Model**: \`${opts.model}\` (synced from \`routing.jsonc\`)` : ""
+    effectiveModel ? `\n**Configured Model**: \`${effectiveModel}\` (synced from \`routing.jsonc\`)` : ""
   }
 
 ## Responsibilities
@@ -469,14 +486,32 @@ function bootstrapGlobalPresets(homeDir: string): { routingPath: string; mcpPath
   return { routingPath, mcpPath };
 }
 
-function computeConfigHash(homeDir: string): string {
+function computeConfigHash(homeDir: string, projectRoot?: string): string {
   const { routingPath, mcpPath } = bootstrapGlobalPresets(homeDir);
 
   const hash = crypto.createHash("sha256");
   hash.update(ASD_VERSION);
 
-  if (fs.existsSync(routingPath)) {
-    hash.update(fs.readFileSync(routingPath));
+  let parsedRouting: RoutingConfig | null = null;
+  const localRoutingPath = projectRoot
+    ? path.join(projectRoot, ".asd", "routing.jsonc")
+    : null;
+  if (localRoutingPath && fs.existsSync(localRoutingPath)) {
+    const raw = fs.readFileSync(localRoutingPath);
+    hash.update(raw);
+    try {
+      parsedRouting = parseJsonc<RoutingConfig>(raw.toString("utf8"));
+    } catch {
+      parsedRouting = null;
+    }
+  } else if (fs.existsSync(routingPath)) {
+    const raw = fs.readFileSync(routingPath);
+    hash.update(raw);
+    try {
+      parsedRouting = parseJsonc<RoutingConfig>(raw.toString("utf8"));
+    } catch {
+      parsedRouting = null;
+    }
   }
   if (fs.existsSync(mcpPath)) {
     hash.update(fs.readFileSync(mcpPath));
@@ -486,8 +521,11 @@ function computeConfigHash(homeDir: string): string {
     hash.update(getSkillTemplate(skill));
   }
 
-  for (const role of AGENT_ROLES) {
-    hash.update(generateAgentContent(role));
+  for (const harnessId of DEFAULT_HARNESS_IDS) {
+    for (const role of AGENT_ROLES) {
+      const model = resolveHarnessRoleModel(role, harnessId, parsedRouting);
+      hash.update(generateAgentContent(role, { harnessId, model }));
+    }
   }
 
   return hash.digest("hex");
@@ -907,7 +945,7 @@ export async function syncHarnessConfigs(
   const effectiveCatalogRoot = options?.asdCliPath ? asdRoot : runtimeDir;
 
   // 1. Bootstrap presets, load catalog & native capabilities, and compute config hash
-  const configHash = computeConfigHash(homeDir);
+  const configHash = computeConfigHash(homeDir, options?.projectRoot);
   const lastSync = loadLastSync(homeDir);
   const nativeCapabilitiesMap = loadHarnessNativeCapabilities();
   const catalogMcpServers = loadCatalogMcpServers(homeDir, effectiveCatalogRoot);
@@ -1135,11 +1173,34 @@ export async function syncHarnessConfigs(
 
       case "antigravity": {
         const geminiDir = path.join(homeDir, ".gemini");
-        cleanupLegacyAgentFiles(path.join(geminiDir, "agents"));
+        const legacyAgentsDir = path.join(geminiDir, "agents");
+        const configAgentsDir = path.join(geminiDir, "config", "agents");
 
-        // 5 agents (with highest-priority antigravity model from routing.jsonc)
+        cleanupLegacyAgentFiles(legacyAgentsDir);
+        cleanupLegacyAgentFiles(configAgentsDir);
+
+        // Remove any legacy ~/.gemini/agents/asd-<role>.md files so only ~/.gemini/config/agents/ is active
         for (const role of AGENT_ROLES) {
-          const agentPath = path.join(geminiDir, "agents", `asd-${role}.md`);
+          const legacyAgentPath = path.join(legacyAgentsDir, `asd-${role}.md`);
+          if (fs.existsSync(legacyAgentPath)) {
+            try {
+              fs.unlinkSync(legacyAgentPath);
+            } catch {
+              // Ignore removal error
+            }
+          }
+        }
+        try {
+          if (fs.existsSync(legacyAgentsDir) && fs.readdirSync(legacyAgentsDir).length === 0) {
+            fs.rmdirSync(legacyAgentsDir);
+          }
+        } catch {
+          // Ignore
+        }
+
+        // 5 agents under ~/.gemini/config/agents/ (with normalized Antigravity tier from lightSubagents / routing.jsonc)
+        for (const role of AGENT_ROLES) {
+          const agentPath = path.join(configAgentsDir, `asd-${role}.md`);
           const model = resolveHarnessRoleModel(role, "antigravity", routingConfig);
           safeWriteText(agentPath, generateAgentContent(role, { harnessId: "antigravity", model }));
           written.push(agentPath);
@@ -1152,52 +1213,34 @@ export async function syncHarnessConfigs(
           written.push(skillPath);
         }
 
-        // hooks.json
-        const hooksJsonPath = path.join(geminiDir, "hooks.json");
-        let existingHooks: Record<string, unknown> = {};
-        if (fs.existsSync(hooksJsonPath)) {
-          backupUserFile(hooksJsonPath);
+        // Clean up legacy ~/.gemini/hooks.json if present (consolidated into ~/.gemini/config/hooks.json)
+        const legacyHooksJsonPath = path.join(geminiDir, "hooks.json");
+        if (fs.existsSync(legacyHooksJsonPath)) {
           try {
-            existingHooks = JSON.parse(fs.readFileSync(hooksJsonPath, "utf8")) as Record<string, unknown>;
+            const lJson = JSON.parse(fs.readFileSync(legacyHooksJsonPath, "utf8")) as Record<string, unknown>;
+            for (const key of ["SessionStart", "PreToolUse", "Stop"] as const) {
+              if (Array.isArray(lJson[key])) {
+                lJson[key] = (lJson[key] as unknown[]).filter(
+                  (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
+                );
+                if ((lJson[key] as unknown[]).length === 0) {
+                  delete lJson[key];
+                }
+              }
+            }
+            if (Object.keys(lJson).length === 0) {
+              fs.unlinkSync(legacyHooksJsonPath);
+              const backupHooksPath = `${legacyHooksJsonPath}.asd-backup`;
+              if (fs.existsSync(backupHooksPath)) {
+                fs.unlinkSync(backupHooksPath);
+              }
+            } else {
+              safeWriteJson(legacyHooksJsonPath, lJson);
+            }
           } catch {
-            existingHooks = {};
+            // Ignore cleanup failure on legacy hooks.json
           }
         }
-        const preHooks = Array.isArray(existingHooks.PreToolUse)
-          ? existingHooks.PreToolUse.filter(
-              (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
-            )
-          : [];
-        preHooks.push({
-          command: `node --no-warnings "${asdCliPath}" hook pre-tool-use`,
-          _asdManaged: true,
-        });
-
-        const stopHooks = Array.isArray(existingHooks.Stop)
-          ? existingHooks.Stop.filter(
-              (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
-            )
-          : [];
-        stopHooks.push({
-          command: `node --no-warnings "${asdCliPath}" hook stop`,
-          _asdManaged: true,
-        });
-
-        existingHooks.SessionStart = [
-          ...(Array.isArray(existingHooks.SessionStart)
-            ? existingHooks.SessionStart.filter(
-                (h: unknown) => !(h && typeof h === "object" && (h as Record<string, unknown>)._asdManaged)
-              )
-            : []),
-          {
-            command: `node --no-warnings "${asdCliPath}" hook session-start --harness antigravity`,
-            _asdManaged: true,
-          },
-        ];
-        existingHooks.PreToolUse = preHooks;
-        existingHooks.Stop = stopHooks;
-        safeWriteJson(hooksJsonPath, existingHooks);
-        written.push(hooksJsonPath);
 
         const configHooksJsonPath = path.join(geminiDir, "config", "hooks.json");
         let existingConfigHooks: Record<string, unknown> = {};
@@ -1220,16 +1263,10 @@ export async function syncHarnessConfigs(
               timeout: 10,
             },
           ],
-          PreInvocation: [
-            {
-              type: "command",
-              command: `node --no-warnings ${posixCliPath} hook pre-invocation --harness antigravity`,
-              timeout: 10,
-            },
-          ],
           PreToolUse: [
             {
-              matcher: "",
+              matcher:
+                "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command|invoke_subagent",
               hooks: [
                 {
                   type: "command",
@@ -1682,8 +1719,10 @@ export async function uninstallHarnessConfigs(
   // 4. Antigravity
   const geminiDir = path.join(homeDir, ".gemini");
   for (const role of AGENT_ROLES) {
+    removeFile(path.join(geminiDir, "config", "agents", `asd-${role}.md`), "antigravity");
     removeFile(path.join(geminiDir, "agents", `asd-${role}.md`), "antigravity");
   }
+  removeDirIfEmpty(path.join(geminiDir, "config", "agents"));
   removeDirIfEmpty(path.join(geminiDir, "agents"));
 
   for (const skill of ASD_SKILLS) {

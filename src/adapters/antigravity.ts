@@ -125,12 +125,12 @@ export class AntigravityAdapter implements HarnessAdapter {
     const geminiDir = path.join(homeDir, ".gemini");
 
     for (const role of AGENT_ROLES) {
-      targets.push(path.join(geminiDir, "agents", `asd-${role}.md`));
+      targets.push(path.join(geminiDir, "config", "agents", `asd-${role}.md`));
     }
     for (const skill of ASD_SKILLS) {
       targets.push(path.join(geminiDir, "skills", skill, "SKILL.md"));
     }
-    targets.push(path.join(geminiDir, "hooks.json"));
+    targets.push(path.join(geminiDir, "config", "hooks.json"));
     targets.push(path.join(geminiDir, "mcp_config.json"));
     targets.push(path.join(geminiDir, "config", "mcp_config.json"));
 

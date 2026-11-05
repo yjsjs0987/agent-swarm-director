@@ -64,6 +64,9 @@ export function isAsdManagedClaudeHook(entry: unknown): boolean {
   return false;
 }
 
+export const CLAUDE_PRE_TOOL_USE_MATCHER =
+  "Write|Edit|MultiEdit|NotebookEdit|Bash" as const;
+
 /**
  * Generates the ASD managed hook configuration entries for Claude Code
  * using the official `{ matcher, hooks: [{ type: "command", command }] }` schema.
@@ -87,7 +90,7 @@ export function createClaudeHookConfig(asdCliPath: string): {
     ],
     PreToolUse: [
       {
-        matcher: "",
+        matcher: CLAUDE_PRE_TOOL_USE_MATCHER,
         hooks: [
           {
             type: "command",

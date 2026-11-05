@@ -357,19 +357,20 @@ describe("Harness Adapters", () => {
       assert.ok(targets.includes(path.join(mockHome, ".codex", "AGENTS.md")));
     });
 
-    test("antigravity targets include 10 roles, 5 skills, hooks.json, and both mcp_config.json paths", () => {
+    test("antigravity targets include 5 roles under config/agents, skills, config/hooks.json, and both mcp_config.json paths", () => {
       const adapter = new AntigravityAdapter({ supportsHeadlessSpawn: false });
       const targets = adapter.globalConfigTargets(mockHome);
 
       for (const role of AGENT_ROLES) {
-        const expected = path.join(mockHome, ".gemini", "agents", `asd-${role}.md`);
+        const expected = path.join(mockHome, ".gemini", "config", "agents", `asd-${role}.md`);
         assert.ok(targets.includes(expected), `Missing agent target: ${expected}`);
       }
       for (const skill of ASD_SKILLS) {
         const expected = path.join(mockHome, ".gemini", "skills", skill, "SKILL.md");
         assert.ok(targets.includes(expected), `Missing skill target: ${expected}`);
       }
-      assert.ok(targets.includes(path.join(mockHome, ".gemini", "hooks.json")));
+      assert.ok(targets.includes(path.join(mockHome, ".gemini", "config", "hooks.json")));
+      assert.equal(targets.includes(path.join(mockHome, ".gemini", "hooks.json")), false);
       assert.ok(targets.includes(path.join(mockHome, ".gemini", "mcp_config.json")));
       assert.ok(targets.includes(path.join(mockHome, ".gemini", "config", "mcp_config.json")));
     });
@@ -442,7 +443,10 @@ describe("Harness Adapters", () => {
       assert.equal(hooks.PreToolUse[0]?.hooks[0]?.command, "my-custom-audit-tool");
 
       // Managed tool added in official matcher+hooks schema
-      assert.equal(hooks.PreToolUse[1]?.matcher, "");
+      assert.equal(
+        hooks.PreToolUse[1]?.matcher,
+        "Write|Edit|MultiEdit|NotebookEdit|Bash"
+      );
       assert.equal(hooks.PreToolUse[1]?.hooks[0]?.type, "command");
       assert.ok(hooks.PreToolUse[1]?.hooks[0]?.command.includes("/path/to/asd-cli"));
 

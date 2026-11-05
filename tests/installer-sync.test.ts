@@ -103,7 +103,10 @@ describe("Installer & Sync Engine", () => {
       const settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
       assert.ok(settings.hooks?.PreToolUse?.length > 0);
       assert.ok(settings.hooks?.Stop?.length > 0);
-      assert.equal(settings.hooks.PreToolUse[0].matcher, "");
+      assert.equal(
+        settings.hooks.PreToolUse[0].matcher,
+        "Write|Edit|MultiEdit|NotebookEdit|Bash"
+      );
       assert.equal(settings.hooks.PreToolUse[0].hooks[0].type, "command");
       assert.ok(settings.hooks.PreToolUse[0].hooks[0].command.includes("hook pre-tool-use"));
       assert.equal(settings.hooks.Stop[0].matcher, "");
@@ -199,13 +202,24 @@ describe("Installer & Sync Engine", () => {
       assert.equal(parsedHooks.Stop, undefined);
     });
 
-    test("Antigravity targets exist and contain agents, skills, hooks, and MCP config", () => {
+    test("Antigravity targets exist and contain config/agents (with normalized models & subagent flags), skills, config/hooks.json, and MCP config", () => {
       const geminiDir = path.join(tmpHome, ".gemini");
 
-      // 10 agents
+      // 5 agents in ~/.gemini/config/agents/ (and legacy ~/.gemini/agents/ must not exist)
+      assert.equal(fs.existsSync(path.join(geminiDir, "agents")), false);
       for (const role of AGENT_ROLES) {
-        const agentFile = path.join(geminiDir, "agents", `asd-${role}.md`);
+        const agentFile = path.join(geminiDir, "config", "agents", `asd-${role}.md`);
         assert.ok(fs.existsSync(agentFile), `Missing agent: ${agentFile}`);
+        const content = fs.readFileSync(agentFile, "utf8");
+        assert.ok(content.includes("mainAgent: false"), `${role} must have mainAgent: false`);
+        assert.ok(content.includes("subagent: true"), `${role} must have subagent: true`);
+        if (role === "scout") {
+          assert.ok(content.includes("model: flash_lite"), "scout must use normalized model: flash_lite");
+        } else if (role === "architect" || role === "critic") {
+          assert.ok(content.includes("model: pro"), `${role} must use normalized model: pro`);
+        } else {
+          assert.ok(content.includes("model: flash"), `${role} must use normalized model: flash`);
+        }
       }
 
       // 5 skills
@@ -214,13 +228,20 @@ describe("Installer & Sync Engine", () => {
         assert.ok(fs.existsSync(skillFile), `Missing skill: ${skillFile}`);
       }
 
-      // hooks.json
-      const hooksJson = path.join(geminiDir, "hooks.json");
-      assert.ok(fs.existsSync(hooksJson));
-      const hooks = JSON.parse(fs.readFileSync(hooksJson, "utf8"));
-      assert.ok(hooks.PreToolUse?.length > 0);
-      assert.ok(hooks.Stop?.length > 0);
-      assert.equal(hooks.PreToolUse[0]._asdManaged, true);
+      // Legacy ~/.gemini/hooks.json is NOT created; consolidated in ~/.gemini/config/hooks.json
+      assert.equal(fs.existsSync(path.join(geminiDir, "hooks.json")), false);
+      const configHooksJson = path.join(geminiDir, "config", "hooks.json");
+      assert.ok(fs.existsSync(configHooksJson));
+      const hooks = JSON.parse(fs.readFileSync(configHooksJson, "utf8"));
+      const tracker = hooks["asd-session-tracker"];
+      assert.ok(tracker, "Missing asd-session-tracker hook group");
+      assert.equal(tracker.PreInvocation, undefined, "PreInvocation should not be registered");
+      assert.ok(tracker.PreToolUse?.length > 0);
+      assert.equal(
+        tracker.PreToolUse[0].matcher,
+        "write_file|edit_file|write_to_file|replace_file_content|multi_replace_file_content|run_command|invoke_subagent"
+      );
+      assert.ok(tracker.Stop?.length > 0);
 
       // mcp_config.json
       const mcpConfig = path.join(geminiDir, "mcp_config.json");
@@ -363,6 +384,7 @@ describe("Installer & Sync Engine", () => {
       assert.equal(fs.existsSync(path.join(userHome, ".config", "opencode", "AGENTS.md")), false);
       assert.equal(fs.existsSync(path.join(userHome, ".codex", "AGENTS.md")), false);
       assert.equal(fs.existsSync(path.join(userHome, ".gemini", "agents")), false);
+      assert.equal(fs.existsSync(path.join(userHome, ".gemini", "config", "agents")), false);
 
       // Backups removed
       assert.equal(fs.existsSync(path.join(userHome, ".claude", "settings.json.asd-backup")), false);
