@@ -992,14 +992,31 @@ export function resolveIsolatedRuntimeDir(
   return path.join(homeDir, ".asd", "runtime");
 }
 
+function isAsdSourceRepoDir(dirPath: string): boolean {
+  try {
+    const pkgPath = path.join(dirPath, "package.json");
+    const cliPath = path.join(dirPath, "src", "cli", "index.ts");
+    const gitPath = path.join(dirPath, ".git");
+    if (!fs.existsSync(pkgPath) || !fs.existsSync(cliPath) || !fs.existsSync(gitPath)) {
+      return false;
+    }
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { name?: string };
+    return pkg?.name === "asd-multiagent";
+  } catch {
+    return false;
+  }
+}
+
 export function stageIsolatedRuntime(asdRoot: string, runtimeDir: string): string {
   const resolvedSource = path.resolve(asdRoot);
   const resolvedTarget = path.resolve(runtimeDir);
   if (resolvedSource !== resolvedTarget) {
     ensureDir(resolvedTarget);
-    const pkgSrc = path.join(resolvedSource, "package.json");
-    if (fs.existsSync(pkgSrc)) {
-      fs.copyFileSync(pkgSrc, path.join(resolvedTarget, "package.json"));
+    for (const rootFile of ["package.json", "ROUTING_GUIDE.md"]) {
+      const fileSrc = path.join(resolvedSource, rootFile);
+      if (fs.existsSync(fileSrc)) {
+        fs.copyFileSync(fileSrc, path.join(resolvedTarget, rootFile));
+      }
     }
     for (const subDir of ["src", "presets", "scripts"]) {
       const srcDir = path.join(resolvedSource, subDir);
@@ -1017,8 +1034,14 @@ export async function syncHarnessConfigs(
   options?: SyncHarnessOptions
 ): Promise<SyncHarnessConfigsResult> {
   const homeDir = resolveHome(options?.homeDir);
-  const asdRoot = getAsdRoot();
+  const rawAsdRoot = getAsdRoot();
   const runtimeDir = resolveIsolatedRuntimeDir(homeDir, options?.runtimeDir);
+  const asdRoot =
+    path.resolve(rawAsdRoot) === path.resolve(runtimeDir) &&
+    options?.projectRoot &&
+    isAsdSourceRepoDir(options.projectRoot)
+      ? path.resolve(options.projectRoot)
+      : rawAsdRoot;
   const stagedCliPath = options?.asdCliPath
     ? options.asdCliPath
     : stageIsolatedRuntime(asdRoot, runtimeDir);

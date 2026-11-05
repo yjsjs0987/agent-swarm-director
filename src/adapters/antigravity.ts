@@ -73,7 +73,7 @@ export class AntigravityAdapter implements HarnessAdapter {
     const args: string[] = [
       "-p",
       prompt,
-      "--resume",
+      "--conversation",
       harnessSessionId,
       "--output-format",
       "json",
@@ -91,7 +91,9 @@ export class AntigravityAdapter implements HarnessAdapter {
     harnessSessionId: string,
     model?: string
   ): { cmd: string; args: string[] } {
-    const args: string[] = ["--resume", harnessSessionId];
+    const args: string[] = harnessSessionId
+      ? ["--conversation", harnessSessionId]
+      : [];
     if (model) {
       args.push("--model", model);
     }

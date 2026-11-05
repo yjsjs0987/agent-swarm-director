@@ -176,7 +176,7 @@ export function buildResumeHarnessCommand(
       const args = [
         "-p",
         textPrompt,
-        "--resume",
+        "--conversation",
         sid,
         "--output-format",
         "json",
@@ -250,7 +250,7 @@ export function buildInteractiveResumeHarnessCommand(
     }
     case "antigravity": {
       command = "agy";
-      args = sid ? ["--resume", sid] : ["chat"];
+      args = sid ? ["--conversation", sid] : [];
       if (resolvedModel) args.push("--model", resolvedModel);
       break;
     }

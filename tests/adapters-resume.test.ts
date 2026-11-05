@@ -38,7 +38,7 @@ test("CR-17.1: adapter buildInteractiveResumeCommand matches buildInteractiveRes
   // Verify new session (no harnessSessionId) commands
   const agyNew = buildInteractiveResumeHarnessCommand({ harness: "antigravity" });
   assert.equal(agyNew.command, "agy");
-  assert.deepEqual(agyNew.args, ["chat"]);
+  assert.deepEqual(agyNew.args, []);
 
   const ocNew = buildInteractiveResumeHarnessCommand({ harness: "opencode", harnessSessionId: "oc-1" });
   assert.equal(ocNew.command, "opencode");
@@ -187,7 +187,7 @@ test("T1.1: buildSessionDemotion resolves active driver across harnesses and err
         harness: "antigravity",
         sid: "ag-conv-4",
         model: "gemini-3-pro",
-        expectedCli: "agy --resume ag-conv-4 --model gemini-3-pro",
+        expectedCli: "agy --conversation ag-conv-4 --model gemini-3-pro",
       },
       {
         sessionId: "asd-20261103-100005-cr01",

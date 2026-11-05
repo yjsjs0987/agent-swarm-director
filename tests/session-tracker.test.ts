@@ -283,14 +283,14 @@ test("T2.2: promoteCliSessionToAsd promotes a plain CLI session into an ASD sess
     assert.equal(recent[0]?.harnessSessionId, "agy-conv-promo-888");
     assert.equal(recent[0]?.asdSessionId, promoted.asdSessionId);
 
-    // Demoting back to CLI session must return `agy --resume agy-conv-promo-888`
+    // Demoting back to CLI session must return `agy --conversation agy-conv-promo-888`
     const demoted = buildSessionDemotion({
       projectRoot,
       homeDir,
       sessionId: promoted.asdSessionId,
     });
     assert.equal(demoted.command, "agy");
-    assert.deepEqual(demoted.args, ["--resume", "agy-conv-promo-888", "--model", "gemini-3.1-pro-high"]);
+    assert.deepEqual(demoted.args, ["--conversation", "agy-conv-promo-888", "--model", "gemini-3.1-pro-high"]);
   } finally {
     fs.rmSync(homeDir, { recursive: true, force: true });
     fs.rmSync(projectRoot, { recursive: true, force: true });

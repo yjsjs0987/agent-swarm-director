@@ -152,7 +152,7 @@ describe("GUI Prerequisites & Session Architecture", () => {
       "gemini-3-pro"
     );
     assert.equal(agResume.cmd, "agy");
-    assert.ok(agResume.args.includes("--resume"));
+    assert.ok(agResume.args.includes("--conversation"));
     assert.ok(agResume.args.includes("agy-conv-42"));
 
     const crResume = cursorAdapter.buildResumeCommand!(
