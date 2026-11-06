@@ -14,7 +14,12 @@ ASD는 다음 순서로 `routing.jsonc`를 읽어 들입니다:
    - 모든 프로젝트에 공통 적용되는 전역 설정입니다.
 
 > [!IMPORTANT]
-> `~/.asd/routing.jsonc`를 수정한 뒤에는 각 하네스(`~/.gemini/config/agents/`, `~/.claude/agents/`, `~/.config/opencode/agent/`, `~/.cursor/agents/`)의 서브에이전트 정의 파일에 모델 티어를 반영하기 위해 반드시 **`asd sync --force`**를 한 번 실행해 주세요.
+> **설정 변경 시 반영 시점 (`LIGHT` 모드)**:
+> - ASD는 `asd plan`, `asd dispatch`, 또는 대시보드(`asd ui`)에서 라우팅 설정을 저장할 때마다 `routing.jsonc`의 변경 여부를 감지하여 각 하네스의 에이전트 마크다운 파일(`~/.claude/agents/asd-*.md`, `~/.config/opencode/agent/asd-*.md`, `~/.gemini/config/agents/asd-*.md`, `~/.cursor/agents/asd-*.md`)의 `model:` 값을 **자동으로 즉시 갱신**합니다 (`asd sync --force`를 수동으로 실행해도 동일하게 갱신됩니다).
+> - **하네스별 세션 중 반영 차이**:
+>   - **Antigravity / Codex / Cursor**: `PreToolUse` 훅 및 디스패치 브리핑 시점에 `routing.jsonc`를 실시간으로 읽으므로 **현재 세션 즉시 반영**됩니다.
+>   - **Claude Code**: 파일 감시(Watcher) 및 `Agent` 도구의 `model` 파라미터 주입을 모두 지원하므로 **재시작 없이 현재 세션에 즉시 반영**됩니다.
+>   - **OpenCode**: OpenCode 자체 `Task` 도구는 모델 파라미터가 없고 세션 시작 시점에 `.md` 파일을 메모리에 캐싱(Lazy-load 고정)하므로, **세션 도중 `routing.jsonc`를 수정한 경우 OpenCode를 재시작(또는 새 세션 시작)해야** 변경된 `model:`이 적용됩니다.
 
 ---
 
@@ -53,11 +58,24 @@ ASD는 다음 순서로 `routing.jsonc`를 읽어 들입니다:
 
 ---
 
-### 3.2. 하네스별 허용 모델 티어 및 작성 예시
+### 3.2. 왜 하네스마다 모델 값 규격과 기본 예시 형태가 다른가?
+
+1. **JSON 표기 형태 차이 (`"문자열"` vs `{ "model", "fallbacks" }`)**:
+   - 기본 생성된 `routing.jsonc`에서 `antigravity`와 `claude-code`는 역할별 기본 폴백이 있어서 `{ "model": "...", "fallbacks": [...] }` 객체 형태로 적혀 있고, `opencode`는 기본 폴백이 비어 있어 `"scout": "glm-5"` 단축 문자열 형태로 적혀 있을 뿐입니다.
+   - **5개 하네스 모두** 3.1절의 3가지 표기법(단일 문자열 / 배열 / `{ model, fallbacks }` 객체)과 역할별 키(`scout`, `worker`, `planner`, `architect`, `critic`, `defaultModel`)를 **100% 동일하게 지원**합니다.
+2. **하네스별 허용 모델 식별자 규격 차이**:
+
+| 하네스 | 허용되는 모델 값 형식 | 이유 및 동작 원리 |
+| :--- | :--- | :--- |
+| **Antigravity** | `"flash_lite"`, `"flash"`, `"pro"` | Antigravity의 내장 `invoke_subagent` 도구는 `Model` 파라미터 스키마가 `enum: ["inherit", "flash_lite", "flash", "pro"]` 4가지로 고정되어 있습니다. 실수로 `"gemini-3.8-flash"`나 `"inherit"`을 적어도 ASD 라우터가 자동으로 위 3가지 티어 중 하나로 정규화하여 부모 모델 쿼터를 보호합니다. |
+| **Claude Code** | `"haiku"`, `"sonnet"`, `"opus"` 또는 정식 모델 ID (`"claude-sonnet-4-6"` 등) | Claude Code의 `Agent` 도구와 `~/.claude/agents/asd-*.md` 프론트매터(`model:`)는 단축 티어 별칭과 정식 모델 ID를 모두 지원합니다. |
+| **OpenCode** | `"provider/model"` 또는 모델 ID (`"glm-5"`, `"nvidia/z-ai/glm-5.3-flash"` 등) | OpenCode는 `haiku`/`flash` 같은 별칭 규격이 없으며, `~/.config/opencode/agent/asd-*.md`의 `model:` 필드에 실제 프로바이더/모델 ID를 그대로 기입해야 작동합니다. |
+| **Codex CLI** | 정식 모델 ID (`"gpt-5-codex"`, `"gpt-6-luna"` 등) | Codex 서브에이전트 브리핑 및 `AGENTS.md` 모델 지침에 정식 모델명이 주입됩니다. |
+| **Cursor CLI** | 정식 모델 ID (`"claude-sonnet-4-6"`, `"gpt-5.4"` 등) | `~/.cursor/agents/asd-*.md` 및 `PreToolUse` 훅 검증에 정식 모델명이 사용됩니다. |
 
 ```jsonc
 {
-  "_asdVersion": "2.4.1",
+  "_asdVersion": "2.4.2",
   "lightSubagents": {
     // 1) Antigravity: 반드시 "flash_lite" | "flash" | "pro" 중 하나를 사용합니다.
     //    ("inherit"이나 "gemini-3.8-flash"를 적어도 ASD가 자동으로 위 3개 티어로 정규화하여
@@ -83,7 +101,7 @@ ASD는 다음 순서로 `routing.jsonc`를 읽어 들입니다:
       "fallbacks": ["haiku"]
     },
 
-    // 3) OpenCode: provider/model 형식 지원
+    // 3) OpenCode: provider/model 형식 지원 (단일 문자열, 배열, 객체 모두 사용 가능)
     "opencode": {
       "scout": "nvidia/z-ai/glm-5.3-flash",
       "worker": {
@@ -97,13 +115,13 @@ ASD는 다음 순서로 `routing.jsonc`를 읽어 들입니다:
       "fallbacks": ["glm-5"]
     },
 
-    // 4) Codex CLI
+    // 4) Codex CLI (역할별 키 생략 시 defaultModel 적용, 필요 시 scout/worker 등 개별 지정 가능)
     "codex": {
       "defaultModel": "gpt-6-luna",
       "fallbacks": ["gpt-6.1-sol"]
     },
 
-    // 5) Cursor CLI
+    // 5) Cursor CLI (역할별 키 생략 시 defaultModel 적용, 필요 시 scout/worker 등 개별 지정 가능)
     "cursor": {
       "defaultModel": "claude-sonnet-4-6",
       "fallbacks": ["gpt-5.4"]
