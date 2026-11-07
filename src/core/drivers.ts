@@ -420,8 +420,8 @@ export function buildDriverBriefing(input: {
   // 7. Guidance footer
   const sec7 =
     sysLang === "en"
-      ? "## Guidance\nUse ASD MCP tools (asd_plan, asd_dispatch, asd_verify, asd_debate) for task planning, dispatching, and verification. Merge conflict tasks are resolved and re-merged or rejected by the user in the GUI."
-      : "## 안내\n태스크 계획/디스패치/검증은 ASD MCP 도구(asd_plan, asd_dispatch, asd_verify, asd_debate)를 사용하라. 병합 충돌 태스크는 사용자가 GUI에서 해결·재병합하거나 반려한다.";
+      ? "## Guidance\nUse ASD MCP tools (asd_plan, asd_dispatch, asd_verify, asd_debate) for task planning, dispatching, and verification. Merge-conflict tasks are reviewed and resolved/re-merged or rejected by the user."
+      : "## 안내\n태스크 계획/디스패치/검증은 ASD MCP 도구(asd_plan, asd_dispatch, asd_verify, asd_debate)를 사용하라. 병합 충돌 태스크는 사용자가 검토 후 해결·재병합하거나 반려한다.";
 
   const assemble = (s3: string, s5: string, s6: string): string =>
     [sec1, sec2, s3, sec4, s5, s6, sec7].filter((s) => s.length > 0).join("\n\n");
@@ -479,7 +479,7 @@ export function buildDriverBriefing(input: {
 
 
 // ============================================================================
-// CR-03: GUI Headless Driver Turn Runner (runDriverTurn)
+// Headless driver turn runner (streaming SDK entry)
 // ============================================================================
 
 export interface DriverRunResult {
@@ -585,7 +585,7 @@ export interface DriverStreamEvent {
 /**
  * Parses a single redacted stdout/stderr line from a running harness CLI
  * (`claude`, `codex`, `opencode`, `agy`, `agent`) into zero or more structured
- * `DriverStreamEvent` objects for real-time GUI rendering.
+ * `DriverStreamEvent` objects for real-time rendering by clients.
  */
 export function parseDriverStreamLine(
   rawLine: string,
