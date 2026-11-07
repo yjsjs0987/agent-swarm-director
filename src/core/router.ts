@@ -16,6 +16,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadRoutingConfig } from "./config.ts";
+import { ASD_VERSION } from "./types.ts";
 import type {
   AgentRole,
   DifficultyTier,
@@ -1293,5 +1294,88 @@ export function selectDiverseReviewer(
     diversityDegraded,
     tag,
     warning: tag,
+  };
+}
+
+// ============================================================================
+// Project Routing Config Persistence (saveProjectRoutingConfig)
+// ============================================================================
+
+import { atomicWriteFileSync } from "./render.ts";
+import { syncAgentModelsIfNeeded } from "../adapters/installer.ts";
+import { resolveAsdPaths } from "./config.ts";
+import type { RoutingConfig } from "./types.ts";
+
+export function saveProjectRoutingConfig(options: {
+  projectRoot: string;
+  homeDir?: string;
+  action?: "save" | "reset";
+  routingConfig?: RoutingConfig;
+}): {
+  ok: boolean;
+  hasLocalRouting: boolean;
+  localRoutingPath: string;
+  routingConfig: RoutingConfig;
+} {
+  const projectRoot = path.resolve(options.projectRoot);
+  const paths = resolveAsdPaths(projectRoot, options.homeDir);
+
+  if (options.action === "reset") {
+    if (fs.existsSync(paths.localRoutingPath)) {
+      fs.unlinkSync(paths.localRoutingPath);
+    }
+    syncAgentModelsIfNeeded({ homeDir: options.homeDir, projectRoot, force: true });
+    const effective = loadRoutingConfig(projectRoot, options.homeDir);
+    return {
+      ok: true,
+      hasLocalRouting: false,
+      localRoutingPath: paths.localRoutingPath,
+      routingConfig: effective,
+    };
+  }
+
+  if (!options.routingConfig || typeof options.routingConfig !== "object") {
+    throw new Error("Missing routingConfig payload");
+  }
+
+  const normalizedConfig: RoutingConfig = {
+    _asdVersion: options.routingConfig._asdVersion || ASD_VERSION,
+    ...(options.routingConfig.lightSubagents
+      ? { lightSubagents: options.routingConfig.lightSubagents }
+      : {}),
+    agents: { ...(options.routingConfig.agents ?? {}) } as RoutingConfig["agents"],
+    categories: { ...(options.routingConfig.categories ?? {}) },
+  };
+
+  for (const entry of [
+    ...Object.values(normalizedConfig.agents),
+    ...Object.values(normalizedConfig.categories),
+  ]) {
+    if (!entry || typeof entry !== "object") continue;
+    entry.modelFamily = inferModelFamily(entry.model || "", entry.harness);
+    if (!Array.isArray(entry.fallbacks)) {
+      entry.fallbacks = [];
+    } else {
+      for (const fb of entry.fallbacks) {
+        if (fb && typeof fb === "object") {
+          fb.modelFamily = inferModelFamily(fb.model || "", fb.harness);
+        }
+      }
+    }
+  }
+
+  fs.mkdirSync(path.dirname(paths.localRoutingPath), { recursive: true });
+  const content =
+    `// Project-Scoped ASD Routing Override (.asd/routing.jsonc)\n` +
+    JSON.stringify(normalizedConfig, null, 2) +
+    "\n";
+  atomicWriteFileSync(paths.localRoutingPath, content);
+  syncAgentModelsIfNeeded({ homeDir: options.homeDir, projectRoot, force: true });
+
+  return {
+    ok: true,
+    hasLocalRouting: true,
+    localRoutingPath: paths.localRoutingPath,
+    routingConfig: normalizedConfig,
   };
 }
