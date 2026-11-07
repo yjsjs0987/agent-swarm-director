@@ -56,6 +56,8 @@ export interface HeadlessHarnessCommandOptions {
   model?: string | null;
   thinkingEffort?: string | null;
   reasoningEffort?: string | null;
+  /** Emit the harness's streaming event format (NDJSON) instead of a single final JSON payload. */
+  streaming?: boolean;
 }
 
 /**
@@ -70,7 +72,8 @@ export function buildHeadlessHarnessCommand(
 
   switch (options.harness) {
     case "claude-code": {
-      const args = ["-p", textPrompt, "--output-format", "json"];
+      const args = ["-p", textPrompt, "--output-format", options.streaming ? "stream-json" : "json"];
+      if (options.streaming) args.push("--verbose");
       if (resolvedModel) args.push("--model", resolvedModel);
       return { command: "claude", args };
     }
@@ -88,13 +91,13 @@ export function buildHeadlessHarnessCommand(
       return { command: "codex", args };
     }
     case "antigravity": {
-      const args = ["-p", textPrompt, "--output-format", "json"];
+      const args = ["-p", textPrompt, "--output-format", options.streaming ? "stream-json" : "json"];
       if (resolvedModel) args.push("--model", resolvedModel);
       if (resolvedEffort) args.push("--effort", resolvedEffort);
       return { command: "agy", args };
     }
     case "cursor": {
-      const args = ["-p", textPrompt, "--force", "--output-format", "json"];
+      const args = ["-p", textPrompt, "--force", "--output-format", options.streaming ? "stream-json" : "json"];
       if (resolvedModel) args.push("--model", resolvedModel);
       return { command: "agent", args };
     }
@@ -108,6 +111,8 @@ export interface ResumeHarnessCommandOptions {
   model?: string | null;
   thinkingEffort?: string | null;
   reasoningEffort?: string | null;
+  /** Emit the harness's streaming event format (NDJSON) instead of a single final JSON payload. */
+  streaming?: boolean;
   cwd?: string;
   env?: Record<string, string>;
 }
@@ -138,6 +143,10 @@ export function buildResumeHarnessCommand(
     typeof harnessOrOptions === "object"
       ? (harnessOrOptions.thinkingEffort ?? harnessOrOptions.reasoningEffort)
       : thinkingEffort;
+  const streaming =
+    typeof harnessOrOptions === "object"
+      ? (harnessOrOptions.streaming ?? false)
+      : false;
 
   switch (harness) {
     case "claude-code": {
@@ -147,8 +156,9 @@ export function buildResumeHarnessCommand(
         "--resume",
         sid,
         "--output-format",
-        "json",
+        streaming ? "stream-json" : "json",
       ];
+      if (streaming) args.push("--verbose");
       if (resolvedModel) args.push("--model", resolvedModel);
       return { command: "claude", args };
     }
@@ -179,7 +189,7 @@ export function buildResumeHarnessCommand(
         "--conversation",
         sid,
         "--output-format",
-        "json",
+        streaming ? "stream-json" : "json",
       ];
       if (resolvedModel) args.push("--model", resolvedModel);
       if (resolvedEffort) args.push("--effort", resolvedEffort);
@@ -193,7 +203,7 @@ export function buildResumeHarnessCommand(
         sid,
         "--force",
         "--output-format",
-        "json",
+        streaming ? "stream-json" : "json",
       ];
       if (resolvedModel) args.push("--model", resolvedModel);
       return { command: "agent", args };
@@ -627,7 +637,7 @@ export function extractHookSessionInfo(
   projectRoot: string | null;
   summary: string;
 } {
-  const harness = ((payload.harness as string) || defaultHarness) as HarnessId;
+  let harness = ((payload.harness as string) || defaultHarness) as HarnessId;
 
   const rawTranscript =
     payload.transcript_path ??
@@ -697,6 +707,13 @@ export function extractHookSessionInfo(
     if (baseName && baseName !== "transcript" && baseName !== "chat") {
       harnessSessionId = baseName;
     }
+  }
+
+  // OpenCode session IDs carry the `ses_` prefix; claude-style hook bridges
+  // (e.g. oh-my-openagent mirroring sessions into ~/.claude/transcripts) report
+  // them with the claude-code default. The ID format is authoritative.
+  if (harness === "claude-code" && harnessSessionId && harnessSessionId.startsWith("ses_")) {
+    harness = "opencode";
   }
 
   const rawModel =
@@ -1130,6 +1147,8 @@ function scanClaudeCodeLocalSessions(
     try {
       for (const f of fs.readdirSync(projFolder, { withFileTypes: true })) {
         if (!f.isFile() || !f.name.endsWith(".jsonl")) continue;
+        // `ses_*` files are OpenCode sessions mirrored by hook bridges, not claude transcripts.
+        if (f.name.startsWith("ses_")) continue;
         const fullPath = path.join(projFolder, f.name);
         try {
           const st = fs.statSync(fullPath);
@@ -1466,6 +1485,32 @@ function scanOpenCodeLocalSessions(
 }
 
 /**
+ * Coerces mislabeled OpenCode entries (`ses_` prefix recorded under a non-opencode
+ * harness by claude-style hook bridges) and dedupes sessions that collide after the flip.
+ */
+function healCliRecentHarnessLabels(
+  list: CliRecentSessionEntry[]
+): { list: CliRecentSessionEntry[]; changed: boolean } {
+  let changed = false;
+  const byKey = new Map<string, CliRecentSessionEntry>();
+  for (const entry of list) {
+    if (entry.harnessSessionId.startsWith("ses_") && entry.harness !== "opencode") {
+      entry.harness = "opencode";
+      changed = true;
+    }
+    const key = `${entry.harnessSessionId}\n${entry.harness}`;
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, entry);
+    } else {
+      if (entry.updatedAt > prev.updatedAt) byKey.set(key, entry);
+      changed = true;
+    }
+  }
+  return { list: [...byKey.values()], changed };
+}
+
+/**
  * Scans local harness transcripts across Antigravity (`~/.gemini/antigravity-cli/brain/*`),
  * Claude Code (`~/.claude/projects/<dir>/*.jsonl`), Codex (`~/.codex/sessions/** /rollout-*.jsonl`),
  * and OpenCode (`~/.local/share/opencode/opencode.db`) for main sessions matching `projectRoot`
@@ -1495,7 +1540,18 @@ export function syncLocalHarnessTranscripts(
     scanOpenCodeLocalSessions(resolvedRoot, homeDir, discovered);
   }
 
-  if (discovered.length === 0) return readCliRecentSessionsRaw(resolvedRoot);
+  if (discovered.length === 0) {
+    const existing = readCliRecentSessionsRaw(resolvedRoot);
+    const healed = healCliRecentHarnessLabels(existing);
+    if (!healed.changed) return existing;
+    return withCliRecentFileLockSync(resolvedRoot, "syncLocalHarnessTranscripts", () => {
+      atomicWriteFileSync(
+        getCliRecentSessionsPath(resolvedRoot),
+        JSON.stringify({ sessions: healed.list }, null, 2) + "\n"
+      );
+      return healed.list;
+    });
+  }
 
   const asdDir = path.join(resolvedRoot, ".asd");
   if (!options?.forceCreateDir && !fs.existsSync(asdDir)) {
@@ -1507,8 +1563,9 @@ export function syncLocalHarnessTranscripts(
   ensureGitExclude(resolvedRoot, ".asd/");
 
   return withCliRecentFileLockSync(resolvedRoot, "syncLocalHarnessTranscripts", () => {
-    const existingList = readCliRecentSessionsRaw(resolvedRoot);
-    let changed = false;
+    const healedExisting = healCliRecentHarnessLabels(readCliRecentSessionsRaw(resolvedRoot));
+    const existingList = healedExisting.list;
+    let changed = healedExisting.changed;
 
     for (const item of discovered) {
       const idx = existingList.findIndex(

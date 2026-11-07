@@ -261,6 +261,26 @@ test("T1.3: Codex notify (thread-id / thread_id via argv and stdin) and Cursor h
     assert.equal(composerExtracted.harnessSessionId, "cursor-composer-202");
     assert.equal(composerExtracted.summary, "Fix hooks schema");
 
+    // OMO-style claude hook bridge mirrors OpenCode sessions with `ses_` ids;
+    // the ID format must win over the claude-code default harness.
+    const opencodeMirrorFixture = {
+      session_id: "ses_e4aa88448ffeT8dRBzyxCfkbup",
+      transcript_path:
+        "C:\\Users\\x\\.claude\\transcripts\\ses_e4aa88448ffeT8dRBzyxCfkbup.jsonl",
+      cwd: root,
+    };
+    const mirrorExtracted = extractHookSessionInfo(opencodeMirrorFixture, "claude-code");
+    assert.equal(mirrorExtracted.harness, "opencode");
+    assert.equal(mirrorExtracted.harnessSessionId, "ses_e4aa88448ffeT8dRBzyxCfkbup");
+
+    const claudeUuidFixture = {
+      session_id: "0adefff5-aa39-4b50-bc09-e5ff23242d63",
+      transcript_path: "C:\\Users\\x\\.claude\\projects\\C--x\\0adefff5.jsonl",
+      cwd: root,
+    };
+    const claudeUuidExtracted = extractHookSessionInfo(claudeUuidFixture, "claude-code");
+    assert.equal(claudeUuidExtracted.harness, "claude-code");
+
     // 2. End-to-end CLI hook execution: Codex notify passes JSON payload as final argv (no stdin)
     const codexArgvRes = child_process.spawnSync(
       process.execPath,

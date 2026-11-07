@@ -612,6 +612,74 @@ export function parseDriverStreamLine(
   const events: DriverStreamEvent[] = [];
   const lineType = typeof obj.type === "string" ? obj.type : "";
 
+  // 0. Cursor stream-json top-level events (live-verified 2026-11)
+  if (lineType === "thinking") {
+    // {"type":"thinking","subtype":"delta"|"completed","text":"..."}
+    if (obj.subtype !== "completed" && typeof obj.text === "string" && obj.text) {
+      events.push({ type: "thinking", harness, thinking: obj.text, timestamp: now });
+    }
+    return events;
+  }
+  if (lineType === "tool_call") {
+    // {"type":"tool_call","subtype":"started"|"completed","call_id":"...",
+    //  "tool_call":{"shellToolCall"|"readToolCall"|"globToolCall"|...:
+    //    {"args":{...},"result":{"success":{...}|{"error":{"errorMessage":"..."}}}}}}
+    const tc =
+      obj.tool_call && typeof obj.tool_call === "object"
+        ? (obj.tool_call as Record<string, unknown>)
+        : undefined;
+    const familyKey = tc
+      ? Object.keys(tc).find(
+          (k) => k.endsWith("ToolCall") && tc[k] && typeof tc[k] === "object"
+        )
+      : undefined;
+    const family =
+      familyKey && tc ? ((tc[familyKey] ?? {}) as Record<string, unknown>) : {};
+    const toolName = familyKey ? familyKey.replace(/ToolCall$/, "") : "tool";
+    const toolId =
+      typeof obj.call_id === "string"
+        ? obj.call_id
+        : typeof tc?.toolCallId === "string"
+          ? (tc.toolCallId as string)
+          : undefined;
+    if (obj.subtype === "completed") {
+      const res =
+        family.result && typeof family.result === "object"
+          ? (family.result as Record<string, unknown>)
+          : undefined;
+      const errObj =
+        res?.error && typeof res.error === "object"
+          ? (res.error as Record<string, unknown>)
+          : undefined;
+      let out = "";
+      if (res && res.success !== undefined) out = JSON.stringify(res.success);
+      else if (errObj && typeof errObj.errorMessage === "string") out = errObj.errorMessage;
+      else if (typeof family.output === "string") out = family.output;
+      events.push({
+        type: "tool_result",
+        harness,
+        toolName,
+        ...(toolId ? { toolId } : {}),
+        toolOutput: out,
+        ...(errObj ? { isError: true } : {}),
+        timestamp: now,
+      });
+      return events;
+    }
+    const rawArgs = family.args ?? family.input;
+    events.push({
+      type: "tool_use",
+      harness,
+      toolName,
+      ...(toolId ? { toolId } : {}),
+      ...(rawArgs !== undefined
+        ? { toolInput: typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs) }
+        : {}),
+      timestamp: now,
+    });
+    return events;
+  }
+
   // 1. Claude Code / Cursor stream-json & json formats
   if (lineType === "content_block_delta" && obj.delta && typeof obj.delta === "object") {
     const delta = obj.delta as Record<string, unknown>;
@@ -628,6 +696,16 @@ export function parseDriverStreamLine(
   if (obj.message && typeof obj.message === "object") {
     const msg = obj.message as Record<string, unknown>;
     if (Array.isArray(msg.content)) {
+      // Skip plain user prompt echoes (Cursor stream-json "user" events);
+      // user events carrying tool_result blocks (Claude SDK) still parse below.
+      if (
+        msg.role === "user" &&
+        !(msg.content as unknown[]).some(
+          (b) => b && typeof b === "object" && (b as Record<string, unknown>).type !== "text"
+        )
+      ) {
+        return [];
+      }
       for (const block of msg.content) {
         if (!block || typeof block !== "object") continue;
         const b = block as Record<string, unknown>;
@@ -865,6 +943,38 @@ export function parseDriverStreamLine(
     return events;
   }
 
+  // 3b. Antigravity `--output-format stream-json` events (live-verified 2026-11)
+  if (harness === "antigravity") {
+    if (obj.event === "step_update") {
+      // {"event":"step_update","step_update":{"state":"ACTIVE","step_type":"agent_response","text_delta":"..."}}
+      const su =
+        obj.step_update && typeof obj.step_update === "object"
+          ? (obj.step_update as Record<string, unknown>)
+          : undefined;
+      const delta =
+        su && typeof su.text_delta === "string" ? su.text_delta : "";
+      if (delta) {
+        events.push({ type: "text", harness, text: delta, timestamp: now });
+      }
+      return events;
+    }
+    if (obj.event === "result") {
+      const res =
+        obj.result && typeof obj.result === "object"
+          ? (obj.result as Record<string, unknown>)
+          : undefined;
+      const response =
+        res && typeof res.response === "string" ? res.response : "";
+      if (response.trim()) {
+        events.push({ type: "text", harness, text: response, timestamp: now });
+      }
+      return events;
+    }
+    if (obj.event === "init") {
+      return [];
+    }
+  }
+
   // 4. Antigravity PLANNER_RESPONSE / TOOL_RESPONSE
   if (lineType === "PLANNER_RESPONSE") {
     if (typeof obj.thinking === "string" && obj.thinking.trim()) {
@@ -1042,6 +1152,9 @@ export async function runDriverTurn(input: {
         ? driver.model.trim()
         : getDefaultModelForHarness(driver.harness);
 
+    const useStreamJson =
+      input.streamJson ?? Boolean(input.onEvent && !input.commandRunner);
+
     let command: string;
     let args: string[];
     if (!driver.harness_session_id) {
@@ -1049,6 +1162,7 @@ export async function runDriverTurn(input: {
         harness: driver.harness,
         prompt: effectivePrompt,
         model: effectiveModel,
+        streaming: useStreamJson,
       });
       command = built.command;
       args = [...built.args];
@@ -1058,18 +1172,10 @@ export async function runDriverTurn(input: {
         harnessSessionId: driver.harness_session_id,
         prompt: effectivePrompt,
         model: driver.model ?? effectiveModel,
+        streaming: useStreamJson,
       });
       command = built.command;
       args = [...built.args];
-    }
-
-    const useStreamJson =
-      input.streamJson ?? Boolean(input.onEvent && !input.commandRunner);
-    if (useStreamJson && driver.harness === "claude-code") {
-      const fmtIdx = args.indexOf("--output-format");
-      if (fmtIdx >= 0 && args[fmtIdx + 1] === "json") {
-        args.splice(fmtIdx, 2, "--output-format", "stream-json", "--verbose");
-      }
     }
 
     let lineBuffer = "";
