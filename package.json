@@ -1,6 +1,6 @@
 {
   "name": "agent-swarm-director",
-  "version": "2.4.2",
+  "version": "2.4.3",
   "description": "Agent Swarm Director (ASD v2.4.2) — Zero-dependency universal multi-agent orchestration harness",
   "license": "FSL-1.1-ALv2",
   "type": "module",

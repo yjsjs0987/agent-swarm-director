@@ -680,7 +680,7 @@ test("Runtime Isolation: syncHarnessConfigs stages isolated runtime copy and wir
   }
 });
 
-test("v2.4.2 Auto-Migration: syncHarnessConfigs upgrades legacy (< 2.4.2) ~/.asd/routing.jsonc with lightSubagents while preserving user agents & categories", async () => {
+test("v2.4.3 Auto-Migration: syncHarnessConfigs upgrades legacy (< 2.4.2) ~/.asd/routing.jsonc with lightSubagents while preserving user agents & categories", async () => {
   const migHome = createTempDir("asd-mig-home-");
   try {
     const asdDir = path.join(migHome, ".asd");
@@ -715,7 +715,7 @@ test("v2.4.2 Auto-Migration: syncHarnessConfigs upgrades legacy (< 2.4.2) ~/.asd
         .filter((line) => !line.trim().startsWith("//"))
         .join("\n")
     );
-    assert.equal(migrated._asdVersion, "2.4.2");
+    assert.equal(migrated._asdVersion, "2.4.3");
     assert.ok(migrated.lightSubagents, "Migrated routing.jsonc must include lightSubagents block");
     assert.ok(migrated.lightSubagents.antigravity, "Migrated lightSubagents must include antigravity");
     assert.equal(
