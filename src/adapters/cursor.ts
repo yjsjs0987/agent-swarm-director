@@ -99,7 +99,7 @@ export class CursorAdapter implements HarnessAdapter {
     harnessSessionId: string,
     model?: string
   ): { cmd: string; args: string[] } {
-    const args: string[] = ["--resume", harnessSessionId];
+    const args: string[] = harnessSessionId ? ["--resume", harnessSessionId] : [];
     if (model) {
       args.push("--model", model);
     }

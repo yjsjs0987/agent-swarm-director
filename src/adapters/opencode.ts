@@ -65,7 +65,7 @@ export class OpencodeAdapter implements HarnessAdapter {
     harnessSessionId: string,
     model?: string
   ): { cmd: string; args: string[] } {
-    const args: string[] = ["--session", harnessSessionId];
+    const args: string[] = harnessSessionId ? ["--session", harnessSessionId] : [];
     if (model) {
       args.push("--model", model);
     }
