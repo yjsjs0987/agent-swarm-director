@@ -191,3 +191,12 @@ $ claude -p "..." --output-format stream-json --verbose
 4. `src/core/drivers.ts::parseDriverStreamLine`: agy 실측 스키마(`event: init|step_update|result`, `text_delta`) 추가, cursor `tool_call`(started/completed) 추가
 5. OpenCode: v1은 블록 단위 수용 + `--attach` 웜서버로 콜드부트 완화 → v2에서 `opencode serve` SSE 연동으로 토큰 스트리밍
 6. `EXTERNAL_SDK_REFERENCE.md` 주석을 실제 동작과 일치시킴
+
+### 실행 상태 (2026-11-06)
+
+- [x] 1-2. agy·Cursor 스트리밍 플래그 — `buildHeadless/ResumeHarnessCommand`(session-tracker)에 `streaming` 옵션 추가, 하네스별 `stream-json` 분기. 비스트리밍 기본값(json)은 서브에이전트·debate 등 배치 경로 보호용으로 유지.
+- [x] 3. drivers.ts claude 전용 splice 제거 — `runDriverTurn`이 `streaming: useStreamJson`을 빌더에 직접 전달(포맷 결정이 빌더로 일원화).
+- [x] 4. 파서 — Cursor 실측 스키마(톱레벨 thinking 델타, `tool_call.<family>ToolCall` started/completed, user 프롬프트 에코 스킵) + agy stream-json(`step_update` 델타/`result`/`init`) 추가. 라이브 캡처 바이트 기반 단위 검증 통과(카테고리 전건 정확).
+- [x] 6. `EXTERNAL_SDK_REFERENCE.md` 주석 갱신.
+- [ ] 5. OpenCode serve+SSE — 미착수(별도 과제, 앱 계획 M2).
+- 검증: Core 355/356(유일 실패 = 기존 유령 테스트 installer-sync), asd-gui 14/14. 미커밋.

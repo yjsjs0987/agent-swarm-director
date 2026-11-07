@@ -1,12 +1,42 @@
-# Patch Notes (`agent-swarm-director` / ASD v2.4.0)
+# Patch Notes (`agent-swarm-director` / ASD v2.4.3)
 
 **English** | [한국어](./PATCH_NOTES_ko.md) | [📖 Back to README](./README.md) | [🏛️ Architecture & Code Reference](./PROJECT_STATUS.md) | [🔌 External SDK Reference](./EXTERNAL_SDK_REFERENCE.md)
 
-Complete chronological patch history for **Agent Swarm Director (ASD v2.4.0)**, organized from the latest updates to the initial foundation.
+Complete chronological patch history for **Agent Swarm Director (ASD v2.4.3)**, organized from the latest updates to the initial foundation.
 
 ---
 
-## 1. Latest Orchestration, External GUI SDK & Performance Updates (v2.4.0)
+## 1. Harness-Native Streaming, Core–GUI Boundary & Session Attribution (v2.4.3)
+
+### `v2.4.3` — Native JSONL Streaming for All 5 Harnesses, Core–GUI Boundary Refactor & `ses_` Session Attribution Guard
+- **Native Streaming for Antigravity & Cursor (`runDriverTurn`)**:
+  - Added `streaming?: boolean` to `buildHeadlessHarnessCommand` / `buildResumeHarnessCommand` (`src/core/session-tracker.ts`): Antigravity (`agy --output-format stream-json`, ~25ms `step_update` text deltas), Cursor (`cursor-agent --output-format stream-json`, top-level `thinking` deltas + `tool_call` lifecycle), and Claude Code (`stream-json --verbose`) now emit their native event streams directly; the claude-only `--output-format` post-splice in `runDriverTurn` was removed.
+  - `parseDriverStreamLine` (`src/core/drivers.ts`) now parses the live-verified Antigravity stream schema (`init` / `step_update` `text_delta` / `result`) and the Cursor schema (top-level `thinking` deltas, `tool_call.<family>ToolCall` started/completed with `result.success|error` extraction), and skips plain user prompt echoes.
+  - Batch paths (subagents, debate) keep the single-payload `--output-format json` default.
+- **Core–GUI Boundary Refactor**:
+  - Moved the 5 dashboard data services out of `src/cli/dashboard.ts` into `src/core/`: `models.ts` (`discoverHarnessModels`, `getModelsDiskCachePath`), `session-services.ts` (`saveSessionMemo`, `collectDashboardSnapshot`), `subagent-control.ts` (`runSubagentControlAction`), `subagent-logs.ts` (`scanSubagentLogs` — re-exported by `src/cli/index.ts`), and `saveProjectRoutingConfig` into `src/core/router.ts`. `dashboard.ts` now contains only the `asd ui` HTTP server + inline HTML (−1,605 lines).
+  - `src/index.ts` no longer exports `startDashboardServer` from the root entry (subpath `agent-swarm-director/cli/dashboard.ts` still works).
+- **`ses_` Session Attribution Guard & Self-Healing `cli-recent.json`**:
+  - `extractHookSessionInfo` now coerces `ses_`-prefixed session IDs (OpenCode format) reported under the claude-code default — emitted by claude-style hook bridges such as the `oh-my-openagent` plugin mirroring sessions into `~/.claude/transcripts/` — to `harness: "opencode"`.
+  - `syncLocalHarnessTranscripts` self-heals mislabeled entries and dedupes label-flip collisions on every sync; the Claude scanner skips `ses_*.jsonl` mirrors.
+- **Adapter Robustness**: `buildInteractiveResumeCommand` in the claude-code/opencode/codex/cursor adapters no longer emits `--resume ""`-style flags when the session id is empty.
+- **Docs**: added `CORE_GUI_BOUNDARY_AUDIT.md` (Core–GUI boundary audit) and `ORCHESTRATOR_APP_PLAN.md` (orchestrator TUI/GUI app plan); froze the `asd ui` feature scope (new UI features belong to the GUI repo).
+
+### `v2.4.2` — Router v2.4.2 Bump, `lightSubagents` Fallbacks, Debate Interactive Selection & Installer Refinements (`4d7582e`..`a6ce1a9`)
+- `feat(router)` (`4d7582e`): bumped to v2.4.2, added the `lightSubagents` routing schema with fallbacks, auto-migration for legacy `routing.jsonc`, and `ROUTING_GUIDE.md`.
+- `feat(debate)` (`be05774`): interactive harness/role/count selection in `/asd-debate` HEAVY mode.
+- `feat(installer)` (`dc42be3`): auto-refresh agent markdown models on `routing.jsonc` change during plan/dispatch/ui save.
+- `fix(antigravity)` (`c6a2ff9`): use `--conversation` for agy resume.
+- `refactor(installer)` (`2fe206c`): removed hardcoded asd-runtime staging from `syncHarnessConfigs`.
+- `docs(routing)` (`a6ce1a9`): documented per-harness model format rules and live reload behavior.
+
+### `v2.4.1` — Harness Runtime Isolation, Dashboard Gateway Pairing & Security Rebalance (`661bff1`..`39ccca5`)
+- `chore` (`661bff1`): bumped to v2.4.1 and isolated the global harness runtime (`Desktop/code/asd-runtime`).
+- Dashboard gateway token pairing + `/api/state` scan throttle (F21/F22), `opencode.jsonc` support dedup (F20), Codex TOML notify root-scope guarantee, cross-process `cli-recent.json` locking (T7.3), power-failure debate `failed` recording (F14), harness PreToolUse security rebalance (T1.2), `lightSubagents` routing schema split helpers (T1.1), and full-suite regression + `asd sync --force` / `asd clean` verification (T4.1).
+
+---
+
+## 2. Latest Orchestration, External GUI SDK & Performance Updates (v2.4.0)
 
 ### `v2.4.0` — 4-Way Transcript Classification, Real-Time Streaming (`onEvent`), Bidirectional CLI ↔ ASD Session Promotion/Demotion, Multi-Harness Session Discovery & Startup Caching
 - **Breaking Version & Shared DB Schema Upgrade (`2.4.0`)**:
@@ -83,7 +113,7 @@ Complete chronological patch history for **Agent Swarm Director (ASD v2.4.0)**, 
 
 ---
 
-## 2. Security Audit Fixes, CLI Direct Execution & Multi-Harness Reliability
+## 3. Security Audit Fixes, CLI Direct Execution & Multi-Harness Reliability
 
 | Commit | Summary |
 | :--- | :--- |
@@ -107,7 +137,7 @@ Complete chronological patch history for **Agent Swarm Director (ASD v2.4.0)**, 
 
 ---
 
-## 3. Initial v2.2 Core Foundation
+## 4. Initial v2.2 Core Foundation
 
 | Commit | Summary |
 | :--- | :--- |

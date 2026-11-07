@@ -1,7 +1,7 @@
-# Agent Swarm Director (ASD v2.4.0) — 아키텍처 및 전체 파일·함수 상세 레퍼런스
+# Agent Swarm Director (ASD v2.4.3) — 아키텍처 및 전체 파일·함수 상세 레퍼런스
 
 > **최종 갱신일**: 2026-11-04  
-> **버전**: `2.4.0` (`agent-swarm-director`)  
+> **버전**: `2.4.3` (`agent-swarm-director`)  
 > **대상 하네스 (5대 AI 코딩 CLI)**: Claude Code (`@cc`), OpenCode (`@oc`), Codex CLI (`@cx`), Antigravity (`@ag`), Cursor CLI (`@cr`)  
 > **외부 런타임 의존성**: `0개` (`dependencies: {}` — 순수 Node.js `>=22.13.0` 내장 모듈만 사용)
 
@@ -11,7 +11,7 @@
 
 ## 1. 프로젝트 개요 및 3대 아키텍처 불변성
 
-**Agent Swarm Director (ASD v2.4.0)**는 서로 다른 5개의 AI 코딩 하네스(**Claude Code**, **OpenCode**, **Codex CLI**, **Antigravity**, **Cursor CLI**)를 단일 결정론적 컨트롤 플레인으로 통합 제어하는 **외부 의존성 0개(Zero-Dependency)** 멀티 에이전트 오케스트레이션 엔진이자 SDK입니다.
+**Agent Swarm Director (ASD v2.4.3)**는 서로 다른 5개의 AI 코딩 하네스(**Claude Code**, **OpenCode**, **Codex CLI**, **Antigravity**, **Cursor CLI**)를 단일 결정론적 컨트롤 플레인으로 통합 제어하는 **외부 의존성 0개(Zero-Dependency)** 멀티 에이전트 오케스트레이션 엔진이자 SDK입니다.
 
 ### 1.1 3대 아키텍처 불변성 (Core Invariants)
 1. **Zero External Runtime Dependencies (`dependencies: {}`)**:
@@ -27,12 +27,14 @@
 
 ```text
 asd-multiagent/
-├── package.json                 # Zero runtime dependencies, version 2.4.0, bin: {"asd": "./src/cli/index.ts"}, exports 서브패스 정의
+├── package.json                 # Zero runtime dependencies, version 2.4.3, bin: {"asd": "./src/cli/index.ts"}, exports 서브패스 정의
 ├── tsconfig.json                # erasableSyntaxOnly: true, strict: true
 ├── README.md / README_ko.md     # 영문/국문 사용자 매뉴얼 (스킬 및 CLI 가이드)
 ├── PROJECT_STATUS.md            # 전체 아키텍처 및 파일별·주요 함수별 상세 레퍼런스 (본 문서)
 ├── EXTERNAL_SDK_REFERENCE.md    # 외부 연동(asd-gui 등)을 위한 SDK API 및 단일 DB 전환 레퍼런스
 ├── PATCH_NOTES.md / _ko.md      # 영문/국문 버전별 패치 노트
+├── CORE_GUI_BOUNDARY_AUDIT.md   # Core–GUI 경계 감사 (GUI 기능 분리 원칙 및 위반 정리, v2.4.3)
+├── ORCHESTRATOR_APP_PLAN.md     # 오케스트레이터 TUI/GUI 앱 개발 계획 (하네스 실측 매트릭스 포함)
 ├── presets/
 │   ├── default-routing.jsonc    # 5대 전문 역할 및 카테고리/난이도별 기본 모델 라우팅 + 다중 폴백 체인
 │   └── default-mcp.jsonc        # Gap-filling MCP 서버 카탈로그 (context7, grep_app, websearch)
@@ -44,17 +46,21 @@ asd-multiagent/
 │   │   ├── types.ts             # 전체 상수/타입(5대 하네스, 5대 역할, 3단계 난이도, 드라이버, 태스크, 토론 스키마)
 │   │   ├── config.ts            # 2-Path 레이아웃(~/.asd 및 <project>/.asd), 단일 core.db 경로, 라우팅 설정 로더
 │   │   ├── db.ts                # node:sqlite WAL 모드 4-테이블 SSOT 드라이버 (sessions, tasks, debates, session_drivers)
-│   │   ├── session-tracker.ts   # 프로젝트 탐색, 5대 하네스 로컬 CLI 세션 발견/추적, CLI ↔ ASD 세션 승격(Promote)/하강(Demote)
-│   │   ├── drivers.ts           # 멀티 드라이버 소유권(session_drivers), 0-Token 브리핑, 실시간 스트리밍 턴 실행기(runDriverTurn)
+│   │   ├── session-tracker.ts   # 프로젝트 탐색, 5대 하네스 로컬 CLI 세션 발견/추적, CLI ↔ ASD 세션 승격(Promote)/하강(Demote), `ses_` 세션 속성 보정 및 cli-recent 자가 치유
+│   │   ├── drivers.ts           # 멀티 드라이버 소유권(session_drivers), 0-Token 브리핑, 실시간 스트리밍 턴 실행기(runDriverTurn, 전 하네스 네이티브 JSONL 스트리밍)
 │   │   ├── transcripts.ts       # 5대 하네스 로컬 대화 기록 탐색 및 4분류(Thinking, Tool Use, Tool Result, 응답/유저) 파서
-│   │   ├── router.ts            # 4단계 모델 라우팅, 미설치 하네스 필터링, 다양성 리뷰어 선택, 자동 폴백 체인
+│   │   ├── router.ts            # 4단계 모델 라우팅, 미설치 하네스 필터링, 다양성 리뷰어 선택, 자동 폴백 체인, 프로젝트 라우팅 저장(saveProjectRoutingConfig)
 │   │   ├── spawner.ts           # 서브에이전트 프로세스 스폰, 시크릿 마스킹 로깅, 프로세스 트리 강제 종료, 아티팩트 마감
 │   │   ├── workspace.ts         # Git 베이스라인 보호, LIGHT 체크포인트/롤백, HEAVY 워크트리 및 크로스 프로세스 뮤텍스 병합
 │   │   ├── debate.ts            # 블라인드 교차 모델 적대적 토론 브로커 (Round 1 병렬 비평 + Round 2 심판)
 │   │   ├── policy.ts            # 1ms PreToolUse 경로/명령 가드, ASD_DRIVER_ID 바인딩 및 Stop 훅 3회 무진전 서킷 브레이커
 │   │   ├── render.ts            # .asd/PLAN.md 양방향 파서/렌더러, 전경 세션 제어, 실시간 progressBoard, summary.md 생성
 │   │   ├── redact.ts            # API 키/JWT/PEM/비밀번호 자동 마스킹 ([REDACTED])
-│   │   └── jsonc.ts             # 주석/후행 쉼표 안전 JSONC 파서 및 TOML 펜스 블록 매니저
+│   │   ├── jsonc.ts             # 주석/후행 쉼표 안전 JSONC 파서 및 TOML 펜스 블록 매니저
+│   │   ├── models.ts            # 5대 하네스 모델 병렬 탐색 + models-cache.json 디스크 캐시 (v2.4.3 cli/dashboard에서 이관)
+│   │   ├── session-services.ts  # 세션 메모 저장 및 대시보드 통합 스냅샷 수집 (v2.4.3 이관)
+│   │   ├── subagent-control.ts  # 서브에이전트 런타임 제어(kill/retry/fallback/custom/resume) (v2.4.3 이관)
+│   │   └── subagent-logs.ts     # 서브에이전트 아티팩트 로그 스캐너 (v2.4.3 cli/index에서 이관)
 │   ├── adapters/                # 5대 AI 하네스 어댑터 및 글로벌 인스톨러
 │   │   ├── claude-code.ts       # Claude Code (@cc) 어댑터 (~/.claude, ~/.claude.json)
 │   │   ├── opencode.ts          # OpenCode (@oc) 어댑터 (~/.config/opencode)
@@ -67,9 +73,9 @@ asd-multiagent/
 │   │   └── stdio-rpc.ts         # 비동기 JSON-RPC 2.0 stdio 트랜스포트
 │   ├── cli/                     # 통합 터미널 CLI 및 로컬 웹 대시보드
 │   │   ├── index.ts             # 14개 CLI 서브커맨드 엔트리포인트 (plan, dispatch, verify, debate, resume, sync, ui 등)
-│   │   └── dashboard.ts         # 한국어/영어 지원 Zero-Dependency 실시간 웹 대시보드 (http://127.0.0.1:3847)
+│   │   └── dashboard.ts         # 한국어/영어 지원 Zero-Dependency 실시간 웹 대시보드 (http://127.0.0.1:3847) — v2.4.3부터 데이터 서비스는 core/로 이관, 서버+UI 전용
 │   └── skills/                  # 5대 하네스에 공통 배포되는 슬래시 스킬 템플릿 (asd, asd-plan, asd-run, asd-debug, asd-debate, handoff)
-└── tests/                       # 26개 테스트 스위트, 총 321개 단위/통합 테스트
+└── tests/                       # 76개 테스트 스위트, 총 356개 단위/통합 테스트
 ```
 
 ---
@@ -106,7 +112,7 @@ ASD v2.4.0은 프로젝트 폴더 오염을 막고 멀티 프로젝트·멀티 �
 
 ### 4.1 공개 SDK 엔트리포인트 — [`src/index.ts`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/index.ts)
 외부 애플리케이션(`asd-gui` 등)이 `import { ... } from "agent-swarm-director"` 한 줄로 코어 전체 기능을 재사용할 수 있도록 모든 모듈을 re-export합니다.
-- `src/core/*` 전체 모듈, `src/adapters/*` 5대 어댑터 및 인스톨러, `src/mcp/server.ts` 오케스트레이션 핸들러(`handlePlan`, `handleDispatch`, `handleVerify`, `handleDebate`), `src/cli/index.ts` 헬퍼(`getAdapter`, `getLatestSession`, `scanSubagentLogs`, `runAsdLogs`, `runAsdClean`), `src/cli/dashboard.ts` 대시보드 서비스(`collectDashboardSnapshot`, `discoverHarnessModels`, `getModelsDiskCachePath`, `saveSessionMemo`, `saveProjectRoutingConfig`, `runSubagentControlAction`, `startDashboardServer`)를 공개합니다.
+- `src/core/*` 전체 모듈, `src/adapters/*` 5대 어댑터 및 인스톨러, `src/mcp/server.ts` 오케스트레이션 핸들러(`handlePlan`, `handleDispatch`, `handleVerify`, `handleDebate`), `src/cli/index.ts` 헬퍼(`getAdapter`, `getLatestSession`, `runAsdLogs`, `runAsdClean`), 그리고 대시보드 데이터 서비스(`collectDashboardSnapshot`, `discoverHarnessModels`, `getModelsDiskCachePath`, `saveSessionMemo`, `saveProjectRoutingConfig`, `runSubagentControlAction`, `scanSubagentLogs`)를 공개합니다. `startDashboardServer`는 v2.4.3부터 루트 엔트리에서 제외되었으며 서브패스 `agent-swarm-director/cli/dashboard.ts`로만 접근합니다.
 
 ---
 
@@ -266,14 +272,14 @@ Git 작업 트리 보호, `LIGHT` 체크포인트 커밋/롤백, `HEAVY` 워크�
 - [`runAsdResume(projectRoot, flags)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/cli/index.ts#L715-L790): 활성 ASD 세션을 하강(`demoteAsdSession`)시키고 원래 하네스의 대화형 CLI를 즉시 실행(또는 `--print`/`--json` 출력)합니다.
 
 #### ② [`src/cli/dashboard.ts`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/cli/dashboard.ts) (`asd ui` 상세 명세)
-외부 프런트엔드 빌드 도구 없이 `node:http`와 단일 인라인 HTML/CSS/JS로 동작하는 실시간 로컬 웹 대시보드(`http://127.0.0.1:3847`) 및 상태 서비스 모듈입니다.
-- **주요 백엔드 함수 및 HTTP 엔드포인트**:
-  - [`collectDashboardSnapshot(options?)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/cli/dashboard.ts#L1285-L1500) (`GET /api/state`): 현재 프로젝트의 세션, 태스크, 토론, 활성 드라이버, 서브에이전트 로그, 라우팅 설정, 하네스 설치 상태를 통합 스냅샷으로 반환합니다 (`worktreeStatusCache` 3.5초 TTL 캐시로 `git status --short` 반복 호출 병목 방지 및 `skipCliSpawn` 옵션 지원).
-  - [`discoverHarnessModels(forceRefresh?)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/cli/dashboard.ts#L225-L470) (`GET /api/models`, `POST /api/models/refresh`): 5대 하네스의 사용 가능 모델을 비동기 병렬(`Promise.all`)로 탐색하고 `~/.asd/state/models-cache.json`(10분 TTL)에 캐싱합니다.
-  - [`saveSessionMemo(projectRoot, sessionId, memo)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/cli/dashboard.ts#L500-L555) (`POST /api/session-memo`): SQLite `sessions.memo`와 `.asd/sessions/<id>/main.json`에 메모를 동시 저장합니다.
-  - [`saveProjectRoutingConfig(projectRoot, action, routingConfig?)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/cli/dashboard.ts#L560-L610) (`POST /api/routing`): 프로젝트 전용 `.asd/routing.jsonc`를 저장하거나 글로벌 기본값으로 초기화합니다.
-  - [`runSubagentControlAction(projectRoot, req)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/cli/dashboard.ts#L615-L685) (`POST /api/subagent-action`): 실행 중인 서브에이전트에 대해 `kill`(강제 종료), `retry`(동일 모델 재실행), `fallback`(다음 폴백 모델로 재실행), `custom`(지정 하네스·모델로 재실행)을 수행합니다.
-  - [`startDashboardServer(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/cli/dashboard.ts#L2400-L2530): 로컬 HTTP 서버를 기동합니다.
+외부 프런트엔드 빌드 도구 없이 `node:http`와 단일 인라인 HTML/CSS/JS로 동작하는 실시간 로컬 웹 대시보드(`http://127.0.0.1:3847`)입니다. v2.4.3부터 데이터 서비스(`collectDashboardSnapshot`, `discoverHarnessModels`, `saveSessionMemo`, `saveProjectRoutingConfig`, `runSubagentControlAction`, `scanSubagentLogs`)는 `src/core/`(`models.ts`, `session-services.ts`, `subagent-control.ts`, `subagent-logs.ts`, `router.ts`)로 이관되었으며 본 모듈은 HTTP 서버와 UI 렌더링만 담당합니다.
+- **HTTP 엔드포인트 → 코어 서비스 매핑**:
+  - `GET /api/state` → [`collectDashboardSnapshot()`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/session-services.ts) (`core/session-services.ts`): 세션·태스크·토론·드라이버·서브에이전트 로그·라우팅·하네스 상태 통합 스냅샷 (`worktreeStatusCache` 3.5초 TTL, `skipCliSpawn` 옵션 지원).
+  - `GET /api/models`, `POST /api/models/refresh` → [`discoverHarnessModels()`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/core/models.ts) (`core/models.ts`): 5대 하네스 모델 병렬 탐색 + `~/.asd/state/models-cache.json`(10분 TTL).
+  - `POST /api/session-memo` → `saveSessionMemo()` (`core/session-services.ts`): `sessions.memo`와 `main.json` 동시 저장.
+  - `POST /api/routing` → `saveProjectRoutingConfig()` (`core/router.ts`): 프로젝트 전용 `.asd/routing.jsonc` 저장/초기화.
+  - `POST /api/subagent-action` → `runSubagentControlAction()` (`core/subagent-control.ts`): `kill`/`retry`/`fallback`/`custom` 런타임 제어.
+  - [`startDashboardServer(options)`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/cli/dashboard.ts): 로컬 HTTP 서버를 기동합니다 (루트 SDK 엔트리 미노출, 서브패스 `cli/dashboard` 전용).
 
 ---
 
@@ -285,3 +291,5 @@ Git 작업 트리 보호, `LIGHT` 체크포인트 커밋/롤백, `HEAVY` 워크�
    - SQLite DB는 WAL + `BEGIN IMMEDIATE`와 `session_drivers` 테이블로 동시 접근에 안전하며 `HEAVY` 병합도 `.asd/merge.lock`으로 보호되지만, 하나의 워킹 트리에서 두 개의 `LIGHT` 트랙 디렉터가 동시에 파일을 직접 수정하면 Git 워킹 트리 경합이 발생할 수 있으므로 병렬 작업 시에는 `HEAVY` 트랙(워크트리 격리) 사용을 권장합니다.
 3. **Node.js 네이티브 TypeScript 실행 시 JSDoc 주석 주의**:
    - 하네스 `PreToolUse` 훅이 `node --no-warnings src/cli/index.ts hook pre-tool-use`를 직접 실행하므로, `src/` 내부 파일의 `/** ... */` 블록 주석 안에 경로 글로브 `/*` 또는 `*/`(예: `projects/*/*.jsonl`)를 적으면 주석이 조기 종료되어 구문 에러가 발생할 수 있습니다. 주석 내 경로 예시에는 `projects/<dir>/*.jsonl` 형태를 사용합니다.
+4. **Core–GUI 경계 원칙 (v2.4.3)**:
+   - Core는 **CLI + 코어 관리(계획, `asd ui` 대시보드, git worktree 등) + 최소 SDK/API**만 유지하며, 모든 UI·서버·렌더링은 GUI 리포(`asd-gui`) 소속입니다. `asd ui`는 기능 동결(확장 금지)이며, 신규 UI 기능은 GUI 리포에 구현합니다. 경계 위반 정리 및 판정 근거는 [`CORE_GUI_BOUNDARY_AUDIT.md`](./CORE_GUI_BOUNDARY_AUDIT.md)를 참조하세요.

@@ -1,12 +1,42 @@
-# 패치 노트 (`agent-swarm-director` / ASD v2.4.0)
+# 패치 노트 (`agent-swarm-director` / ASD v2.4.3)
 
 [English](./PATCH_NOTES.md) | **한국어** | [📖 README로 돌아가기](./README_ko.md) | [🏛️ 아키텍처 및 파일·함수 레퍼런스](./PROJECT_STATUS.md) | [🔌 외부 SDK 레퍼런스](./EXTERNAL_SDK_REFERENCE.md)
 
-**Agent Swarm Director (ASD v2.4.0)**의 초기 아키텍처 구축부터 최신 기능 업데이트까지의 전체 패치 내역을 최신순으로 정리한 문서입니다.
+**Agent Swarm Director (ASD v2.4.3)**의 초기 아키텍처 구축부터 최신 기능 업데이트까지의 전체 패치 내역을 최신순으로 정리한 문서입니다.
 
 ---
 
-## 1. 최신 주요 패치 (외부 GUI 연동 SDK, 오케스트레이션 & 성능 최적화 — v2.4.0)
+## 1. 하네스 네이티브 스트리밍, Core–GUI 경계 리팩터링 및 `ses_` 세션 속성 보정 (v2.4.3)
+
+### `v2.4.3` — 전 하네스 네이티브 JSONL 스트리밍, Core–GUI 경계 정리, `ses_` 세션 속성 가드
+- **Antigravity·Cursor 네이티브 스트리밍 (`runDriverTurn`)**:
+  - `buildHeadlessHarnessCommand` / `buildResumeHarnessCommand`(`src/core/session-tracker.ts`)에 `streaming` 옵션 추가: Antigravity(`agy --output-format stream-json`, ~25ms `step_update` 텍스트 델타), Cursor(`cursor-agent --output-format stream-json`, 톱레벨 `thinking` 델타 + `tool_call` 라이프사이클), Claude Code(`stream-json --verbose`)가 네이티브 이벤트 스트림을 직접 출력하도록 하고, `runDriverTurn`의 claude 전용 `--output-format` 후처리 치환을 제거했습니다.
+  - `parseDriverStreamLine`(`src/core/drivers.ts`)가 실측 검증된 Antigravity 스트림 스키마(`init`/`step_update` `text_delta`/`result`)와 Cursor 스키마(톱레벨 `thinking` 델타, `tool_call.<family>ToolCall` started/completed 및 `result.success|error` 추출)를 파싱하고, 일반 유저 프롬프트 에코를 스킵합니다.
+  - 배치 경로(서브에이전트, 토론)는 단일 페이로드 `--output-format json` 기본값을 유지합니다.
+- **Core–GUI 경계 리팩터링**:
+  - 대시보드 데이터 서비스 5종을 `src/cli/dashboard.ts`에서 `src/core/`로 이관: `models.ts`(`discoverHarnessModels`, `getModelsDiskCachePath`), `session-services.ts`(`saveSessionMemo`, `collectDashboardSnapshot`), `subagent-control.ts`(`runSubagentControlAction`), `subagent-logs.ts`(`scanSubagentLogs` — `src/cli/index.ts`가 re-export), 그리고 `saveProjectRoutingConfig`는 `src/core/router.ts`로 이관했습니다. `dashboard.ts`는 `asd ui` HTTP 서버 + 인라인 HTML만 유지합니다(−1,605줄).
+  - `src/index.ts` 루트 엔트리에서 `startDashboardServer`를 제외했습니다(서브패스 `agent-swarm-director/cli/dashboard.ts`는 유지).
+- **`ses_` 세션 속성 가드 및 `cli-recent.json` 자가 치유**:
+  - `extractHookSessionInfo`가 `ses_` 접두사 세션 ID(OpenCode 포맷)를 claude-code 기본값으로 보고하는 경우 — `oh-my-openagent` 플러그인 등 claude-style 훅 브리지가 `~/.claude/transcripts/`로 미러링하는 세션 — `harness: "opencode"`로 강제 보정합니다.
+  - `syncLocalHarnessTranscripts`가 매 실행마다 오표기 항목을 자가 치유하고 라벨 전환 충돌을 dedupe하며, Claude 스캐너는 `ses_*.jsonl` 미러를 스킵합니다.
+- **어댑터 견고성**: claude-code/opencode/codex/cursor 어댑터의 `buildInteractiveResumeCommand`가 빈 세션 ID에서 `--resume ""` 형태 플래그를 생성하지 않도록 가드했습니다.
+- **문서**: `CORE_GUI_BOUNDARY_AUDIT.md`(Core–GUI 경계 감사)와 `ORCHESTRATOR_APP_PLAN.md`(오케스트레이터 TUI/GUI 앱 계획)를 추가하고, `asd ui` 기능 동결 원칙(신규 UI 기능은 GUI 리포 소속)을 문서화했습니다.
+
+### `v2.4.2` — 라우터 v2.4.2 상향, `lightSubagents` 폴백, 토론 인터랙티브 선택 및 인스톨러 개선 (`4d7582e`..`a6ce1a9`)
+- `feat(router)` (`4d7582e`): v2.4.2 상향, `lightSubagents` 라우팅 스키마 폴백 추가, 레거시 `routing.jsonc` 자동 마이그레이션, `ROUTING_GUIDE.md` 추가.
+- `feat(debate)` (`be05774`): `/asd-debate` HEAVY 모드에서 인터랙티브 하네스/역할/카운트 선택.
+- `feat(installer)` (`dc42be3`): plan/dispatch/ui 저장 시 `routing.jsonc` 변경에 따른 에이전트 마크다운 모델 자동 갱신.
+- `fix(antigravity)` (`c6a2ff9`): agy 재개 시 `--conversation` 사용.
+- `refactor(installer)` (`2fe206c`): `syncHarnessConfigs`에서 하드코딩된 asd-runtime 스테이징 제거.
+- `docs(routing)` (`a6ce1a9`): 하네스별 모델 포맷 규칙 및 라이브 리로드 동작 문서화.
+
+### `v2.4.1` — 하네스 런타임 격리, 대시보드 게이트웨이 페어링 및 보안 리밸런스 (`661bff1`..`39ccca5`)
+- `chore` (`661bff1`): v2.4.1 상향 및 글로벌 하네스 런타임 격리(`Desktop/code/asd-runtime`).
+- 대시보드 게이트웨이 토큰 페어링 + `/api/state` 스캔 스로틀(F21/F22), `opencode.jsonc` 지원·중복 제거(F20), Codex TOML notify 루트 스코프 보장, `cli-recent.json` 프로세스 간 잠금(T7.3), 전원 실패 토론 `failed` 기록(F14), 전 하네스 PreToolUse 보안 리밸런스(T1.2), `lightSubagents` 라우팅 스키마 분리 헬퍼(T1.1), 전체 스위트 회귀 + `asd sync --force` / `asd clean` 검증(T4.1).
+
+---
+
+## 2. 최신 주요 패치 (외부 GUI 연동 SDK, 오케스트레이션 & 성능 최적화 — v2.4.0)
 
 ### `v2.4.0` — 대화 기록 4분류 파서, 실시간 스트리밍(`onEvent`), CLI ↔ ASD 세션 승격/하강, 5대 하네스 세션 통합 탐색 및 로딩 속도 최적화
 - **버전 `2.4.0` 상향 및 단일 DB 호환성 전환**:
@@ -78,7 +108,7 @@
 
 ---
 
-## 2. 보안 감사 수정, CLI 직접 실행 전환 및 안정화 패치
+## 3. 보안 감사 수정, CLI 직접 실행 전환 및 안정화 패치
 
 | 커밋 해시 | 주요 패치 내용 |
 | :--- | :--- |
@@ -102,7 +132,7 @@
 
 ---
 
-## 3. ASD v2.2 초기 코어 아키텍처 구축
+## 4. ASD v2.2 초기 코어 아키텍처 구축
 
 | 커밋 해시 | 주요 패치 내용 |
 | :--- | :--- |

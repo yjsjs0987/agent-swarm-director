@@ -1,6 +1,6 @@
-# ASD v2.4.0 외부 SDK 및 단일 DB 전환 통합 레퍼런스 (`EXTERNAL_SDK_REFERENCE.md`)
+# ASD v2.4.3 외부 SDK 및 단일 DB 전환 통합 레퍼런스 (`EXTERNAL_SDK_REFERENCE.md`)
 
-> **버전**: `2.4.0` (단일 공유 SQLite DB 및 v2.4.0 신규 SDK 통합본 — `2.3.x` 이하와 DB 비호환)  
+> **버전**: `2.4.3` (v2.4.0 단일 공유 DB 기반 — 전 하네스 네이티브 JSONL 스트리밍, Core–GUI 경계 리팩터링, `ses_` 세션 속성 보정 반영 — `2.3.x` 이하와 DB 비호환)  
 > **대상**: [**ASD-Nexus (`asd-gui`)**](https://github.com/yjsjs0987/ASD-Nexus) 등 외부 애플리케이션 및 라이브러리 연동 개발자  
 > **런타임 의존성**: `0개` (`dependencies: {}`, 순수 Node.js `>=22.13.0` 내장 모듈만 사용)  
 > **메인 엔트리포인트**: [`src/index.ts`](file:///C:/Users/yjsjs0987/Desktop/Projects/asd-multiagent/src/index.ts) (`import { ... } from "agent-swarm-director"`)
@@ -159,7 +159,7 @@ const result: RunDriverTurnResult = await runDriverTurn({
   model: "claude-sonnet-4-6",
   prompt: "현재 프로젝트의 세션 트래커 구조를 분석해줘.",
   source: "gui",
-  streamJson: true, // 기본값 true: Claude/Cursor(--output-format stream-json --verbose), Codex(--json), OpenCode(--format json) 자동 활성화
+  streamJson: true, // 기본값 true: 전 하네스 이벤트 스트리밍 — Claude(--output-format stream-json --verbose), Cursor/Antigravity(--output-format stream-json), Codex(--json), OpenCode(--format json). false면 Claude/Cursor/Antigravity는 최종 json 단일 응답
   onEvent: (event: DriverStreamEvent) => {
     switch (event.category) {
       case "thinking":
@@ -269,14 +269,18 @@ import * as dashboard from "agent-swarm-director/cli/dashboard";
 
 | 모듈 경로 | 대표 공개 함수 및 클래스 |
 | :--- | :--- |
-| **`core/types`** | `ASD_VERSION` (`"2.4.0"`), `HARNESS_IDS`, `AGENT_ROLES`, `TASK_CATEGORIES`, `DIFFICULTY_TIERS`, `TASK_TRACKS`, `TASK_STATUSES`, `SESSION_PHASES`, `DRIVER_SOURCES` 및 전체 타입 |
+| **`core/types`** | `ASD_VERSION` (`"2.4.3"` — package.json에서 런타임 파생), `HARNESS_IDS`, `AGENT_ROLES`, `TASK_CATEGORIES`, `DIFFICULTY_TIERS`, `TASK_TRACKS`, `TASK_STATUSES`, `SESSION_PHASES`, `DRIVER_SOURCES` 및 전체 타입 |
 | **`core/config`** | `resolveAsdPaths(root, home?)`, `resolveHomeDir(explicit?)`, `ensureProjectInitialized`, `loadRoutingConfig`, `loadMcpCatalog`, `checkForRemoteUpdate`, `computeProjectHash` |
 | **`core/db`** | `openProjectDb(root, home?)`, `SqliteDriver(dbPath, projectRoot?)`, `generateAsdSessionId`, `isValidAsdSessionId` — `findSessionByHarnessSessionId(sid, harness?)` *(v2.4.0)*, `deleteSession(sessionId)` *(v2.4.0)* 및 `sessions` / `tasks` / `debates` / `session_drivers` 전체 CRUD |
-| **`core/session-tracker`** | `discoverProjectCliSessions` *(v2.4.0)*, `promoteCliSessionToAsd` *(v2.4.0)*, `unlinkHarnessSessionFromAsdSession` *(v2.4.0)*, `buildSessionDemotion`, `listKnownProjects` *(v2.4.0 캐시 최적화)*, `syncLocalHarnessTranscripts` *(v2.4.0 4하네스 확장 + `mtimeMs` 캐시)*, `linkHarnessSessionToAsdSession`, `readCliRecentSessions`, `recordCliRecentSession`, `buildHeadlessHarnessCommand`, `buildResumeHarnessCommand`, `buildInteractiveResumeHarnessCommand`, `extractHookSessionInfo` |
-| **`core/drivers`** | `runDriverTurn` *(v2.4.0 `onEvent` 스트리밍)*, `parseDriverStreamLine` *(v2.4.0)*, `attachDriver`, `detachDriver` *(driverId 또는 sessionId 지원)*, `getActiveDriver`, `listDrivers`, `buildDriverBriefing`, `syncSessionDriversToMainJson` |
+| **`core/session-tracker`** | `discoverProjectCliSessions` *(v2.4.0)*, `promoteCliSessionToAsd` *(v2.4.0)*, `unlinkHarnessSessionFromAsdSession` *(v2.4.0)*, `buildSessionDemotion`, `listKnownProjects` *(v2.4.0 캐시 최적화)*, `syncLocalHarnessTranscripts` *(v2.4.0 4하네스 확장 + `mtimeMs` 캐시, v2.4.3 cli-recent 자가 치유)*, `linkHarnessSessionToAsdSession`, `readCliRecentSessions`, `recordCliRecentSession`, `buildHeadlessHarnessCommand`, `buildResumeHarnessCommand` *(v2.4.3 `streaming` 옵션)*, `buildInteractiveResumeHarnessCommand`, `extractHookSessionInfo` *(v2.4.3 `ses_` 하네스 보정)* |
+| **`core/drivers`** | `runDriverTurn` *(v2.4.3 전 하네스 네이티브 JSONL 스트리밍 — `onEvent` + `streaming`)*, `parseDriverStreamLine` *(v2.4.3 agy `step_update`/cursor `tool_call` 실측 스키마)*, `attachDriver`, `detachDriver` *(driverId 또는 sessionId 지원)*, `getActiveDriver`, `listDrivers`, `buildDriverBriefing`, `syncSessionDriversToMainJson` |
 | **`core/transcripts`** | `readHarnessTranscript` *(v2.4.0 4분류 고도화)*, `locateHarnessTranscript` |
 | **`core/spawner`** | `spawnSubagent`, `executeHarnessProcess`, `killProcessTree`, `resolveSpawnCommand`, `finalizeSubagentArtifacts` |
-| **`core/router`** | `resolveRoute`, `runWithFallbacks`, `escalateTaskRoute`, `resolveFallback`, `detectAvailableCliHarnesses`, `selectDiverseReviewer` |
+| **`core/router`** | `resolveRoute`, `runWithFallbacks`, `escalateTaskRoute`, `resolveFallback`, `detectAvailableCliHarnesses`, `selectDiverseReviewer`, `saveProjectRoutingConfig` *(v2.4.3 cli/dashboard에서 이관)* |
+| **`core/models`** *(v2.4.3)* | `discoverHarnessModels`, `getModelsDiskCachePath` |
+| **`core/session-services`** *(v2.4.3)* | `saveSessionMemo`, `collectDashboardSnapshot` |
+| **`core/subagent-control`** *(v2.4.3)* | `runSubagentControlAction` |
+| **`core/subagent-logs`** *(v2.4.3)* | `scanSubagentLogs`, `SubagentLogRecord` |
 | **`core/workspace`** | `prepareBaseline`, `createTaskWorktree`, `verifyAndCommitLightTask`, `verifyAndMergeHeavyTask`, `approvePendingTask`, `rejectPendingTask`, `rollbackLightChanges`, `recoverOrphanedTasks`, `isPidAlive`, `getChangedFiles`, `checkChangedFilesAndSecrets`, `withMergeLock`, `runGit` |
 | **`core/render`** | `renderPlanMd`, `parsePlanMd`, `syncPlanFromMd`, `setForegroundSession`, `getForegroundSessionId`, `renderProgressBoard`, `renderSessionSummaryMd`, `atomicWriteFileSync` |
 | **`core/debate`** | `runDebateBroker`, `synthesizeInsightVerdict`, `buildRound1Prompt`, `buildRound2Prompt`, `formatDebateAcceptance` |
@@ -284,8 +288,8 @@ import * as dashboard from "agent-swarm-director/cli/dashboard";
 | **`core/redact` & `jsonc`** | `redactSecrets`, `containsSecrets`, `parseJsonc`, `stripJsoncComments`, `upsertTomlFencedBlock`, `removeTomlFencedBlock` |
 | **`adapters/*`** | `ClaudeCodeAdapter`, `OpenCodeAdapter`, `CodexAdapter`, `AntigravityAdapter`, `CursorAdapter`, `syncGlobalHarnesses`, `uninstallGlobalHarnesses`, `runDoctor` |
 | **`mcp/server`** | `AsdMcpServer`, `ASD_MCP_TOOLS`, `handlePlan`, `handleDispatch`, `handleVerify`, `handleDebate` |
-| **`cli/dashboard`** | `startDashboardServer`, `collectDashboardSnapshot`, `discoverHarnessModels` *(v2.4.0 디스크 캐시)*, `getModelsDiskCachePath` *(v2.4.0)*, `saveSessionMemo`, `saveProjectRoutingConfig`, `runSubagentControlAction` |
-| **`cli/index`** | `getAdapter`, `getLatestSession`, `scanSubagentLogs`, `runAsdLogs`, `runAsdClean` |
+| **`cli/dashboard`** | `startDashboardServer` *(v2.4.3부터 루트 엔트리 미노출 — `asd ui` 서버+UI 전용, 데이터 서비스는 core/로 이관)* |
+| **`cli/index`** | `getAdapter`, `getLatestSession`, `scanSubagentLogs` *(v2.4.3 core/subagent-logs re-export)*, `runAsdLogs`, `runAsdClean` |
 
 ---
 
