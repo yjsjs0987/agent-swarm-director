@@ -6,9 +6,11 @@ import * as path from "node:path";
 import {
   discoverHarnessModels,
   getModelsDiskCachePath,
+} from "../src/core/models.ts";
+import {
   collectDashboardSnapshot,
   resetDashboardTranscriptSyncThrottle,
-} from "../src/cli/dashboard.ts";
+} from "../src/core/session-services.ts";
 
 function makeTempDir(prefix = "asd-dashboard-test-"): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));

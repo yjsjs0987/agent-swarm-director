@@ -11,7 +11,7 @@ import {
   prepareBaseline,
   runGit,
 } from "../src/core/workspace.ts";
-import { runSubagentControlAction } from "../src/cli/dashboard.ts";
+import { runSubagentControlAction } from "../src/core/subagent-control.ts";
 
 function makeTempGitRepo(prefix = "asd-sub-resume-"): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));

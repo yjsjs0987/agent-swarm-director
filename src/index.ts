@@ -21,6 +21,10 @@ export * from "./core/redact.ts";
 export * from "./core/transcripts.ts";
 export * from "./core/jsonc.ts";
 export * from "./core/debate.ts";
+export * from "./core/models.ts";
+export * from "./core/session-services.ts";
+export * from "./core/subagent-control.ts";
+export * from "./core/subagent-logs.ts";
 
 export * from "./adapters/claude-code.ts";
 export * from "./adapters/opencode.ts";
@@ -39,25 +43,26 @@ export {
 } from "./mcp/server.ts";
 
 export {
-  scanSubagentLogs,
   runAsdLogs,
   runAsdClean,
   getAdapter,
   getLatestSession,
-  type SubagentLogRecord,
   type CleanResult,
 } from "./cli/index.ts";
+export { scanSubagentLogs, type SubagentLogRecord } from "./core/subagent-logs.ts";
 
 export {
   collectDashboardSnapshot,
-  discoverHarnessModels,
-  getModelsDiskCachePath,
   saveSessionMemo,
-  saveProjectRoutingConfig,
-  runSubagentControlAction,
-  startDashboardServer,
   type DashboardSnapshot,
   type DashboardStateSnapshot,
   type DashboardServerHandle,
   type HarnessModelCatalog,
-} from "./cli/dashboard.ts";
+} from "./core/session-services.ts";
+export {
+  discoverHarnessModels,
+  getModelsDiskCachePath,
+  type HarnessModelCatalog,
+} from "./core/models.ts";
+export { runSubagentControlAction } from "./core/subagent-control.ts";
+export { saveProjectRoutingConfig } from "./core/router.ts";

@@ -7,8 +7,8 @@ import { openProjectDb } from "../src/core/db.ts";
 import { finalizeSubagentArtifacts, type CommandRunner } from "../src/core/spawner.ts";
 import { ensureGitUserIdentity, prepareBaseline, rejectPendingTask, runGit } from "../src/core/workspace.ts";
 import { AsdMcpServer } from "../src/mcp/server.ts";
-import { scanSubagentLogs } from "../src/cli/index.ts";
-import { runSubagentControlAction } from "../src/cli/dashboard.ts";
+import { scanSubagentLogs } from "../src/core/subagent-logs.ts";
+import { runSubagentControlAction } from "../src/core/subagent-control.ts";
 
 function makeTempGitProject(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "asd-cr09-test-"));

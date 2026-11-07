@@ -81,6 +81,8 @@ describe("GUI Prerequisites & Session Architecture", () => {
     const corePlanTs = await import("agent-swarm-director/core/plan.ts");
     const adaptersInstaller = await import("agent-swarm-director/adapters/installer");
     const cliDashboard = await import("agent-swarm-director/cli/dashboard");
+    const coreSessionServices = await import("agent-swarm-director/core/session-services");
+    const coreSessionServicesTs = await import("agent-swarm-director/core/session-services.ts");
     const mcpServer = await import("agent-swarm-director/mcp/server");
 
     assert.equal(typeof coreDb.openProjectDb, "function");
@@ -88,7 +90,12 @@ describe("GUI Prerequisites & Session Architecture", () => {
     assert.equal(typeof corePlan.renderPlanMd, "function");
     assert.equal(corePlan.renderPlanMd, corePlanTs.renderPlanMd);
     assert.equal(typeof adaptersInstaller.syncHarnessConfigs, "function");
-    assert.equal(typeof cliDashboard.collectDashboardSnapshot, "function");
+    assert.equal(typeof cliDashboard.startDashboardServer, "function");
+    assert.equal(typeof coreSessionServices.collectDashboardSnapshot, "function");
+    assert.equal(
+      coreSessionServices.collectDashboardSnapshot,
+      coreSessionServicesTs.collectDashboardSnapshot
+    );
     assert.equal(typeof mcpServer.AsdMcpServer, "function");
   });
 
